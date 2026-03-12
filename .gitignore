@@ -1,0 +1,16 @@
+node_modules
+dist
+build
+coverage
+.env
+.DS_Store
+*.log
+.idea
+
+# Ignore all files in the public directory except for index.html
+/public/*   
+!/public/index.html
+
+
+
+
