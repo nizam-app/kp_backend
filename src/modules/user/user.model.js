@@ -33,6 +33,26 @@ const fleetProfileSchema = new Schema(
   { _id: false }
 );
 
+const mechanicLastKnownLocationSchema = new Schema(
+  {
+    type: {
+      type: String,
+      enum: ["Point"],
+    },
+    coordinates: {
+      type: [Number],
+      validate: {
+        validator: (value) =>
+          !value ||
+          (Array.isArray(value) && (value.length === 0 || value.length === 2)),
+        message: "Location must be [lng, lat]",
+      },
+    },
+    updatedAt: Date,
+  },
+  { _id: false }
+);
+
 const mechanicProfileSchema = new Schema(
   {
     profilePhotoUrl: { type: String, trim: true },
@@ -74,19 +94,8 @@ const mechanicProfileSchema = new Schema(
       reviewNotes: { type: String, trim: true },
     },
     lastKnownLocation: {
-      type: {
-        type: String,
-        enum: ["Point"],
-      },
-      coordinates: {
-        type: [Number],
-        validate: {
-          validator: (value) =>
-            !value || (Array.isArray(value) && value.length === 2),
-          message: "Location must be [lng, lat]",
-        },
-      },
-      updatedAt: Date,
+      type: mechanicLastKnownLocationSchema,
+      default: undefined,
     },
     rating: {
       average: { type: Number, min: 0, max: 5, default: 0 },
@@ -168,11 +177,10 @@ userSchema.index({ "mechanicProfile.lastKnownLocation": "2dsphere" });
 userSchema.index({ role: 1, status: 1 });
 userSchema.index({ "mechanicProfile.verification.status": 1, status: 1 });
 
-userSchema.pre("save", async function (next) {
-  if (!this.isModified("password")) return next();
+userSchema.pre("save", async function () {
+  if (!this.isModified("password")) return;
   this.password = await bcrypt.hash(this.password, 12);
   if (!this.isNew) this.passwordChangedAt = new Date();
-  next();
 });
 
 userSchema.methods.comparePassword = function (candidatePassword) {

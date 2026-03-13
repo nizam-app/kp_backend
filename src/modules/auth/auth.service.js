@@ -105,7 +105,7 @@ const applyRoleProfile = (role, payload) => {
   };
 };
 
-export const registerUser = async (payload) => {
+export const registerUser = async (payload = {}) => {
   const { email, password, role, confirmPassword } = payload;
   if (!email || !password || !role) {
     throw new AppError("email, password, role are required", 400);
@@ -135,7 +135,7 @@ export const registerUser = async (payload) => {
   return { user: sanitizeUser(user), accessToken, refreshToken, nextStep };
 };
 
-export const loginUser = async ({ email, password }) => {
+export const loginUser = async ({ email, password } = {}) => {
   if (!email || !password) {
     throw new AppError("email and password are required", 400);
   }
@@ -158,7 +158,7 @@ export const loginUser = async ({ email, password }) => {
   return { user: sanitizeUser(user), accessToken, refreshToken, nextStep };
 };
 
-export const forgotPassword = async ({ email }) => {
+export const forgotPassword = async ({ email } = {}) => {
   if (!email) throw new AppError("email is required", 400);
 
   const user = await User.findOne({ email: email.toLowerCase() }).select(
@@ -181,7 +181,7 @@ export const forgotPassword = async ({ email }) => {
   };
 };
 
-export const resetPassword = async ({ token, newPassword }) => {
+export const resetPassword = async ({ token, newPassword } = {}) => {
   if (!token || !newPassword) {
     throw new AppError("token and newPassword are required", 400);
   }
@@ -204,7 +204,7 @@ export const resetPassword = async ({ token, newPassword }) => {
   return { message: "Password reset successful" };
 };
 
-export const refreshAccessToken = async ({ refreshToken }) => {
+export const refreshAccessToken = async ({ refreshToken } = {}) => {
   if (!refreshToken) throw new AppError("refreshToken is required", 400);
 
   const decoded = verifyRefreshToken(refreshToken);
@@ -222,7 +222,7 @@ export const refreshAccessToken = async ({ refreshToken }) => {
   return tokens;
 };
 
-export const logoutUser = async ({ refreshToken }, authUser) => {
+export const logoutUser = async ({ refreshToken } = {}, authUser) => {
   if (!refreshToken) throw new AppError("refreshToken is required", 400);
 
   const decoded = verifyRefreshToken(refreshToken);
