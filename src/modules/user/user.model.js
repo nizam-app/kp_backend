@@ -3,9 +3,11 @@ import bcrypt from "bcryptjs";
 import mongoose from "mongoose";
 import {
   MECHANIC_AVAILABILITY,
+  MECHANIC_BUSINESS_TYPE,
   MECHANIC_VERIFICATION_STATUS,
   USER_STATUS,
   mechanicAvailabilityValues,
+  mechanicBusinessTypeValues,
   roleValues,
   userStatusValues,
   verificationStatusValues,
@@ -34,13 +36,21 @@ const fleetProfileSchema = new Schema(
 const mechanicProfileSchema = new Schema(
   {
     profilePhotoUrl: { type: String, trim: true },
+    businessType: {
+      type: String,
+      enum: mechanicBusinessTypeValues,
+      default: MECHANIC_BUSINESS_TYPE.SOLE_TRADER,
+    },
     displayName: { type: String, trim: true },
     businessName: { type: String, trim: true },
     phone: { type: String, trim: true },
     baseLocationText: { type: String, trim: true },
+    basePostcode: { type: String, trim: true },
     hourlyRate: { type: Number, min: 0 },
     emergencyRate: { type: Number, min: 0 },
+    emergencySurcharge: { type: Number, min: 0 },
     callOutFee: { type: Number, min: 0 },
+    rateCurrency: { type: String, trim: true, default: "ZAR" },
     serviceRadiusMiles: { type: Number, min: 1, default: 25 },
     skills: {
       type: [String],

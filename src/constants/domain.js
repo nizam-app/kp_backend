@@ -24,6 +24,11 @@ export const MECHANIC_AVAILABILITY = Object.freeze({
   OFFLINE: "OFFLINE",
 });
 
+export const MECHANIC_BUSINESS_TYPE = Object.freeze({
+  SOLE_TRADER: "SOLE_TRADER",
+  COMPANY: "COMPANY",
+});
+
 export const JOB_STATUS = Object.freeze({
   POSTED: "POSTED",
   QUOTING: "QUOTING",
@@ -74,6 +79,7 @@ export const verificationStatusValues = Object.values(
   MECHANIC_VERIFICATION_STATUS
 );
 export const mechanicAvailabilityValues = Object.values(MECHANIC_AVAILABILITY);
+export const mechanicBusinessTypeValues = Object.values(MECHANIC_BUSINESS_TYPE);
 export const jobStatusValues = Object.values(JOB_STATUS);
 export const quoteStatusValues = Object.values(QUOTE_STATUS);
 export const urgencyValues = Object.values(JOB_URGENCY);

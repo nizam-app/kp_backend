@@ -37,22 +37,39 @@ export const updateOwnProfile = async (user, payload) => {
 
   if (user.role === "MECHANIC") {
     const patch = filterObject(payload, [
+      "businessType",
       "displayName",
       "businessName",
       "phone",
       "baseLocationText",
+      "basePostcode",
       "hourlyRate",
       "emergencyRate",
+      "emergencySurcharge",
       "callOutFee",
+      "callOutCharge",
+      "rateCurrency",
       "serviceRadiusMiles",
+      "coverageRadius",
       "skills",
       "availability",
       "lastKnownLocation",
       "profileCompleted",
+      "profilePhotoUrl",
     ]);
+
+    const normalizedPatch = {
+      ...patch,
+      callOutFee: patch.callOutCharge ?? patch.callOutFee,
+      serviceRadiusMiles: patch.coverageRadius ?? patch.serviceRadiusMiles,
+    };
+
+    delete normalizedPatch.callOutCharge;
+    delete normalizedPatch.coverageRadius;
+
     user.mechanicProfile = {
       ...(user.mechanicProfile || {}),
-      ...patch,
+      ...normalizedPatch,
     };
   }
 

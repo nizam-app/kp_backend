@@ -7,6 +7,7 @@ import {
   verifyRefreshToken,
 } from "../../utils/token.js";
 import {
+  MECHANIC_BUSINESS_TYPE,
   MECHANIC_VERIFICATION_STATUS,
   ROLES,
   USER_STATUS,
@@ -19,6 +20,21 @@ const hashToken = (token) =>
 const assertRoleAllowed = (role) => {
   if (![ROLES.FLEET, ROLES.MECHANIC].includes(role)) {
     throw new AppError("Invalid role. Allowed: FLEET, MECHANIC", 400);
+  }
+};
+
+const assertMechanicPayload = (payload) => {
+  if (!payload.fullName && !payload.displayName) {
+    throw new AppError("fullName is required for mechanic registration", 400);
+  }
+  if (!payload.phone) {
+    throw new AppError("phone is required for mechanic registration", 400);
+  }
+  if (
+    payload.businessType &&
+    !Object.values(MECHANIC_BUSINESS_TYPE).includes(payload.businessType)
+  ) {
+    throw new AppError("Invalid mechanic businessType", 400);
   }
 };
 
@@ -65,14 +81,21 @@ const applyRoleProfile = (role, payload) => {
 
   return {
     mechanicProfile: {
+      businessType:
+        payload.businessType || MECHANIC_BUSINESS_TYPE.SOLE_TRADER,
       displayName: payload.displayName || payload.fullName,
-      businessName: payload.businessName,
+      businessName: payload.businessName || payload.companyName,
       phone: payload.phone,
       baseLocationText: payload.baseLocationText,
+      basePostcode: payload.basePostcode,
       hourlyRate: payload.hourlyRate,
       emergencyRate: payload.emergencyRate,
-      callOutFee: payload.callOutFee,
-      serviceRadiusMiles: payload.serviceRadiusMiles,
+      emergencySurcharge:
+        payload.emergencySurcharge ?? payload.emergencyRate,
+      callOutFee: payload.callOutCharge ?? payload.callOutFee,
+      rateCurrency: payload.rateCurrency || "ZAR",
+      serviceRadiusMiles: payload.coverageRadius ?? payload.serviceRadiusMiles,
+      profilePhotoUrl: payload.profilePhotoUrl,
       skills: payload.skills,
       verification: {
         status: MECHANIC_VERIFICATION_STATUS.SUBMITTED,
@@ -92,6 +115,7 @@ export const registerUser = async (payload) => {
   }
 
   assertRoleAllowed(role);
+  if (role === ROLES.MECHANIC) assertMechanicPayload(payload);
 
   const existing = await User.findOne({ email: email.toLowerCase() });
   if (existing) throw new AppError("Email already in use", 409);
