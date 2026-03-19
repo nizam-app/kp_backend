@@ -3,6 +3,7 @@ import { ROLES, JOB_STATUS, QUOTE_STATUS } from "../../constants/domain.js";
 import { Job } from "./job.model.js";
 import { Quote } from "../quote/quote.model.js";
 import { JobEvent } from "../jobEvent/jobEvent.model.js";
+import { JobLocationPing } from "../jobLocationPing/jobLocationPing.model.js";
 
 const toObjectIdString = (value) => value?.toString();
 
@@ -75,6 +76,9 @@ export const createJob = async (payload, fleetUser) => {
   if (!payload.title || !payload.description) {
     throw new AppError("title and description are required", 400);
   }
+  if (!fleetUser?.fleetProfile?.profileCompleted) {
+    throw new AppError("Complete your profile before posting a job", 400);
+  }
 
   const job = await Job.create({
     jobCode: await generateJobCode(),
@@ -134,6 +138,28 @@ export const listJobs = async (user, query) => {
   if (user.role === ROLES.MECHANIC) {
     if (`${query.feed}` === "true") {
       filter.status = { $in: [JOB_STATUS.POSTED, JOB_STATUS.QUOTING] };
+      if (query.lat && query.lng) {
+        const lat = Number(query.lat);
+        const lng = Number(query.lng);
+        const radiusMiles = Number(query.radiusMiles || query.radius || 15);
+        if (Number.isFinite(lat) && Number.isFinite(lng) && Number.isFinite(radiusMiles)) {
+          filter.location = {
+            $near: {
+              $geometry: { type: "Point", coordinates: [lng, lat] },
+              $maxDistance: Math.max(radiusMiles, 1) * 1609.34,
+            },
+          };
+        }
+      }
+      if (query.issueType) {
+        filter.issueType = { $in: `${query.issueType}`.split(",") };
+      }
+      if (query.minPayout) {
+        const min = Number(query.minPayout);
+        if (Number.isFinite(min)) {
+          filter.estimatedPayout = { $gte: min };
+        }
+      }
     } else if (query.tab === "completed") {
       filter.assignedMechanic = user._id;
       filter.status = JOB_STATUS.COMPLETED;
@@ -353,3 +379,77 @@ export const cancelJob = async (jobId, fleetUser, payload = {}) => {
     },
   };
 };
+
+
+export const getJobTimeline = async (jobId, user) => {
+  await getJobByIdForUser(jobId, user);
+  return JobEvent.find({ job: jobId })
+    .sort({ createdAt: -1 })
+    .lean();
+};
+
+export const createJobLocationPing = async (jobId, user, payload) => {
+  const job = await Job.findById(jobId);
+  if (!job) throw new AppError("Job not found", 404);
+  ensureAssignedMechanic(job, user._id);
+
+  const { lat, lng, heading, speed, accuracy, etaMinutes } = payload || {};
+  const latNum = Number(lat);
+  const lngNum = Number(lng);
+  if (!Number.isFinite(latNum) || !Number.isFinite(lngNum)) {
+    throw new AppError("lat and lng are required", 400);
+  }
+
+  const point = { type: "Point", coordinates: [lngNum, latNum] };
+  const now = new Date();
+
+  await JobLocationPing.create({
+    job: job._id,
+    mechanic: user._id,
+    point,
+    heading,
+    speed,
+    accuracy,
+    pingedAt: now,
+  });
+
+  job.tracking = {
+    ...(job.tracking || {}),
+    latestMechanicLocation: {
+      point,
+      heading,
+      speed,
+      accuracy,
+      updatedAt: now,
+    },
+    etaMinutes: Number.isFinite(Number(etaMinutes))
+      ? Number(etaMinutes)
+      : job.tracking?.etaMinutes,
+  };
+
+  await job.save();
+
+  await createJobEvent({
+    jobId: job._id,
+    actorId: user._id,
+    type: "LOCATION_PING",
+    payload: {
+      lat: latNum,
+      lng: lngNum,
+      heading,
+      speed,
+      accuracy,
+      etaMinutes,
+    },
+  });
+
+  return {
+    ok: true,
+    updatedAt: now,
+  };
+};
+
+
+
+
+

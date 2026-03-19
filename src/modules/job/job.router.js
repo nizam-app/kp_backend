@@ -11,6 +11,8 @@ import {
   listJobsController,
   startJourneyController,
   startWorkController,
+  jobLocationPingController,
+  jobTimelineController,
 } from "./job.controller.js";
 import {
   listJobQuotesController,
@@ -57,6 +59,16 @@ router.patch(
   catchAsync(approveCompletionController)
 );
 
+
+router.post(
+  "/:jobId/location-pings",
+  catchAsync(authorize(ROLES.MECHANIC)),
+  catchAsync(jobLocationPingController)
+);
+router.get(
+  "/:jobId/timeline",
+  catchAsync(jobTimelineController)
+);
 router.post(
   "/:jobId/quotes",
   catchAsync(authorize(ROLES.MECHANIC)),
@@ -69,3 +81,5 @@ router.get(
 );
 
 export default router;
+
+

@@ -6,6 +6,8 @@ import {
   completeJobWork,
   createJob,
   getJobByIdForUser,
+  getJobTimeline,
+  createJobLocationPing,
   listJobs,
   startJobWork,
   startJourney,
@@ -84,3 +86,20 @@ export const cancelJobController = async (req, res) => {
     data: result,
   });
 };
+
+export const jobTimelineController = async (req, res) => {
+  const timeline = await getJobTimeline(req.params.jobId, req.user);
+  return sendResponse(res, {
+    message: "Job timeline fetched",
+    data: timeline,
+  });
+};
+
+export const jobLocationPingController = async (req, res) => {
+  const result = await createJobLocationPing(req.params.jobId, req.user, req.body);
+  return sendResponse(res, {
+    message: "Location ping recorded",
+    data: result,
+  });
+};
+
