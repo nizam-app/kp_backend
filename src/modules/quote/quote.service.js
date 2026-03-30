@@ -8,6 +8,58 @@ import { JobEvent } from "../jobEvent/jobEvent.model.js";
 const now = () => new Date();
 const sessionOptions = (session) => (session ? { session } : {});
 
+const quoteBreakdown = (quote) => {
+  const total = Number(quote?.amount) || 0;
+  const callOutFee = Math.round(total * 0.2);
+  const parts = 0;
+  const labour = Math.max(total - callOutFee - parts, 0);
+  return { labour, callOutFee, parts, total, currency: quote?.currency || "GBP" };
+};
+
+const serializeQuote = (quote) => ({
+  _id: quote._id,
+  amount: quote.amount,
+  notes: quote.notes || null,
+  availabilityType: quote.availabilityType,
+  scheduledAt: quote.scheduledAt || null,
+  etaMinutes: quote.etaMinutes ?? null,
+  currency: quote.currency,
+  status: quote.status,
+  expiresAt: quote.expiresAt || null,
+  acceptedAt: quote.acceptedAt || null,
+  declinedAt: quote.declinedAt || null,
+  expiredAt: quote.expiredAt || null,
+  createdAt: quote.createdAt,
+  breakdown: quoteBreakdown(quote),
+  mechanic: quote.mechanic
+    ? {
+        _id: quote.mechanic._id || quote.mechanic,
+        email: quote.mechanic.email || null,
+        displayName: quote.mechanic.mechanicProfile?.displayName || null,
+        phone: quote.mechanic.mechanicProfile?.phone || null,
+        rating: quote.mechanic.mechanicProfile?.rating?.average ?? null,
+        jobsDone: quote.mechanic.mechanicProfile?.stats?.jobsDone ?? null,
+        responseMinutesAvg: quote.mechanic.mechanicProfile?.stats?.responseMinutesAvg ?? null,
+        verified:
+          ["APPROVED", "SUBMITTED", "UNDER_REVIEW"].includes(
+            quote.mechanic.mechanicProfile?.verification?.status
+          ),
+      }
+    : null,
+  job: quote.job
+    ? {
+        _id: quote.job._id || quote.job,
+        jobCode: quote.job.jobCode || null,
+        title: quote.job.title || null,
+        description: quote.job.description || null,
+        urgency: quote.job.urgency || null,
+        status: quote.job.status || null,
+        location: quote.job.location || null,
+        vehicle: quote.job.vehicle || null,
+      }
+    : null,
+});
+
 const expireWaitingQuotes = async (filter = {}, session = null) =>
   Quote.updateMany(
     {
@@ -15,7 +67,12 @@ const expireWaitingQuotes = async (filter = {}, session = null) =>
       status: QUOTE_STATUS.WAITING,
       expiresAt: { $lte: now() },
     },
-    { $set: { status: QUOTE_STATUS.EXPIRED } },
+    {
+      $set: {
+        status: QUOTE_STATUS.EXPIRED,
+        expiredAt: now(),
+      },
+    },
     sessionOptions(session)
   );
 
@@ -49,6 +106,15 @@ const ensureFleetJobOwner = async (jobId, fleetUserId) => {
   return job;
 };
 
+const ensureQuoteAccess = (quote, user) => {
+  if (!quote) throw new AppError("Quote not found", 404);
+  if (user.role === "ADMIN") return;
+  const fleetId = quote.fleet?._id?.toString?.() || quote.fleet?.toString?.();
+  const mechanicId = quote.mechanic?._id?.toString?.() || quote.mechanic?.toString?.();
+  if ([fleetId, mechanicId].includes(user._id.toString())) return;
+  throw new AppError("Forbidden", 403);
+};
+
 export const submitQuote = async (jobId, payload, mechanicUser) => {
   if (!payload.amount) throw new AppError("amount is required", 400);
 
@@ -79,12 +145,15 @@ export const submitQuote = async (jobId, payload, mechanicUser) => {
     notes: payload.notes,
     availabilityType: payload.availabilityType,
     scheduledAt: payload.scheduledAt,
+    etaMinutes: payload.etaMinutes,
   });
 
   if (job.status === JOB_STATUS.POSTED) {
     job.status = JOB_STATUS.QUOTING;
-    await job.save();
   }
+  job.quoteCount = (job.quoteCount || 0) + 1;
+  job.estimatedPayout = Number(job.estimatedPayout || quote.amount);
+  await job.save();
 
   await JobEvent.create({
     job: job._id,
@@ -97,16 +166,64 @@ export const submitQuote = async (jobId, payload, mechanicUser) => {
     },
   });
 
-  return quote;
+  const populated = await Quote.findById(quote._id)
+    .populate("job", "jobCode title description urgency status location vehicle")
+    .populate(
+      "mechanic",
+      "email mechanicProfile.displayName mechanicProfile.phone mechanicProfile.rating mechanicProfile.stats mechanicProfile.verification"
+    )
+    .lean();
+
+  return serializeQuote(populated);
 };
 
 export const listJobQuotes = async (jobId, fleetUser) => {
   await ensureFleetJobOwner(jobId, fleetUser._id);
   await expireWaitingQuotes({ job: jobId });
-  return Quote.find({ job: jobId })
-    .sort({ createdAt: -1 })
-    .populate("mechanic", "email mechanicProfile.displayName mechanicProfile.phone")
+  const quotes = await Quote.find({ job: jobId })
+    .sort({ amount: 1, createdAt: -1 })
+    .populate(
+      "mechanic",
+      "email mechanicProfile.displayName mechanicProfile.phone mechanicProfile.rating mechanicProfile.stats mechanicProfile.verification"
+    )
+    .populate("job", "jobCode title description urgency status location vehicle")
     .lean();
+  return quotes.map(serializeQuote);
+};
+
+export const getQuoteByIdForUser = async (quoteId, user) => {
+  await expireWaitingQuotes({ _id: quoteId });
+  const quote = await Quote.findById(quoteId)
+    .populate(
+      "mechanic",
+      "email mechanicProfile.displayName mechanicProfile.phone mechanicProfile.rating mechanicProfile.stats mechanicProfile.verification"
+    )
+    .populate("job", "jobCode title description urgency status location vehicle photos issueType fleet")
+    .populate("fleet", "email fleetProfile.companyName fleetProfile.contactName fleetProfile.phone")
+    .lean();
+  ensureQuoteAccess(quote, user);
+  return {
+    ...serializeQuote(quote),
+    fleet: quote.fleet
+      ? {
+          _id: quote.fleet._id || quote.fleet,
+          companyName: quote.fleet.fleetProfile?.companyName || null,
+          contactName: quote.fleet.fleetProfile?.contactName || null,
+          phone: quote.fleet.fleetProfile?.phone || null,
+        }
+      : null,
+    job: quote.job
+      ? {
+          ...serializeQuote(quote).job,
+          photos: quote.job.photos || [],
+          issueType: quote.job.issueType || null,
+        }
+      : null,
+    cancellationPolicy: {
+      freeBeforeEnRoute: true,
+      feePercentAfterEnRoute: 10,
+    },
+  };
 };
 
 export const acceptQuote = async (quoteId, fleetUser) => {
@@ -124,7 +241,7 @@ export const acceptQuote = async (quoteId, fleetUser) => {
 
     const acceptedQuote = await Quote.findOneAndUpdate(
       { _id: quote._id, status: QUOTE_STATUS.WAITING },
-      { $set: { status: QUOTE_STATUS.ACCEPTED } },
+      { $set: { status: QUOTE_STATUS.ACCEPTED, acceptedAt: now() } },
       { new: true, ...sessionOptions(session) }
     );
     if (!acceptedQuote) {
@@ -142,6 +259,8 @@ export const acceptQuote = async (quoteId, fleetUser) => {
           assignedMechanic: quote.mechanic,
           acceptedQuote: quote._id,
           assignedAt: now(),
+          acceptedAmount: quote.amount,
+          estimatedPayout: quote.amount,
         },
       },
       { new: false, ...sessionOptions(session) }
@@ -150,7 +269,7 @@ export const acceptQuote = async (quoteId, fleetUser) => {
     if (!jobBeforeUpdate) {
       await Quote.updateOne(
         { _id: quote._id, status: QUOTE_STATUS.ACCEPTED },
-        { $set: { status: QUOTE_STATUS.WAITING } },
+        { $set: { status: QUOTE_STATUS.WAITING, acceptedAt: undefined } },
         sessionOptions(session)
       );
       throw new AppError("Job is not available for quote acceptance", 400);
@@ -164,7 +283,7 @@ export const acceptQuote = async (quoteId, fleetUser) => {
         _id: { $ne: quote._id },
         status: QUOTE_STATUS.WAITING,
       },
-      { $set: { status: QUOTE_STATUS.DECLINED } },
+      { $set: { status: QUOTE_STATUS.DECLINED, declinedAt: now() } },
       sessionOptions(session)
     );
 
@@ -182,7 +301,15 @@ export const acceptQuote = async (quoteId, fleetUser) => {
       sessionOptions(session)
     );
 
-    return { quote: acceptedQuote, job };
+    const populated = await Quote.findById(acceptedQuote._id)
+      .populate(
+        "mechanic",
+        "email mechanicProfile.displayName mechanicProfile.phone mechanicProfile.rating mechanicProfile.stats mechanicProfile.verification"
+      )
+      .populate("job", "jobCode title description urgency status location vehicle")
+      .lean();
+
+    return { quote: serializeQuote(populated), job };
   });
 };
 
@@ -199,6 +326,7 @@ export const declineQuote = async (quoteId, fleetUser) => {
   }
 
   quote.status = QUOTE_STATUS.DECLINED;
+  quote.declinedAt = now();
   await quote.save();
 
   await JobEvent.create({
@@ -208,7 +336,15 @@ export const declineQuote = async (quoteId, fleetUser) => {
     payload: { quoteId: quote._id },
   });
 
-  return quote;
+  const populated = await Quote.findById(quote._id)
+    .populate(
+      "mechanic",
+      "email mechanicProfile.displayName mechanicProfile.phone mechanicProfile.rating mechanicProfile.stats mechanicProfile.verification"
+    )
+    .populate("job", "jobCode title description urgency status location vehicle")
+    .lean();
+
+  return serializeQuote(populated);
 };
 
 export const listMechanicQuotes = async (mechanicUser, query) => {
@@ -224,8 +360,13 @@ export const listMechanicQuotes = async (mechanicUser, query) => {
 
   const quotes = await Quote.find(filter)
     .sort({ createdAt: -1 })
-    .populate("job", "jobCode title urgency status location")
+    .populate("job", "jobCode title urgency status location vehicle scheduledFor")
     .lean();
 
-  return quotes;
+  return quotes.map((quote) => ({
+    ...serializeQuote(quote),
+    actions: {
+      openActiveJob: quote.status === QUOTE_STATUS.ACCEPTED,
+    },
+  }));
 };

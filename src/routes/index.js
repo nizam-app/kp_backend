@@ -5,6 +5,11 @@ import jobRouter from "../modules/job/job.router.js";
 import quoteRouter from "../modules/quote/quote.router.js";
 import vehicleRouter from "../modules/vehicle/vehicle.router.js";
 import fleetRouter from "../modules/fleet/fleet.router.js";
+import billingRouter from "../modules/billing/billing.router.js";
+import invoiceRouter from "../modules/invoice/invoice.router.js";
+import earningRouter from "../modules/earning/earning.router.js";
+import notificationRouter from "../modules/notification/notification.router.js";
+import supportTicketRouter from "../modules/supportTicket/supportTicket.router.js";
 
 const router = Router();
 
@@ -14,5 +19,10 @@ router.use("/jobs", jobRouter);
 router.use("/quotes", quoteRouter);
 router.use("/fleet/vehicles", vehicleRouter);
 router.use("/fleet", fleetRouter);
+router.use("/billing", billingRouter);
+router.use("/invoices", invoiceRouter);
+router.use("/earnings", earningRouter);
+router.use("/notifications", notificationRouter);
+router.use("/support/tickets", supportTicketRouter);
 
 export default router;

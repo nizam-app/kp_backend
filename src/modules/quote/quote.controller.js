@@ -2,6 +2,7 @@ import { sendResponse } from "../../utils/sendResponse.js";
 import {
   acceptQuote,
   declineQuote,
+  getQuoteByIdForUser,
   listJobQuotes,
   listMechanicQuotes,
   submitQuote,
@@ -21,6 +22,14 @@ export const listJobQuotesController = async (req, res) => {
   return sendResponse(res, {
     message: "Quotes fetched",
     data: quotes,
+  });
+};
+
+export const getQuoteByIdController = async (req, res) => {
+  const quote = await getQuoteByIdForUser(req.params.quoteId, req.user);
+  return sendResponse(res, {
+    message: "Quote fetched",
+    data: quote,
   });
 };
 

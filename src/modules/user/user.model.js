@@ -144,6 +144,11 @@ const userSchema = new Schema(
         systemAlerts: { type: Boolean, default: true },
       },
     },
+    termsAcceptance: {
+      acceptedAt: Date,
+      version: { type: String, trim: true },
+      source: { type: String, trim: true },
+    },
     fleetProfile: fleetProfileSchema,
     mechanicProfile: mechanicProfileSchema,
     passwordChangedAt: Date,
