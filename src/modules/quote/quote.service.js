@@ -16,6 +16,17 @@ const quoteBreakdown = (quote) => {
   return { labour, callOutFee, parts, total, currency: quote?.currency || "GBP" };
 };
 
+const quoteStatusUi = (status) => {
+  const map = {
+    WAITING: { label: "Waiting", tone: "amber" },
+    ACCEPTED: { label: "Accepted", tone: "green" },
+    DECLINED: { label: "Declined", tone: "red" },
+    EXPIRED: { label: "Expired", tone: "neutral" },
+    WITHDRAWN: { label: "Withdrawn", tone: "neutral" },
+  };
+  return map[status] || { label: status, tone: "neutral" };
+};
+
 const serializeQuote = (quote) => ({
   _id: quote._id,
   amount: quote.amount,
@@ -25,12 +36,21 @@ const serializeQuote = (quote) => ({
   etaMinutes: quote.etaMinutes ?? null,
   currency: quote.currency,
   status: quote.status,
+  statusUi: quoteStatusUi(quote.status),
   expiresAt: quote.expiresAt || null,
   acceptedAt: quote.acceptedAt || null,
   declinedAt: quote.declinedAt || null,
   expiredAt: quote.expiredAt || null,
   createdAt: quote.createdAt,
   breakdown: quoteBreakdown(quote),
+  summaryLine:
+    quote.status === QUOTE_STATUS.ACCEPTED
+      ? "Accepted! Tap to view active job"
+      : quote.status === QUOTE_STATUS.WAITING
+      ? "Waiting for fleet response"
+      : quote.status === QUOTE_STATUS.EXPIRED
+      ? "Quote expired"
+      : null,
   mechanic: quote.mechanic
     ? {
         _id: quote.mechanic._id || quote.mechanic,

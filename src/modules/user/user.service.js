@@ -212,6 +212,26 @@ const buildProfileResponse = async (user) => {
 
   if (profileCompletion) response.profileCompletion = profileCompletion;
 
+  if (base.role === "MECHANIC") {
+    response.performance = {
+      jobsDone: base.mechanicProfile?.stats?.jobsDone ?? 0,
+      avgRating: base.mechanicProfile?.rating?.average ?? 0,
+      ratingCount: base.mechanicProfile?.rating?.count ?? 0,
+      responseMinutes: base.mechanicProfile?.stats?.responseMinutesAvg ?? 0,
+    };
+  }
+
+  if (base.role === "FLEET") {
+    response.companySummary = {
+      companyName: base.fleetProfile?.companyName || null,
+      fleetSize: base.fleetProfile?.fleetSize || null,
+      contactName: base.fleetProfile?.contactName || null,
+      contactRole: base.fleetProfile?.contactRole || null,
+      phone: base.fleetProfile?.phone || null,
+      billingAddress: base.fleetProfile?.billingAddress || null,
+    };
+  }
+
   return response;
 };
 

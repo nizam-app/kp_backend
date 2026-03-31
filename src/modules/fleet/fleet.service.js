@@ -102,6 +102,7 @@ export const getFleetDashboard = async (fleetUser, query) => {
     activeCount,
     awaitingCount,
     monthCompletedCount,
+    monthSpendAgg,
     activeJobs,
     completedJobs,
     completedTotal,
@@ -114,6 +115,21 @@ export const getFleetDashboard = async (fleetUser, query) => {
       status: JOB_STATUS.COMPLETED,
       completedAt: { $gte: start, $lt: end },
     }),
+    Invoice.aggregate([
+      {
+        $match: {
+          fleet: fleetUser._id,
+          status: "PAID",
+          paidAt: { $gte: start, $lt: end },
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          total: { $sum: "$totalAmount" },
+        },
+      },
+    ]),
     Job.find({ fleet: fleetUser._id, status: { $in: activeStatuses } })
       .sort({ createdAt: -1 })
       .limit(10)
@@ -150,12 +166,27 @@ export const getFleetDashboard = async (fleetUser, query) => {
   const awaitingApprovalJob = activeJobs.find(
     (job) => job.status === JOB_STATUS.AWAITING_APPROVAL
   );
+  const monthSpend = monthSpendAgg[0]?.total || 0;
+  const monthBudget =
+    Number.isFinite(Number(query.monthBudget)) && Number(query.monthBudget) > 0
+      ? Number(query.monthBudget)
+      : null;
+  const budgetUtilizationPct = monthBudget
+    ? Math.round((monthSpend / monthBudget) * 100)
+    : null;
 
   return {
     cards: {
       activeCount,
       awaitingCount,
       monthCompletedCount,
+    },
+    spend: {
+      month: start.toLocaleString("en-US", { month: "long" }),
+      total: monthSpend,
+      currency: "GBP",
+      budget: monthBudget,
+      utilizationPct: budgetUtilizationPct,
     },
     shortcuts: {
       awaitingApproval: awaitingApprovalJob

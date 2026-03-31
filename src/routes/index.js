@@ -10,6 +10,7 @@ import invoiceRouter from "../modules/invoice/invoice.router.js";
 import earningRouter from "../modules/earning/earning.router.js";
 import notificationRouter from "../modules/notification/notification.router.js";
 import supportTicketRouter from "../modules/supportTicket/supportTicket.router.js";
+import adminRouter from "../modules/admin/admin.router.js";
 
 const router = Router();
 
@@ -24,5 +25,6 @@ router.use("/invoices", invoiceRouter);
 router.use("/earnings", earningRouter);
 router.use("/notifications", notificationRouter);
 router.use("/support/tickets", supportTicketRouter);
+router.use("/admin", adminRouter);
 
 export default router;

@@ -28,6 +28,24 @@ const roundMiles = (meters) => {
   return Math.round((meters / 1609.34) * 10) / 10;
 };
 
+const diffMinutesFromNow = (value) => {
+  if (!value) return null;
+  const ms = Date.now() - new Date(value).getTime();
+  if (!Number.isFinite(ms)) return null;
+  return Math.max(Math.round(ms / 60000), 0);
+};
+
+const formatRelativeAge = (value) => {
+  const minutes = diffMinutesFromNow(value);
+  if (minutes === null) return null;
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} hr ago`;
+  const days = Math.floor(hours / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
+};
+
 const statusPresentation = (status, job) => {
   const map = {
     [JOB_STATUS.POSTED]: { label: "POSTED", tone: "red" },
@@ -73,6 +91,7 @@ const quoteBreakdown = (quote) => {
 const serializeJobCard = (job, viewer, extra = {}) => {
   const statusUi = statusPresentation(job.status, job);
   const cancellation = computeCancellation(job.status);
+  const createdAt = job.postedAt || job.createdAt;
   return {
     _id: job._id,
     jobCode: job.jobCode,
@@ -91,10 +110,15 @@ const serializeJobCard = (job, viewer, extra = {}) => {
     finalAmount: job.finalAmount ?? null,
     quoteCount: job.quoteCount || 0,
     scheduledFor: job.scheduledFor || null,
-    postedAt: job.postedAt || job.createdAt,
+    postedAt: createdAt,
     assignedAt: job.assignedAt || null,
     completedAt: job.completedAt || null,
     tracking: job.tracking || null,
+    postedAgoLabel: formatRelativeAge(createdAt),
+    quoteSummary: {
+      count: job.quoteCount || 0,
+      label: `${job.quoteCount || 0} quote${job.quoteCount === 1 ? "" : "s"}`,
+    },
     fleet: job.fleet
       ? {
           _id: job.fleet._id || job.fleet,
@@ -140,6 +164,11 @@ const serializeJobDetail = async (job, viewer) => {
 
   return {
     ...base,
+    summary: {
+      postedAgoLabel: formatRelativeAge(job.postedAt || job.createdAt),
+      distanceMiles: base.distanceMiles ?? null,
+      etaMinutes: job.tracking?.etaMinutes ?? null,
+    },
     map: {
       origin: job.tracking?.latestMechanicLocation?.point || null,
       destination: job.location || null,
@@ -164,6 +193,29 @@ const serializeJobDetail = async (job, viewer) => {
           scheduledAt: myQuote.scheduledAt || null,
         }
       : null,
+    paymentSummary:
+      viewer.role === ROLES.FLEET
+        ? {
+            authorizedAmount:
+              Number(job.acceptedAmount ?? job.estimatedPayout ?? 0) || null,
+            finalAmount: Number(job.finalAmount ?? job.acceptedAmount ?? 0) || null,
+            platformFee:
+              Number(job.finalAmount ?? job.acceptedAmount ?? 0) > 0
+                ? Math.round(
+                    Number(job.finalAmount ?? job.acceptedAmount ?? 0) * 0.12 * 100
+                  ) / 100
+                : null,
+            status:
+              job.status === JOB_STATUS.COMPLETED
+                ? "PAID"
+                : [JOB_STATUS.ASSIGNED, JOB_STATUS.EN_ROUTE, JOB_STATUS.ON_SITE, JOB_STATUS.IN_PROGRESS, JOB_STATUS.AWAITING_APPROVAL].includes(
+                    job.status
+                  )
+                ? "AUTHORIZED"
+                : "PENDING",
+            currency: job.currency || "GBP",
+          }
+        : null,
   };
 };
 
@@ -447,13 +499,31 @@ export const listJobs = async (user, query) => {
     Job.countDocuments(filter),
   ]);
 
+  const serializedItems = items.map((job) =>
+    serializeJobCard(job, user, {
+      distanceMiles: roundMiles(job.distanceMeters),
+    })
+  );
+
+  const insightBase = {
+    activeCount: serializedItems.filter(
+      (job) => ![JOB_STATUS.COMPLETED, JOB_STATUS.CANCELLED].includes(job.status)
+    ).length,
+    completedCount: serializedItems.filter(
+      (job) => job.status === JOB_STATUS.COMPLETED
+    ).length,
+  };
+
   return {
-    items: items.map((job) =>
-      serializeJobCard(job, user, {
-        distanceMiles: roundMiles(job.distanceMeters),
-      })
-    ),
-    meta: { page, limit, total, totalPages: Math.ceil(total / limit) || 1 },
+    items: serializedItems,
+    meta: {
+      page,
+      limit,
+      total,
+      totalPages: Math.ceil(total / limit) || 1,
+      ...insightBase,
+      mode: user.role === ROLES.MECHANIC && `${query.feed}` === "true" ? "feed" : "list",
+    },
   };
 };
 

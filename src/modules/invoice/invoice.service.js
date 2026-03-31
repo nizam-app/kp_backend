@@ -46,6 +46,13 @@ const toInvoiceSummary = (invoice) => ({
   currency: invoice.currency,
   status: invoice.status,
   pdfUrl: invoice.pdfUrl || null,
+  paidLabel: invoice.paidAt
+    ? new Date(invoice.paidAt).toLocaleDateString("en-GB", {
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+      })
+    : null,
 });
 
 const toInvoiceDetail = (invoice) => ({
