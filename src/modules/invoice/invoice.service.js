@@ -45,6 +45,7 @@ const toInvoiceSummary = (invoice) => ({
   vatAmount: invoice.vatAmount,
   currency: invoice.currency,
   status: invoice.status,
+  payment: invoice.payment || null,
   pdfUrl: invoice.pdfUrl || null,
   paidLabel: invoice.paidAt
     ? new Date(invoice.paidAt).toLocaleDateString("en-GB", {
@@ -100,6 +101,17 @@ const toInvoiceDetail = (invoice) => ({
     vatAmount: invoice.vatAmount,
     totalAmount: invoice.totalAmount,
     currency: invoice.currency,
+  },
+  payment: {
+    provider: invoice.payment?.provider || "MANUAL",
+    status: invoice.payment?.status || "PENDING",
+    stripePaymentIntentId: invoice.payment?.stripePaymentIntentId || null,
+    stripePaymentMethodId: invoice.payment?.stripePaymentMethodId || null,
+    clientSecret: invoice.payment?.stripeClientSecret || null,
+    lastError: invoice.payment?.lastError || null,
+    authorizedAmount: invoice.payment?.authorizedAmount ?? null,
+    capturedAmount: invoice.payment?.capturedAmount ?? null,
+    updatedAt: invoice.payment?.updatedAt || null,
   },
   downloadUrl: invoice.pdfUrl || `/api/v1/invoices/${invoice._id}/download`,
 });

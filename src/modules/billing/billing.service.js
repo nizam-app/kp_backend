@@ -1,5 +1,12 @@
 import AppError from "../../utils/AppError.js";
 import { PaymentMethod } from "./paymentMethod.model.js";
+import {
+  attachStripePaymentMethodToCustomer,
+  createStripeSetupIntent,
+  ensureStripeCustomerForUser,
+  getStripePublicConfig,
+  retrieveStripePaymentMethod,
+} from "./stripe.service.js";
 
 const methodTypeValues = ["CARD", "BANK_ACCOUNT"];
 
@@ -25,9 +32,11 @@ const toPaymentMethodResponse = (method) => ({
   ownerType: method.ownerType,
   provider: method.provider,
   providerMethodId: method.providerMethodId,
+  providerCustomerId: method.providerCustomerId || null,
   card: method.card || null,
   bank: method.bank || null,
   billingAddress: method.billingAddress || null,
+  setupIntentId: method.setupIntentId || null,
   isDefault: method.isDefault,
   isActive: method.isActive,
   createdAt: method.createdAt,
@@ -39,6 +48,19 @@ const toPaymentMethodResponse = (method) => ({
 });
 
 const normalizeCardPayload = (payload) => {
+  if (`${payload.provider || "MANUAL"}`.trim() === "STRIPE") {
+    return {
+      card: {
+        brand: `${payload.card?.brand || "CARD"}`.trim(),
+        last4: `${payload.card?.last4 || ""}`.trim(),
+        expMonth: Number(payload.card?.expMonth) || undefined,
+        expYear: Number(payload.card?.expYear) || undefined,
+        fingerprint: `${payload.card?.fingerprint || ""}`.trim() || undefined,
+      },
+      bank: undefined,
+    };
+  }
+
   if (!payload.card?.last4 && !payload.cardNumber) {
     throw new AppError("card.last4 or cardNumber is required for cards", 400);
   }
@@ -111,13 +133,14 @@ export const createPaymentMethod = async (user, payload = {}) => {
   }
 
   const ownerType = user.role;
+  const provider = `${payload.provider || "MANUAL"}`.trim();
   const normalizedPayload =
     methodType === "CARD"
       ? normalizeCardPayload(payload)
       : normalizeBankPayload(payload);
 
   const alreadyExists = await PaymentMethod.findOne({
-    provider: `${payload.provider || "MANUAL"}`.trim(),
+    provider,
     providerMethodId,
   });
   if (alreadyExists) {
@@ -141,14 +164,64 @@ export const createPaymentMethod = async (user, payload = {}) => {
     user: user._id,
     ownerType,
     methodType,
-    provider: `${payload.provider || "MANUAL"}`.trim(),
+    provider,
     providerMethodId,
+    providerCustomerId: payload.providerCustomerId || undefined,
     billingAddress: `${payload.billingAddress || ""}`.trim() || undefined,
+    setupIntentId: payload.setupIntentId || undefined,
     isDefault,
     ...normalizedPayload,
   });
 
   return toPaymentMethodResponse(created);
+};
+
+export const getStripeBillingConfig = async () => getStripePublicConfig();
+
+export const createStripeSetupIntentForUser = async (user) => {
+  const result = await createStripeSetupIntent(user);
+  return {
+    ...result,
+    ...getStripePublicConfig(),
+  };
+};
+
+export const attachStripeCardPaymentMethod = async (user, payload = {}) => {
+  if (user.role !== "FLEET") {
+    throw new AppError("Only fleet users can attach Stripe card methods", 400);
+  }
+
+  const paymentMethodId = `${payload.paymentMethodId || payload.providerMethodId || ""}`.trim();
+  if (!paymentMethodId) {
+    throw new AppError("paymentMethodId is required", 400);
+  }
+
+  const customerId = await ensureStripeCustomerForUser(user);
+  const attachedPaymentMethod = await attachStripePaymentMethodToCustomer({
+    customerId,
+    paymentMethodId,
+  });
+
+  const stripePaymentMethod = await retrieveStripePaymentMethod(attachedPaymentMethod.id);
+
+  return createPaymentMethod(user, {
+    methodType: "CARD",
+    provider: "STRIPE",
+    providerMethodId: stripePaymentMethod.id,
+    providerCustomerId: customerId,
+    setupIntentId: `${payload.setupIntentId || ""}`.trim() || undefined,
+    billingAddress:
+      `${payload.billingAddress || user.fleetProfile?.billingAddress || ""}`.trim() ||
+      undefined,
+    isDefault: payload.isDefault !== false,
+    card: {
+      brand: stripePaymentMethod.card?.brand || "CARD",
+      last4: stripePaymentMethod.card?.last4 || "",
+      expMonth: stripePaymentMethod.card?.exp_month || undefined,
+      expYear: stripePaymentMethod.card?.exp_year || undefined,
+      fingerprint: stripePaymentMethod.card?.fingerprint || undefined,
+    },
+  });
 };
 
 export const setDefaultPaymentMethod = async (user, methodId) => {

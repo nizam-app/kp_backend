@@ -6,6 +6,7 @@ coverage
 .DS_Store
 *.log
 .idea
+docs
 
 # Ignore all files in the public directory except for index.html
 /public/*   

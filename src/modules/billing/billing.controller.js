@@ -1,6 +1,9 @@
 import { sendResponse } from "../../utils/sendResponse.js";
 import {
+  attachStripeCardPaymentMethod,
   createPaymentMethod,
+  createStripeSetupIntentForUser,
+  getStripeBillingConfig,
   listPaymentMethods,
   removePaymentMethod,
   setDefaultPaymentMethod,
@@ -19,6 +22,31 @@ export const createPaymentMethodController = async (req, res) => {
   return sendResponse(res, {
     statusCode: 201,
     message: "Payment method added",
+    data: method,
+  });
+};
+
+export const stripeBillingConfigController = async (_req, res) => {
+  const config = await getStripeBillingConfig();
+  return sendResponse(res, {
+    message: "Stripe billing config fetched",
+    data: config,
+  });
+};
+
+export const createStripeSetupIntentController = async (req, res) => {
+  const setupIntent = await createStripeSetupIntentForUser(req.user);
+  return sendResponse(res, {
+    message: "Stripe setup intent created",
+    data: setupIntent,
+  });
+};
+
+export const attachStripePaymentMethodController = async (req, res) => {
+  const method = await attachStripeCardPaymentMethod(req.user, req.body);
+  return sendResponse(res, {
+    statusCode: 201,
+    message: "Stripe payment method attached",
     data: method,
   });
 };

@@ -3,6 +3,24 @@ import { jobStatusValues } from "../../constants/domain.js";
 
 const { Schema, model } = mongoose;
 
+const eventLocationSchema = new Schema(
+  {
+    type: {
+      type: String,
+      enum: ["Point"],
+    },
+    coordinates: {
+      type: [Number],
+      validate: {
+        validator: (value) =>
+          !value || (Array.isArray(value) && value.length === 2),
+        message: "Event location must be [lng, lat]",
+      },
+    },
+  },
+  { _id: false }
+);
+
 const jobEventSchema = new Schema(
   {
     job: { type: Schema.Types.ObjectId, ref: "Job", required: true, index: true },
@@ -16,20 +34,7 @@ const jobEventSchema = new Schema(
       enum: ["PUBLIC", "INTERNAL"],
       default: "PUBLIC",
     },
-    location: {
-      type: {
-        type: String,
-        enum: ["Point"],
-      },
-      coordinates: {
-        type: [Number],
-        validate: {
-          validator: (value) =>
-            !value || (Array.isArray(value) && value.length === 2),
-          message: "Event location must be [lng, lat]",
-        },
-      },
-    },
+    location: { type: eventLocationSchema, default: undefined },
     payload: { type: Schema.Types.Mixed },
     createdAt: { type: Date, default: Date.now, index: true },
   },

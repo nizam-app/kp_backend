@@ -19,11 +19,13 @@ const paymentMethodSchema = new Schema(
     },
     provider: { type: String, trim: true, default: "MANUAL" },
     providerMethodId: { type: String, trim: true, required: true },
+    providerCustomerId: { type: String, trim: true },
     card: {
       brand: { type: String, trim: true },
       last4: { type: String, trim: true },
       expMonth: Number,
       expYear: Number,
+      fingerprint: { type: String, trim: true },
     },
     bank: {
       bankName: { type: String, trim: true },
@@ -31,6 +33,7 @@ const paymentMethodSchema = new Schema(
       sortCodeMasked: { type: String, trim: true },
     },
     billingAddress: { type: String, trim: true },
+    setupIntentId: { type: String, trim: true },
     isDefault: { type: Boolean, default: false },
     isActive: { type: Boolean, default: true },
   },

@@ -6,6 +6,8 @@ import { JobEvent } from "../jobEvent/jobEvent.model.js";
 import { JobLocationPing } from "../jobLocationPing/jobLocationPing.model.js";
 import { Invoice } from "../invoice/invoice.model.js";
 import { EarningTransaction } from "../earning/earningTransaction.model.js";
+import { PaymentMethod } from "../billing/paymentMethod.model.js";
+import { createStripePaymentIntent } from "../billing/stripe.service.js";
 import { getProfileCompletionSummary } from "../user/user.service.js";
 
 const toObjectIdString = (value) => (value?._id || value)?.toString();
@@ -155,6 +157,31 @@ const serializeJobCard = (job, viewer, extra = {}) => {
   };
 };
 
+const mapStripePaymentIntentStatus = (status) => {
+  switch (status) {
+    case "succeeded":
+      return { invoiceStatus: "PAID", paymentStatus: "SUCCEEDED", paid: true };
+    case "processing":
+      return { invoiceStatus: "ISSUED", paymentStatus: "PROCESSING", paid: false };
+    case "requires_payment_method":
+      return {
+        invoiceStatus: "FAILED",
+        paymentStatus: "REQUIRES_PAYMENT_METHOD",
+        paid: false,
+      };
+    case "requires_action":
+      return {
+        invoiceStatus: "ISSUED",
+        paymentStatus: "REQUIRES_ACTION",
+        paid: false,
+      };
+    case "canceled":
+      return { invoiceStatus: "FAILED", paymentStatus: "CANCELED", paid: false };
+    default:
+      return { invoiceStatus: "ISSUED", paymentStatus: "PENDING", paid: false };
+  }
+};
+
 const serializeJobDetail = async (job, viewer) => {
   const base = serializeJobCard(job, viewer);
   const myQuote =
@@ -283,7 +310,7 @@ const ensureAssignedMechanic = (job, mechanicUserId) => {
   }
 };
 
-const upsertFinancialRecordsForCompletedJob = async (job) => {
+const upsertFinancialRecordsForCompletedJob = async (job, paymentContext = {}) => {
   if (!job.assignedMechanic) return { invoice: null, earningTransaction: null };
 
   const subtotal = Number(job.finalAmount ?? job.acceptedAmount ?? job.estimatedPayout ?? 0);
@@ -291,7 +318,9 @@ const upsertFinancialRecordsForCompletedJob = async (job) => {
   const totalAmount = Math.round((subtotal + vatAmount) * 100) / 100;
   const platformFee = Math.round(subtotal * 0.12 * 100) / 100;
   const netAmount = Math.max(Math.round((subtotal - platformFee) * 100) / 100, 0);
-  const paidAt = job.completedAt || new Date();
+  const paidAt = paymentContext.paidAt || job.completedAt || new Date();
+  const invoiceStatus = paymentContext.invoiceStatus || "PAID";
+  const paymentStatus = paymentContext.paymentStatus || "SUCCEEDED";
 
   let invoice = await Invoice.findOne({ job: job._id });
   if (!invoice) {
@@ -304,9 +333,21 @@ const upsertFinancialRecordsForCompletedJob = async (job) => {
       vatAmount,
       totalAmount,
       currency: job.currency || "GBP",
-      status: "PAID",
+      status: invoiceStatus,
       issuedAt: paidAt,
-      paidAt,
+      paidAt: invoiceStatus === "PAID" ? paidAt : undefined,
+      payment: {
+        provider: paymentContext.provider || "MANUAL",
+        status: paymentStatus,
+        stripeCustomerId: paymentContext.stripeCustomerId,
+        stripePaymentMethodId: paymentContext.stripePaymentMethodId,
+        stripePaymentIntentId: paymentContext.stripePaymentIntentId,
+        stripeClientSecret: paymentContext.stripeClientSecret,
+        lastError: paymentContext.lastError,
+        authorizedAmount: totalAmount,
+        capturedAmount: invoiceStatus === "PAID" ? totalAmount : undefined,
+        updatedAt: new Date(),
+      },
       lineItems: [
         {
           description: job.completionSummary || job.description || "Repair service",
@@ -331,9 +372,26 @@ const upsertFinancialRecordsForCompletedJob = async (job) => {
     invoice.vatAmount = vatAmount;
     invoice.totalAmount = totalAmount;
     invoice.currency = job.currency || invoice.currency || "GBP";
-    invoice.status = "PAID";
-    invoice.paidAt = paidAt;
+    invoice.status = invoiceStatus;
+    invoice.paidAt = invoiceStatus === "PAID" ? paidAt : undefined;
     invoice.issuedAt = invoice.issuedAt || paidAt;
+    invoice.payment = {
+      ...(invoice.payment || {}),
+      provider: paymentContext.provider || invoice.payment?.provider || "MANUAL",
+      status: paymentStatus,
+      stripeCustomerId:
+        paymentContext.stripeCustomerId || invoice.payment?.stripeCustomerId,
+      stripePaymentMethodId:
+        paymentContext.stripePaymentMethodId || invoice.payment?.stripePaymentMethodId,
+      stripePaymentIntentId:
+        paymentContext.stripePaymentIntentId || invoice.payment?.stripePaymentIntentId,
+      stripeClientSecret:
+        paymentContext.stripeClientSecret || invoice.payment?.stripeClientSecret,
+      lastError: paymentContext.lastError || invoice.payment?.lastError,
+      authorizedAmount: totalAmount,
+      capturedAmount: invoiceStatus === "PAID" ? totalAmount : undefined,
+      updatedAt: new Date(),
+    };
     if (!invoice.lineItems?.length) {
       invoice.lineItems = [
         {
@@ -347,24 +405,27 @@ const upsertFinancialRecordsForCompletedJob = async (job) => {
     await invoice.save();
   }
 
-  const earningTransaction = await EarningTransaction.findOneAndUpdate(
-    { mechanic: job.assignedMechanic, job: job._id },
-    {
-      $set: {
-        grossAmount: subtotal,
-        platformFee,
-        netAmount,
-        currency: job.currency || "GBP",
-        paidAt,
-        notes: job.completionSummary || job.description || "Completed job payout",
+  let earningTransaction = null;
+  if (invoiceStatus === "PAID") {
+    earningTransaction = await EarningTransaction.findOneAndUpdate(
+      { mechanic: job.assignedMechanic, job: job._id },
+      {
+        $set: {
+          grossAmount: subtotal,
+          platformFee,
+          netAmount,
+          currency: job.currency || "GBP",
+          paidAt,
+          notes: job.completionSummary || job.description || "Completed job payout",
+        },
+        $setOnInsert: {
+          type: "JOB_PAYMENT",
+          quote: job.acceptedQuote || undefined,
+        },
       },
-      $setOnInsert: {
-        type: "JOB_PAYMENT",
-        quote: job.acceptedQuote || undefined,
-      },
-    },
-    { upsert: true, new: true }
-  );
+      { upsert: true, new: true }
+    );
+  }
 
   return { invoice, earningTransaction };
 };
@@ -662,7 +723,63 @@ export const approveJobCompletion = async (jobId, fleetUser, payload) => {
   }
   await job.save();
 
-  const financials = await upsertFinancialRecordsForCompletedJob(job);
+  let paymentContext = {
+    provider: "MANUAL",
+    invoiceStatus: "PAID",
+    paymentStatus: "SUCCEEDED",
+    paidAt: new Date(),
+  };
+
+  const paymentMethodId = `${payload.paymentMethodId || ""}`.trim();
+  if (paymentMethodId) {
+    const paymentMethod = await PaymentMethod.findOne({
+      _id: paymentMethodId,
+      user: fleetUser._id,
+      isActive: true,
+    }).lean();
+
+    if (!paymentMethod) {
+      throw new AppError("Payment method not found", 404);
+    }
+
+    if (paymentMethod.provider === "STRIPE") {
+      const totalAmount =
+        Math.round(
+          ((Number(job.finalAmount ?? job.acceptedAmount ?? job.estimatedPayout ?? 0) || 0) *
+            1.2) *
+            100
+        ) / 100;
+
+      const paymentIntent = await createStripePaymentIntent({
+        amount: totalAmount,
+        currency: job.currency || "GBP",
+        customerId:
+          paymentMethod.providerCustomerId || fleetUser.fleetProfile?.stripeCustomerId,
+        paymentMethodId: paymentMethod.providerMethodId,
+        metadata: {
+          jobId: job._id.toString(),
+          fleetId: fleetUser._id.toString(),
+          mechanicId: toObjectIdString(job.assignedMechanic),
+        },
+      });
+
+      const mapped = mapStripePaymentIntentStatus(paymentIntent.status);
+      paymentContext = {
+        provider: "STRIPE",
+        invoiceStatus: mapped.invoiceStatus,
+        paymentStatus: mapped.paymentStatus,
+        stripeCustomerId:
+          paymentMethod.providerCustomerId || fleetUser.fleetProfile?.stripeCustomerId,
+        stripePaymentMethodId: paymentMethod.providerMethodId,
+        stripePaymentIntentId: paymentIntent.id,
+        stripeClientSecret: paymentIntent.client_secret || null,
+        lastError: paymentIntent.last_payment_error?.message || null,
+        paidAt: mapped.paid ? new Date() : undefined,
+      };
+    }
+  }
+
+  const financials = await upsertFinancialRecordsForCompletedJob(job, paymentContext);
 
   await createJobEvent({
     jobId: job._id,
@@ -673,6 +790,9 @@ export const approveJobCompletion = async (jobId, fleetUser, payload) => {
     payload: {
       paymentMethodId: payload.paymentMethodId,
       invoiceId: financials.invoice?._id,
+      paymentProvider: paymentContext.provider,
+      paymentStatus: paymentContext.paymentStatus,
+      stripePaymentIntentId: paymentContext.stripePaymentIntentId,
     },
   });
 
