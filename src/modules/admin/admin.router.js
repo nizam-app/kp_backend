@@ -3,33 +3,12 @@ import { authorize, protect, requireActive } from "../../middlewares/auth.js";
 import { catchAsync } from "../../utils/catchAsync.js";
 import { ROLES } from "../../constants/domain.js";
 import {
-  adminDashboardController,
-  adminAuditLogsController,
-  adminDisputesController,
-  adminFinancialController,
-  adminFleetController,
-  adminLiveTrackingController,
-  adminNotificationsController,
-  adminPromotionsController,
-  adminReportsController,
-  adminReviewsController,
-  adminServiceCatalogController,
-  adminServiceRequestsController,
-  adminSettingsController,
-  adminSupportTicketsController,
-  adminUsersController,
-  approveMechanicController,
-  createAdminDisputeController,
-  createAdminPromotionController,
-  createAdminServiceCatalogController,
-  mechanicReviewQueueController,
-  rejectMechanicController,
-  updateAdminPromotionController,
-  updateAdminReviewController,
-  updateAdminServiceCatalogController,
-  updateAdminDisputeController,
-  updateAdminSupportTicketController,
-  updateUserStatusController,
+  adminDashboardController,adminAuditLogsController,adminDisputesController,adminFinancialController,adminFleetController,adminLiveTrackingController,
+  adminNotificationsController,adminPromotionsController,adminReportsController,adminReviewsController,adminServiceCatalogController,
+  adminServiceRequestsController,adminSettingsController,adminSupportTicketsController,adminUsersController,approveMechanicController,
+  createAdminDisputeController,createAdminPromotionController,createAdminServiceCatalogController,mechanicReviewQueueController,rejectMechanicController,
+  updateAdminPromotionController,updateAdminReviewController,updateAdminServiceCatalogController,updateAdminDisputeController,
+  updateAdminSupportTicketController,updateUserStatusController,
 } from "./admin.controller.js";
 
 const router = Router();
@@ -82,3 +61,5 @@ router.patch(
 router.patch("/users/:userId/status", catchAsync(updateUserStatusController));
 
 export default router;
+
+
