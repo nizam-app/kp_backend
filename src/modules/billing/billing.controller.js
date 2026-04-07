@@ -4,6 +4,7 @@ import {
   createPaymentMethod,
   createStripeSetupIntentForUser,
   getStripeBillingConfig,
+  handleStripeWebhook,
   listPaymentMethods,
   removePaymentMethod,
   setDefaultPaymentMethod,
@@ -48,6 +49,17 @@ export const attachStripePaymentMethodController = async (req, res) => {
     statusCode: 201,
     message: "Stripe payment method attached",
     data: method,
+  });
+};
+
+export const stripeWebhookController = async (req, res) => {
+  const result = await handleStripeWebhook(
+    req.body,
+    req.headers["stripe-signature"]
+  );
+  return sendResponse(res, {
+    message: "Stripe webhook processed",
+    data: result,
   });
 };
 

@@ -7,6 +7,10 @@ import { globalError } from "./middlewares/globalError.js";
 const app = express();
 
 app.use(cors());
+app.use(
+  "/api/v1/billing/stripe/webhook",
+  express.raw({ type: "application/json" })
+);
 app.use(express.json());
 
 app.get("/", (_req, res) =>

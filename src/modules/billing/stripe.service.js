@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import { env } from "../../config/env.js";
 import AppError from "../../utils/AppError.js";
 import { User } from "../user/user.model.js";
@@ -128,6 +129,9 @@ export const createStripeSetupIntent = async (user) => {
 export const retrieveStripePaymentMethod = async (paymentMethodId) =>
   stripeRequest(`/payment_methods/${paymentMethodId}`);
 
+export const retrieveStripePaymentIntent = async (paymentIntentId) =>
+  stripeRequest(`/payment_intents/${paymentIntentId}`);
+
 export const attachStripePaymentMethodToCustomer = async ({
   customerId,
   paymentMethodId,
@@ -163,3 +167,53 @@ export const createStripePaymentIntent = async ({
   });
 };
 
+const parseStripeSignatureHeader = (signatureHeader) =>
+  `${signatureHeader || ""}`
+    .split(",")
+    .map((part) => part.trim())
+    .reduce((acc, part) => {
+      const [key, value] = part.split("=");
+      if (key && value) acc[key] = value;
+      return acc;
+    }, {});
+
+export const constructStripeWebhookEvent = (rawBody, signatureHeader) => {
+  ensureStripeConfigured();
+
+  if (!env.STRIPE_WEBHOOK_SECRET) {
+    throw new AppError("Stripe webhook secret is not configured", 400);
+  }
+
+  const payloadBuffer = Buffer.isBuffer(rawBody)
+    ? rawBody
+    : Buffer.from(
+        typeof rawBody === "string" ? rawBody : JSON.stringify(rawBody || {}),
+        "utf8"
+      );
+
+  const parsedSignature = parseStripeSignatureHeader(signatureHeader);
+  const timestamp = parsedSignature.t;
+  const expectedSignature = parsedSignature.v1;
+
+  if (!timestamp || !expectedSignature) {
+    throw new AppError("Invalid Stripe signature header", 400);
+  }
+
+  const signedPayload = `${timestamp}.${payloadBuffer.toString("utf8")}`;
+  const computedSignature = crypto
+    .createHmac("sha256", env.STRIPE_WEBHOOK_SECRET)
+    .update(signedPayload, "utf8")
+    .digest("hex");
+
+  const expectedBuffer = Buffer.from(expectedSignature, "hex");
+  const actualBuffer = Buffer.from(computedSignature, "hex");
+
+  if (
+    expectedBuffer.length !== actualBuffer.length ||
+    !crypto.timingSafeEqual(expectedBuffer, actualBuffer)
+  ) {
+    throw new AppError("Stripe signature verification failed", 400);
+  }
+
+  return JSON.parse(payloadBuffer.toString("utf8"));
+};

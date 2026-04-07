@@ -8,10 +8,13 @@ import {
   listPaymentMethodsController,
   removePaymentMethodController,
   setDefaultPaymentMethodController,
+  stripeWebhookController,
   stripeBillingConfigController,
 } from "./billing.controller.js";
 
 const router = Router();
+
+router.post("/stripe/webhook", catchAsync(stripeWebhookController));
 
 router.use(catchAsync(protect));
 

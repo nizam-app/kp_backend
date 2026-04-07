@@ -88,6 +88,44 @@ const parseLimit = (value) => {
   return Math.min(Math.floor(n), 100);
 };
 
+const getAdminActorLabel = (adminUser) =>
+  adminUser?.adminProfile?.fullName || adminUser?.email || "Admin";
+
+const writeAuditLog = async (adminUser, action, target, category) => {
+  try {
+    await AuditLog.create({
+      userLabel: getAdminActorLabel(adminUser),
+      action,
+      target,
+      category,
+    });
+  } catch {
+    // Audit logging should not block primary admin actions.
+  }
+};
+
+const normalizeRegistration = (value) => `${value || ""}`.trim().toUpperCase();
+const normalizeAdminEmail = (value) => `${value || ""}`.trim().toLowerCase();
+
+const mapAdminRole = (value) => {
+  const normalized = `${value || ""}`.trim().toUpperCase();
+  if (["COMPANY", "COMPANIES", ROLES.FLEET].includes(normalized)) return ROLES.FLEET;
+  if (["TECHNICIAN", "TECHNICIANS", ROLES.MECHANIC].includes(normalized))
+    return ROLES.MECHANIC;
+  if (["ADMIN", "ADMINS", ROLES.ADMIN].includes(normalized)) return ROLES.ADMIN;
+  return normalized;
+};
+
+const generateAdminInvoiceNo = async () => {
+  for (let i = 0; i < 8; i += 1) {
+    const random = Math.floor(1000 + Math.random() * 9000);
+    const invoiceNo = `INV-${new Date().getFullYear()}-${random}`;
+    const exists = await Invoice.exists({ invoiceNo });
+    if (!exists) return invoiceNo;
+  }
+  throw new AppError("Unable to generate invoice number", 500);
+};
+
 const serializeMechanicReviewItem = (user) => ({
   _id: user._id,
   email: user.email,
@@ -531,6 +569,78 @@ export const listAdminServiceRequests = async (query = {}) => {
   };
 };
 
+export const updateAdminServiceRequest = async (jobId, payload = {}, adminUser) => {
+  const job = await Job.findById(jobId)
+    .populate("assignedMechanic", "email mechanicProfile.displayName mechanicProfile.phone")
+    .populate("fleet", "email fleetProfile.companyName fleetProfile.contactName fleetProfile.phone");
+  if (!job) throw new AppError("Service request not found", 404);
+
+  if (payload.priority) {
+    job.urgency = parsePriority(payload.priority);
+  }
+
+  if (payload.status) {
+    const nextStatus = parseStatus(payload.status);
+    if (!jobStatusValues.includes(nextStatus)) {
+      throw new AppError(`status must be one of ${jobStatusValues.join(", ")}`, 400);
+    }
+    job.status = nextStatus;
+    if (nextStatus === JOB_STATUS.COMPLETED && !job.completedAt) {
+      job.completedAt = new Date();
+    }
+    if (nextStatus === JOB_STATUS.CANCELLED && !job.cancelledAt) {
+      job.cancelledAt = new Date();
+    }
+  }
+
+  if (payload.assignedMechanicId !== undefined) {
+    if (!payload.assignedMechanicId) {
+      job.assignedMechanic = undefined;
+      job.assignedAt = undefined;
+      if ([JOB_STATUS.ASSIGNED, JOB_STATUS.EN_ROUTE, JOB_STATUS.ON_SITE, JOB_STATUS.IN_PROGRESS].includes(job.status)) {
+        job.status = JOB_STATUS.POSTED;
+      }
+    } else {
+      const mechanic = await User.findOne({
+        _id: payload.assignedMechanicId,
+        role: ROLES.MECHANIC,
+      }).select("email mechanicProfile.displayName mechanicProfile.phone");
+      if (!mechanic) throw new AppError("Assigned mechanic not found", 404);
+      job.assignedMechanic = mechanic._id;
+      job.assignedAt = job.assignedAt || new Date();
+      if ([JOB_STATUS.POSTED, JOB_STATUS.QUOTING].includes(job.status)) {
+        job.status = JOB_STATUS.ASSIGNED;
+      }
+    }
+  }
+
+  if (payload.etaMinutes !== undefined) {
+    job.tracking = {
+      ...(job.tracking || {}),
+      etaMinutes: payload.etaMinutes === null ? undefined : payload.etaMinutes,
+    };
+  }
+
+  if (payload.completionSummary !== undefined) {
+    job.completionSummary = `${payload.completionSummary || ""}`.trim() || undefined;
+  }
+
+  await job.save();
+  await writeAuditLog(
+    adminUser,
+    "Updated Service Request",
+    job.jobCode || job._id.toString(),
+    "Service Management"
+  );
+
+  const refreshedJob = await Job.findById(job._id)
+    .populate("fleet", "email fleetProfile.companyName fleetProfile.contactName fleetProfile.phone")
+    .populate("assignedMechanic", "email mechanicProfile.displayName mechanicProfile.phone")
+    .lean();
+
+  return serializeServiceRequest(refreshedJob);
+};
+
 export const listAdminUsers = async (query = {}) => {
   const page = parsePage(query.page);
   const limit = parseLimit(query.limit);
@@ -621,6 +731,169 @@ export const listAdminUsers = async (query = {}) => {
   };
 };
 
+export const createAdminUserOrCompany = async (payload = {}, adminUser) => {
+  const role = mapAdminRole(payload.role || payload.entityType);
+  if (![ROLES.FLEET, ROLES.MECHANIC, ROLES.ADMIN].includes(role)) {
+    throw new AppError("role must be FLEET, MECHANIC, or ADMIN", 400);
+  }
+
+  const email = normalizeAdminEmail(payload.email);
+  if (!email) throw new AppError("email is required", 400);
+  if (!payload.password) throw new AppError("password is required", 400);
+
+  const exists = await User.findOne({ email });
+  if (exists) throw new AppError("Email already in use", 409);
+
+  const userData = {
+    email,
+    password: payload.password,
+    role,
+    status: payload.status ? `${payload.status}`.trim().toUpperCase() : USER_STATUS.ACTIVE,
+  };
+
+  if (role === ROLES.FLEET) {
+    userData.fleetProfile = {
+      companyName: payload.companyName,
+      contactName: payload.contactName || payload.fullName,
+      contactRole: payload.contactRole,
+      phone: payload.phone,
+      regNumber: payload.regNumber,
+      vatNumber: payload.vatNumber,
+      fleetSize: payload.fleetSize,
+      billingAddress: payload.billingAddress,
+    };
+  }
+
+  if (role === ROLES.MECHANIC) {
+    userData.mechanicProfile = {
+      displayName: payload.displayName || payload.fullName,
+      businessName: payload.businessName,
+      businessType: payload.businessType,
+      phone: payload.phone,
+      baseLocationText: payload.baseLocationText,
+      basePostcode: payload.basePostcode,
+      hourlyRate: payload.hourlyRate,
+      emergencyRate: payload.emergencyRate,
+      callOutFee: payload.callOutFee,
+      serviceRadiusMiles: payload.serviceRadiusMiles,
+      skills: payload.skills || [],
+      verification: {
+        status:
+          userData.status === USER_STATUS.ACTIVE
+            ? MECHANIC_VERIFICATION_STATUS.APPROVED
+            : MECHANIC_VERIFICATION_STATUS.SUBMITTED,
+        reviewedAt:
+          userData.status === USER_STATUS.ACTIVE ? new Date() : undefined,
+      },
+    };
+  }
+
+  if (role === ROLES.ADMIN) {
+    userData.adminProfile = {
+      fullName: payload.fullName || email.split("@")[0],
+      phoneNumber: payload.phoneNumber || payload.phone,
+      profilePhotoUrl: payload.profilePhotoUrl,
+    };
+    userData.adminSettings = {
+      timeZone: payload.timeZone || "GMT",
+      language: payload.language || "English",
+      billingEmail: payload.billingEmail || email,
+    };
+  }
+
+  const user = await User.create(userData);
+  await writeAuditLog(
+    adminUser,
+    "Created User",
+    `${role}:${email}`,
+    "User Management"
+  );
+
+  return serializeAdminUser(user.toObject());
+};
+
+export const updateAdminUser = async (userId, payload = {}, adminUser) => {
+  const user = await User.findById(userId);
+  if (!user) throw new AppError("User not found", 404);
+
+  if (payload.email !== undefined) {
+    const email = normalizeAdminEmail(payload.email);
+    if (!email) throw new AppError("email cannot be empty", 400);
+    const duplicate = await User.findOne({ _id: { $ne: user._id }, email });
+    if (duplicate) throw new AppError("Email already in use", 409);
+    user.email = email;
+  }
+
+  if (payload.status !== undefined) {
+    const nextStatus = `${payload.status}`.trim().toUpperCase();
+    if (!userStatusValues.includes(nextStatus)) {
+      throw new AppError(`status must be one of ${userStatusValues.join(", ")}`, 400);
+    }
+    user.status = nextStatus;
+  }
+
+  if (user.role === ROLES.FLEET) {
+    user.fleetProfile = {
+      ...(user.fleetProfile || {}),
+      ...Object.fromEntries(
+        Object.entries({
+          companyName: payload.companyName,
+          contactName: payload.contactName,
+          contactRole: payload.contactRole,
+          phone: payload.phone,
+          regNumber: payload.regNumber,
+          vatNumber: payload.vatNumber,
+          fleetSize: payload.fleetSize,
+          billingAddress: payload.billingAddress,
+        }).filter(([, value]) => value !== undefined)
+      ),
+    };
+  }
+
+  if (user.role === ROLES.MECHANIC) {
+    user.mechanicProfile = {
+      ...(user.mechanicProfile || {}),
+      ...Object.fromEntries(
+        Object.entries({
+          displayName: payload.displayName,
+          businessName: payload.businessName,
+          phone: payload.phone,
+          baseLocationText: payload.baseLocationText,
+          basePostcode: payload.basePostcode,
+          hourlyRate: payload.hourlyRate,
+          emergencyRate: payload.emergencyRate,
+          callOutFee: payload.callOutFee,
+          serviceRadiusMiles: payload.serviceRadiusMiles,
+          skills: payload.skills,
+        }).filter(([, value]) => value !== undefined)
+      ),
+    };
+  }
+
+  if (user.role === ROLES.ADMIN) {
+    user.adminProfile = {
+      ...(user.adminProfile || {}),
+      ...Object.fromEntries(
+        Object.entries({
+          fullName: payload.fullName,
+          phoneNumber: payload.phoneNumber,
+          profilePhotoUrl: payload.profilePhotoUrl,
+        }).filter(([, value]) => value !== undefined)
+      ),
+    };
+  }
+
+  await user.save();
+  await writeAuditLog(
+    adminUser,
+    "Updated User",
+    `${user.role}:${user.email}`,
+    "User Management"
+  );
+
+  return serializeAdminUser(user.toObject());
+};
+
 export const listAdminFleet = async (query = {}) => {
   const companyFilter = { role: ROLES.FLEET };
 
@@ -675,6 +948,132 @@ export const listAdminFleet = async (query = {}) => {
       ).length,
     },
   };
+};
+
+export const createAdminFleetCompany = async (payload = {}, adminUser) =>
+  createAdminUserOrCompany(
+    {
+      role: ROLES.FLEET,
+      email: payload.email,
+      password: payload.password,
+      status: payload.status,
+      companyName: payload.companyName,
+      contactName: payload.contactName,
+      contactRole: payload.contactRole,
+      phone: payload.phone,
+      regNumber: payload.regNumber,
+      vatNumber: payload.vatNumber,
+      fleetSize: payload.fleetSize,
+      billingAddress: payload.billingAddress,
+    },
+    adminUser
+  );
+
+export const updateAdminFleetCompany = async (fleetId, payload = {}, adminUser) => {
+  const fleet = await User.findOne({ _id: fleetId, role: ROLES.FLEET });
+  if (!fleet) throw new AppError("Fleet company not found", 404);
+
+  fleet.fleetProfile = {
+    ...(fleet.fleetProfile || {}),
+    ...Object.fromEntries(
+      Object.entries({
+        companyName: payload.companyName,
+        contactName: payload.contactName,
+        contactRole: payload.contactRole,
+        phone: payload.phone,
+        regNumber: payload.regNumber,
+        vatNumber: payload.vatNumber,
+        fleetSize: payload.fleetSize,
+        billingAddress: payload.billingAddress,
+      }).filter(([, value]) => value !== undefined)
+    ),
+  };
+
+  if (payload.status !== undefined) {
+    const nextStatus = `${payload.status}`.trim().toUpperCase();
+    if (!userStatusValues.includes(nextStatus)) {
+      throw new AppError(`status must be one of ${userStatusValues.join(", ")}`, 400);
+    }
+    fleet.status = nextStatus;
+  }
+
+  await fleet.save();
+  await writeAuditLog(
+    adminUser,
+    "Updated Fleet",
+    fleet.fleetProfile?.companyName || fleet.email,
+    "Fleet Management"
+  );
+
+  const vehicles = await Vehicle.find({ fleet: fleet._id }).sort({ createdAt: -1 }).lean();
+  return serializeFleetManagementItem(fleet.toObject(), vehicles);
+};
+
+export const createAdminFleetVehicle = async (fleetId, payload = {}, adminUser) => {
+  const fleet = await User.findOne({ _id: fleetId, role: ROLES.FLEET }).lean();
+  if (!fleet) throw new AppError("Fleet company not found", 404);
+
+  const registration = normalizeRegistration(payload.registration);
+  if (!registration) throw new AppError("registration is required", 400);
+
+  const duplicate = await Vehicle.findOne({ fleet: fleetId, registration });
+  if (duplicate) throw new AppError("Vehicle registration already exists", 409);
+
+  const vehicle = await Vehicle.create({
+    fleet: fleetId,
+    registration,
+    type: payload.type,
+    make: payload.make,
+    model: payload.model,
+    year: payload.year,
+    vin: payload.vin,
+    isActive: payload.isActive ?? true,
+  });
+
+  await writeAuditLog(
+    adminUser,
+    "Added Fleet Vehicle",
+    `${fleet.fleetProfile?.companyName || fleet.email}:${registration}`,
+    "Fleet Management"
+  );
+
+  return vehicle.toObject();
+};
+
+export const updateAdminFleetVehicle = async (
+  fleetId,
+  vehicleId,
+  payload = {},
+  adminUser
+) => {
+  const vehicle = await Vehicle.findOne({ _id: vehicleId, fleet: fleetId });
+  if (!vehicle) throw new AppError("Vehicle not found", 404);
+
+  if (payload.registration !== undefined) {
+    const registration = normalizeRegistration(payload.registration);
+    if (!registration) throw new AppError("registration cannot be empty", 400);
+    const duplicate = await Vehicle.findOne({
+      _id: { $ne: vehicle._id },
+      fleet: fleetId,
+      registration,
+    });
+    if (duplicate) throw new AppError("Vehicle registration already exists", 409);
+    vehicle.registration = registration;
+  }
+
+  for (const field of ["type", "make", "model", "year", "vin", "isActive"]) {
+    if (payload[field] !== undefined) vehicle[field] = payload[field];
+  }
+
+  await vehicle.save();
+  await writeAuditLog(
+    adminUser,
+    "Updated Fleet Vehicle",
+    vehicle.registration,
+    "Fleet Management"
+  );
+
+  return vehicle.toObject();
 };
 
 export const getAdminFinancialOverview = async (query = {}) => {
@@ -750,6 +1149,90 @@ export const getAdminFinancialOverview = async (query = {}) => {
       status: invoice.status === "PAID" ? "PAID" : invoice.status === "ISSUED" ? "PENDING" : invoice.status,
       date: invoice.paidAt || invoice.issuedAt,
     })),
+  };
+};
+
+export const createAdminFinancialInvoice = async (payload = {}, adminUser) => {
+  if (!payload.fleetId || !payload.mechanicId) {
+    throw new AppError("fleetId and mechanicId are required", 400);
+  }
+
+  const subtotal = Number(payload.subtotal ?? payload.totalAmount);
+  if (!Number.isFinite(subtotal) || subtotal <= 0) {
+    throw new AppError("subtotal or totalAmount must be greater than zero", 400);
+  }
+
+  const vatAmount = Number.isFinite(Number(payload.vatAmount))
+    ? Number(payload.vatAmount)
+    : Math.round(subtotal * 0.2 * 100) / 100;
+  const totalAmount = Number.isFinite(Number(payload.totalAmount))
+    ? Number(payload.totalAmount)
+    : Math.round((subtotal + vatAmount) * 100) / 100;
+
+  const invoice = await Invoice.create({
+    invoiceNo: await generateAdminInvoiceNo(),
+    job: payload.jobId,
+    fleet: payload.fleetId,
+    mechanic: payload.mechanicId,
+    subtotal,
+    vatAmount,
+    totalAmount,
+    currency: payload.currency || "GBP",
+    status: `${payload.status || "ISSUED"}`.trim().toUpperCase(),
+    issuedAt: payload.issuedAt ? new Date(payload.issuedAt) : new Date(),
+    paidAt: payload.paidAt ? new Date(payload.paidAt) : undefined,
+    payment: {
+      provider: payload.provider || "MANUAL",
+      status: `${payload.paymentStatus || "PENDING"}`.trim().toUpperCase(),
+      updatedAt: new Date(),
+    },
+    lineItems:
+      payload.lineItems?.length
+        ? payload.lineItems
+        : [
+            {
+              description: payload.description || "Admin created invoice",
+              quantity: 1,
+              unitAmount: subtotal,
+              totalAmount: subtotal,
+            },
+          ],
+    billedToSnapshot: {
+      companyName: payload.companyName,
+      vatNumber: payload.vatNumber,
+      address: payload.billingAddress,
+    },
+    mechanicSnapshot: {
+      displayName: payload.mechanicName,
+      businessName: payload.mechanicBusinessName,
+      rating: payload.mechanicRating,
+    },
+  });
+
+  await writeAuditLog(
+    adminUser,
+    "Created Invoice",
+    `${invoice.invoiceNo} (${invoice.totalAmount})`,
+    "Financial"
+  );
+
+  return invoice.toObject();
+};
+
+export const exportAdminFinancialOverview = async (query = {}) => {
+  const format = `${query.format || "CSV"}`.trim().toUpperCase();
+  const overview = await getAdminFinancialOverview(query);
+  return {
+    format,
+    generatedAt: new Date(),
+    filters: {
+      status: query.status || null,
+      search: query.search || null,
+    },
+    summary: overview.summary,
+    count: overview.items.length,
+    items: overview.items,
+    downloadUrl: null,
   };
 };
 
@@ -1050,6 +1533,65 @@ export const listAdminNotifications = async () => {
       ).length,
     },
   };
+};
+
+export const markAdminNotificationRead = async (notificationId, adminUser) => {
+  const notification = await Notification.findById(notificationId);
+  if (!notification) throw new AppError("Notification not found", 404);
+
+  notification.isRead = true;
+  notification.readAt = notification.readAt || new Date();
+  await notification.save();
+
+  await writeAuditLog(
+    adminUser,
+    "Marked Notification Read",
+    notification.title || notification._id.toString(),
+    "Notifications"
+  );
+
+  return {
+    _id: notification._id,
+    isRead: notification.isRead,
+    readAt: notification.readAt,
+  };
+};
+
+export const markAllAdminNotificationsRead = async (adminUser) => {
+  const unreadNotifications = await Notification.find({ isRead: false }).select("_id title");
+  if (!unreadNotifications.length) {
+    return { updatedCount: 0 };
+  }
+
+  const ids = unreadNotifications.map((item) => item._id);
+  await Notification.updateMany(
+    { _id: { $in: ids } },
+    { $set: { isRead: true, readAt: new Date() } }
+  );
+
+  await writeAuditLog(
+    adminUser,
+    "Marked All Notifications Read",
+    `${ids.length} notifications`,
+    "Notifications"
+  );
+
+  return { updatedCount: ids.length };
+};
+
+export const removeAdminNotification = async (notificationId, adminUser) => {
+  const notification = await Notification.findById(notificationId);
+  if (!notification) throw new AppError("Notification not found", 404);
+
+  await Notification.deleteOne({ _id: notification._id });
+  await writeAuditLog(
+    adminUser,
+    "Deleted Notification",
+    notification.title || notification._id.toString(),
+    "Notifications"
+  );
+
+  return { _id: notification._id, deleted: true };
 };
 
 export const listAdminServiceCatalog = async (query = {}) => {
@@ -1364,20 +1906,112 @@ export const getAdminReports = async (query = {}) => {
   };
 };
 
-export const getAdminSettings = async (adminUser) => ({
-  profile: {
-    _id: adminUser._id,
-    email: adminUser.email,
-    fullName: adminUser.email.split("@")[0],
-    phoneNumber: null,
-    role: adminUser.role,
-  },
-  preferences: {
-    timeZone: "GMT",
-    language: "English",
-    notifications: true,
-  },
-});
+export const exportAdminReports = async (query = {}) => {
+  const report = await getAdminReports(query);
+  return {
+    generatedAt: new Date(),
+    format: `${query.format || report.exportFormat || "PDF"}`.trim().toUpperCase(),
+    report,
+    downloadUrl: null,
+  };
+};
+
+export const getAdminSettings = async (adminUser) => {
+  const freshAdmin = await User.findById(adminUser._id).lean();
+  if (!freshAdmin) throw new AppError("Admin not found", 404);
+
+  return {
+    profile: {
+      _id: freshAdmin._id,
+      email: freshAdmin.email,
+      fullName:
+        freshAdmin.adminProfile?.fullName ||
+        freshAdmin.email.split("@")[0],
+      phoneNumber: freshAdmin.adminProfile?.phoneNumber || null,
+      role: freshAdmin.role,
+      profilePhotoUrl: freshAdmin.adminProfile?.profilePhotoUrl || null,
+    },
+    preferences: {
+      timeZone: freshAdmin.adminSettings?.timeZone || "GMT",
+      language: freshAdmin.adminSettings?.language || "English",
+      notificationsEnabled:
+        freshAdmin.adminSettings?.notificationsEnabled ?? true,
+      securityAlertsEnabled:
+        freshAdmin.adminSettings?.securityAlertsEnabled ?? true,
+      regionalFormat: freshAdmin.adminSettings?.regionalFormat || "en-GB",
+      billingEmail: freshAdmin.adminSettings?.billingEmail || freshAdmin.email,
+      privacyMode: freshAdmin.adminSettings?.privacyMode || "STANDARD",
+    },
+  };
+};
+
+export const updateAdminSettings = async (adminUser, payload = {}) => {
+  const admin = await User.findById(adminUser._id);
+  if (!admin) throw new AppError("Admin not found", 404);
+
+  admin.adminProfile = {
+    ...(admin.adminProfile || {}),
+    ...(payload.profile || {}),
+  };
+
+  if (payload.profile?.fullName !== undefined) {
+    admin.adminProfile.fullName = `${payload.profile.fullName || ""}`.trim() || undefined;
+  }
+  if (payload.profile?.phoneNumber !== undefined) {
+    admin.adminProfile.phoneNumber =
+      `${payload.profile.phoneNumber || ""}`.trim() || undefined;
+  }
+  if (payload.profile?.profilePhotoUrl !== undefined) {
+    admin.adminProfile.profilePhotoUrl =
+      `${payload.profile.profilePhotoUrl || ""}`.trim() || undefined;
+  }
+
+  admin.adminSettings = {
+    ...(admin.adminSettings || {}),
+    ...(payload.preferences || {}),
+  };
+
+  if (payload.preferences?.timeZone !== undefined) {
+    admin.adminSettings.timeZone =
+      `${payload.preferences.timeZone || ""}`.trim() || "GMT";
+  }
+  if (payload.preferences?.language !== undefined) {
+    admin.adminSettings.language =
+      `${payload.preferences.language || ""}`.trim() || "English";
+  }
+  if (payload.preferences?.regionalFormat !== undefined) {
+    admin.adminSettings.regionalFormat =
+      `${payload.preferences.regionalFormat || ""}`.trim() || "en-GB";
+  }
+  if (payload.preferences?.billingEmail !== undefined) {
+    admin.adminSettings.billingEmail =
+      `${payload.preferences.billingEmail || ""}`.trim().toLowerCase() || undefined;
+  }
+  if (payload.preferences?.privacyMode !== undefined) {
+    admin.adminSettings.privacyMode =
+      `${payload.preferences.privacyMode || ""}`.trim().toUpperCase() || "STANDARD";
+  }
+  if (payload.preferences?.notificationsEnabled !== undefined) {
+    admin.adminSettings.notificationsEnabled = Boolean(
+      payload.preferences.notificationsEnabled
+    );
+  }
+  if (payload.preferences?.securityAlertsEnabled !== undefined) {
+    admin.adminSettings.securityAlertsEnabled = Boolean(
+      payload.preferences.securityAlertsEnabled
+    );
+  }
+
+  await admin.save();
+  await writeAuditLog(
+    adminUser,
+    "Updated Admin Settings",
+    admin.email,
+    "Settings"
+  );
+
+  return getAdminSettings(admin);
+};
 
 export const approveMechanic = async (userId, payload = {}) => {
   const mechanic = await findMechanicById(userId);

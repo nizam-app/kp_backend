@@ -2,11 +2,13 @@ import AppError from "../../utils/AppError.js";
 import { PaymentMethod } from "./paymentMethod.model.js";
 import {
   attachStripePaymentMethodToCustomer,
+  constructStripeWebhookEvent,
   createStripeSetupIntent,
   ensureStripeCustomerForUser,
   getStripePublicConfig,
   retrieveStripePaymentMethod,
 } from "./stripe.service.js";
+import { processStripeWebhookEvent } from "./stripeWebhook.service.js";
 
 const methodTypeValues = ["CARD", "BANK_ACCOUNT"];
 
@@ -255,4 +257,16 @@ export const removePaymentMethod = async (user, methodId) => {
   }
 
   return { message: "Payment method removed" };
+};
+
+export const handleStripeWebhook = async (rawBody, signatureHeader) => {
+  const event = constructStripeWebhookEvent(rawBody, signatureHeader);
+  const result = await processStripeWebhookEvent(event);
+
+  return {
+    received: true,
+    eventId: event.id || null,
+    eventType: event.type,
+    result,
+  };
 };

@@ -109,6 +109,28 @@ const mechanicProfileSchema = new Schema(
   { _id: false }
 );
 
+const adminProfileSchema = new Schema(
+  {
+    fullName: { type: String, trim: true },
+    phoneNumber: { type: String, trim: true },
+    profilePhotoUrl: { type: String, trim: true },
+  },
+  { _id: false }
+);
+
+const adminSettingsSchema = new Schema(
+  {
+    timeZone: { type: String, trim: true, default: "GMT" },
+    language: { type: String, trim: true, default: "English" },
+    notificationsEnabled: { type: Boolean, default: true },
+    securityAlertsEnabled: { type: Boolean, default: true },
+    regionalFormat: { type: String, trim: true, default: "en-GB" },
+    billingEmail: { type: String, trim: true, lowercase: true },
+    privacyMode: { type: String, trim: true, default: "STANDARD" },
+  },
+  { _id: false }
+);
+
 const userSchema = new Schema(
   {
     email: {
@@ -149,6 +171,8 @@ const userSchema = new Schema(
       version: { type: String, trim: true },
       source: { type: String, trim: true },
     },
+    adminProfile: adminProfileSchema,
+    adminSettings: adminSettingsSchema,
     fleetProfile: fleetProfileSchema,
     mechanicProfile: mechanicProfileSchema,
     passwordChangedAt: Date,

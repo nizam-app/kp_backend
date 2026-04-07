@@ -6,9 +6,13 @@ import {
   adminDashboardController,adminAuditLogsController,adminDisputesController,adminFinancialController,adminFleetController,adminLiveTrackingController,
   adminNotificationsController,adminPromotionsController,adminReportsController,adminReviewsController,adminServiceCatalogController,
   adminServiceRequestsController,adminSettingsController,adminSupportTicketsController,adminUsersController,approveMechanicController,
+  createAdminFinancialInvoiceController,createAdminFleetController,createAdminFleetVehicleController,createAdminUserController,
   createAdminDisputeController,createAdminPromotionController,createAdminServiceCatalogController,mechanicReviewQueueController,rejectMechanicController,
+  markAdminNotificationReadController,markAllAdminNotificationsReadController,removeAdminNotificationController,
+  exportAdminFinancialController,exportAdminReportsController,
   updateAdminPromotionController,updateAdminReviewController,updateAdminServiceCatalogController,updateAdminDisputeController,
-  updateAdminSupportTicketController,updateUserStatusController,
+  updateAdminFleetController,updateAdminFleetVehicleController,updateAdminServiceRequestController,updateAdminSettingsController,updateAdminSupportTicketController,
+  updateAdminUserController,updateUserStatusController,
 } from "./admin.controller.js";
 
 const router = Router();
@@ -19,19 +23,33 @@ router.use(catchAsync(authorize(ROLES.ADMIN)));
 
 router.get("/dashboard", catchAsync(adminDashboardController));
 router.get("/service-requests", catchAsync(adminServiceRequestsController));
+router.patch("/service-requests/:jobId", catchAsync(updateAdminServiceRequestController));
 router.get("/users", catchAsync(adminUsersController));
+router.post("/users", catchAsync(createAdminUserController));
+router.patch("/users/:userId", catchAsync(updateAdminUserController));
 router.get("/fleet", catchAsync(adminFleetController));
+router.post("/fleet", catchAsync(createAdminFleetController));
+router.patch("/fleet/:fleetId", catchAsync(updateAdminFleetController));
+router.post("/fleet/:fleetId/vehicles", catchAsync(createAdminFleetVehicleController));
+router.patch("/fleet/:fleetId/vehicles/:vehicleId", catchAsync(updateAdminFleetVehicleController));
 router.get("/financial", catchAsync(adminFinancialController));
+router.post("/financial/invoices", catchAsync(createAdminFinancialInvoiceController));
+router.get("/financial/export", catchAsync(exportAdminFinancialController));
 router.get("/live-tracking", catchAsync(adminLiveTrackingController));
 router.get("/reports", catchAsync(adminReportsController));
+router.get("/reports/export", catchAsync(exportAdminReportsController));
 router.get("/audit-log", catchAsync(adminAuditLogsController));
 router.get("/settings", catchAsync(adminSettingsController));
+router.patch("/settings", catchAsync(updateAdminSettingsController));
 router.get("/support", catchAsync(adminSupportTicketsController));
 router.patch("/support/:ticketId", catchAsync(updateAdminSupportTicketController));
 router.get("/disputes", catchAsync(adminDisputesController));
 router.post("/disputes", catchAsync(createAdminDisputeController));
 router.patch("/disputes/:disputeId", catchAsync(updateAdminDisputeController));
 router.get("/notifications", catchAsync(adminNotificationsController));
+router.patch("/notifications/read-all", catchAsync(markAllAdminNotificationsReadController));
+router.patch("/notifications/:notificationId/read", catchAsync(markAdminNotificationReadController));
+router.delete("/notifications/:notificationId", catchAsync(removeAdminNotificationController));
 router.get("/service-catalog", catchAsync(adminServiceCatalogController));
 router.post("/service-catalog", catchAsync(createAdminServiceCatalogController));
 router.patch(

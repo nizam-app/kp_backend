@@ -1,9 +1,15 @@
 import { sendResponse } from "../../utils/sendResponse.js";
 import {
+  createAdminFleetCompany,
+  createAdminFleetVehicle,
+  createAdminFinancialInvoice,
   createAdminDispute,
   createAdminPromotion,
   createAdminServiceCatalogItem,
+  createAdminUserOrCompany,
   approveMechanic,
+  exportAdminFinancialOverview,
+  exportAdminReports,
   getAdminDashboard,
   getAdminFinancialOverview,
   getAdminLiveTracking,
@@ -20,12 +26,20 @@ import {
   listAdminServiceRequests,
   listAdminUsers,
   listMechanicReviewQueue,
+  markAdminNotificationRead,
+  markAllAdminNotificationsRead,
   rejectMechanic,
+  removeAdminNotification,
+  updateAdminFleetCompany,
+  updateAdminFleetVehicle,
+  updateAdminServiceRequest,
   updateAdminPromotion,
   updateAdminReview,
   updateAdminServiceCatalogItem,
   updateAdminDispute,
+  updateAdminSettings,
   updateAdminSupportTicket,
+  updateAdminUser,
   updateUserStatus,
 } from "./admin.service.js";
 
@@ -49,6 +63,14 @@ export const adminServiceRequestsController = async (req, res) => {
   });
 };
 
+export const updateAdminServiceRequestController = async (req, res) => {
+  const result = await updateAdminServiceRequest(req.params.jobId, req.body, req.user);
+  return sendResponse(res, {
+    message: "Admin service request updated",
+    data: result,
+  });
+};
+
 export const adminUsersController = async (req, res) => {
   const result = await listAdminUsers(req.query);
   return sendResponse(res, {
@@ -61,6 +83,23 @@ export const adminUsersController = async (req, res) => {
   });
 };
 
+export const createAdminUserController = async (req, res) => {
+  const result = await createAdminUserOrCompany(req.body, req.user);
+  return sendResponse(res, {
+    statusCode: 201,
+    message: "Admin user created",
+    data: result,
+  });
+};
+
+export const updateAdminUserController = async (req, res) => {
+  const result = await updateAdminUser(req.params.userId, req.body, req.user);
+  return sendResponse(res, {
+    message: "Admin user updated",
+    data: result,
+  });
+};
+
 export const adminFleetController = async (req, res) => {
   const result = await listAdminFleet(req.query);
   return sendResponse(res, {
@@ -69,10 +108,66 @@ export const adminFleetController = async (req, res) => {
   });
 };
 
+export const createAdminFleetController = async (req, res) => {
+  const result = await createAdminFleetCompany(req.body, req.user);
+  return sendResponse(res, {
+    statusCode: 201,
+    message: "Admin fleet company created",
+    data: result,
+  });
+};
+
+export const updateAdminFleetController = async (req, res) => {
+  const result = await updateAdminFleetCompany(req.params.fleetId, req.body, req.user);
+  return sendResponse(res, {
+    message: "Admin fleet company updated",
+    data: result,
+  });
+};
+
+export const createAdminFleetVehicleController = async (req, res) => {
+  const result = await createAdminFleetVehicle(req.params.fleetId, req.body, req.user);
+  return sendResponse(res, {
+    statusCode: 201,
+    message: "Admin fleet vehicle created",
+    data: result,
+  });
+};
+
+export const updateAdminFleetVehicleController = async (req, res) => {
+  const result = await updateAdminFleetVehicle(
+    req.params.fleetId,
+    req.params.vehicleId,
+    req.body,
+    req.user
+  );
+  return sendResponse(res, {
+    message: "Admin fleet vehicle updated",
+    data: result,
+  });
+};
+
 export const adminFinancialController = async (req, res) => {
   const result = await getAdminFinancialOverview(req.query);
   return sendResponse(res, {
     message: "Admin financial overview fetched",
+    data: result,
+  });
+};
+
+export const createAdminFinancialInvoiceController = async (req, res) => {
+  const result = await createAdminFinancialInvoice(req.body, req.user);
+  return sendResponse(res, {
+    statusCode: 201,
+    message: "Admin invoice created",
+    data: result,
+  });
+};
+
+export const exportAdminFinancialController = async (req, res) => {
+  const result = await exportAdminFinancialOverview(req.query);
+  return sendResponse(res, {
+    message: "Admin financial export prepared",
     data: result,
   });
 };
@@ -138,6 +233,30 @@ export const adminNotificationsController = async (_req, res) => {
   const result = await listAdminNotifications();
   return sendResponse(res, {
     message: "Admin notifications fetched",
+    data: result,
+  });
+};
+
+export const markAdminNotificationReadController = async (req, res) => {
+  const result = await markAdminNotificationRead(req.params.notificationId, req.user);
+  return sendResponse(res, {
+    message: "Admin notification marked as read",
+    data: result,
+  });
+};
+
+export const markAllAdminNotificationsReadController = async (req, res) => {
+  const result = await markAllAdminNotificationsRead(req.user);
+  return sendResponse(res, {
+    message: "Admin notifications marked as read",
+    data: result,
+  });
+};
+
+export const removeAdminNotificationController = async (req, res) => {
+  const result = await removeAdminNotification(req.params.notificationId, req.user);
+  return sendResponse(res, {
+    message: "Admin notification deleted",
     data: result,
   });
 };
@@ -224,10 +343,26 @@ export const adminReportsController = async (req, res) => {
   });
 };
 
+export const exportAdminReportsController = async (req, res) => {
+  const result = await exportAdminReports(req.query);
+  return sendResponse(res, {
+    message: "Admin report export prepared",
+    data: result,
+  });
+};
+
 export const adminSettingsController = async (req, res) => {
   const result = await getAdminSettings(req.user);
   return sendResponse(res, {
     message: "Admin settings fetched",
+    data: result,
+  });
+};
+
+export const updateAdminSettingsController = async (req, res) => {
+  const result = await updateAdminSettings(req.user, req.body);
+  return sendResponse(res, {
+    message: "Admin settings updated",
     data: result,
   });
 };
