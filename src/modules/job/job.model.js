@@ -72,6 +72,7 @@ const jobSchema = new Schema(
   {
     jobCode: { type: String, unique: true, index: true },
     fleet: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
+    assignedCompany: { type: Schema.Types.ObjectId, ref: "User", index: true },
     assignedMechanic: { type: Schema.Types.ObjectId, ref: "User", index: true },
     acceptedQuote: { type: Schema.Types.ObjectId, ref: "Quote" },
     vehicle: vehicleInfoSchema,
@@ -111,6 +112,11 @@ const jobSchema = new Schema(
       latestMechanicLocation: journeyLocationSchema,
       etaMinutes: { type: Number, min: 0 },
     },
+    companyAssignment: {
+      assignedBy: { type: Schema.Types.ObjectId, ref: "User" },
+      assignedAt: Date,
+      note: { type: String, trim: true },
+    },
     cancellation: {
       reason: { type: String, trim: true },
       fee: { type: Number, min: 0, default: 0 },
@@ -129,5 +135,6 @@ jobSchema.index({ "location": "2dsphere" });
 jobSchema.index({ mode: 1, scheduledFor: 1 });
 jobSchema.index({ fleet: 1, status: 1, createdAt: -1 });
 jobSchema.index({ assignedMechanic: 1, status: 1, createdAt: -1 });
+jobSchema.index({ assignedCompany: 1, status: 1, createdAt: -1 });
 
 export const Job = model("Job", jobSchema);

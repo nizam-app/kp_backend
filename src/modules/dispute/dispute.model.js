@@ -7,6 +7,8 @@ const disputeSchema = new Schema(
     title: { type: String, required: true, trim: true },
     description: { type: String, trim: true },
     company: { type: Schema.Types.ObjectId, ref: "User", index: true },
+    job: { type: Schema.Types.ObjectId, ref: "Job", index: true },
+    invoice: { type: Schema.Types.ObjectId, ref: "Invoice", index: true },
     customerName: { type: String, trim: true },
     mechanic: { type: Schema.Types.ObjectId, ref: "User", index: true },
     serviceLabel: { type: String, trim: true },
@@ -33,5 +35,6 @@ const disputeSchema = new Schema(
 
 disputeSchema.index({ createdAt: -1 });
 disputeSchema.index({ company: 1, status: 1 });
+disputeSchema.index({ invoice: 1, createdAt: -1 });
 
 export const Dispute = model("Dispute", disputeSchema);

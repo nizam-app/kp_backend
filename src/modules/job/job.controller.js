@@ -1,10 +1,12 @@
 import { sendResponse } from "../../utils/sendResponse.js";
 import {
+  addJobPhotos,
   approveJobCompletion,
   arriveAtJob,
   cancelJob,
   completeJobWork,
   createJob,
+  removeJobPhoto,
   getJobByIdForUser,
   getJobTimeline,
   createJobLocationPing,
@@ -99,6 +101,23 @@ export const jobLocationPingController = async (req, res) => {
   const result = await createJobLocationPing(req.params.jobId, req.user, req.body);
   return sendResponse(res, {
     message: "Location ping recorded",
+    data: result,
+  });
+};
+
+export const addJobPhotosController = async (req, res) => {
+  const result = await addJobPhotos(req.params.jobId, req.user, req.body);
+  return sendResponse(res, {
+    statusCode: 201,
+    message: "Job photos uploaded",
+    data: result,
+  });
+};
+
+export const removeJobPhotoController = async (req, res) => {
+  const result = await removeJobPhoto(req.params.jobId, req.user, req.body);
+  return sendResponse(res, {
+    message: "Job photo removed",
     data: result,
   });
 };

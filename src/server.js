@@ -1,13 +1,18 @@
-﻿import app from "./app.js";
+import { createServer } from "http";
+import app from "./app.js";
 import { env } from "./config/env.js";
 import { connectDB } from "./config/db.js";
+import { initRealtimeServer } from "./realtime/socket.js";
 
 let server;
 
 const start = async () => {
   await connectDB();
 
-  server = app.listen(env.PORT, env.HOST, () => {
+  const httpServer = createServer(app);
+  initRealtimeServer(httpServer);
+
+  server = httpServer.listen(env.PORT, env.HOST, () => {
     console.log(`Server running on ${env.HOST}:${env.PORT} (${env.NODE_ENV})`);
   });
 };

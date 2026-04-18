@@ -18,6 +18,8 @@ const quoteSchema = new Schema(
       required: true,
       index: true,
     },
+    company: { type: Schema.Types.ObjectId, ref: "User", index: true },
+    submittedBy: { type: Schema.Types.ObjectId, ref: "User" },
     amount: { type: Number, required: true, min: 0 },
     notes: { type: String, trim: true },
     availabilityType: {
@@ -49,6 +51,7 @@ const quoteSchema = new Schema(
 
 quoteSchema.index({ job: 1, mechanic: 1, status: 1 });
 quoteSchema.index({ mechanic: 1, createdAt: -1 });
+quoteSchema.index({ company: 1, createdAt: -1 });
 quoteSchema.index({ status: 1, expiresAt: 1 });
 
 export const Quote = model("Quote", quoteSchema);

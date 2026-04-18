@@ -1,17 +1,20 @@
 import express from "express";
 import cors from "cors";
+import path from "path";
 import routes from "./routes/index.js";
 import { notFound } from "./middlewares/notFound.js";
 import { globalError } from "./middlewares/globalError.js";
 
 const app = express();
+const uploadsDir = path.resolve(process.cwd(), "uploads");
 
 app.use(cors());
 app.use(
   "/api/v1/billing/stripe/webhook",
   express.raw({ type: "application/json" })
 );
-app.use(express.json());
+app.use(express.json({ limit: "12mb" }));
+app.use("/uploads", express.static(uploadsDir));
 
 app.get("/", (_req, res) =>
   res.json({

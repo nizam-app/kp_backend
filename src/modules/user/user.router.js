@@ -19,12 +19,12 @@ router.patch("/me/preferences", catchAsync(updatePreferencesController));
 router.patch("/me/terms", catchAsync(acceptTermsController));
 router.patch(
   "/me/availability",
-  catchAsync(authorize(ROLES.MECHANIC)),
+  catchAsync(authorize(ROLES.MECHANIC, ROLES.MECHANIC_EMPLOYEE)),
   catchAsync(updateMechanicAvailabilityController)
 );
 router.patch(
   "/mechanic/availability",
-  catchAsync(authorize(ROLES.MECHANIC)),
+  catchAsync(authorize(ROLES.MECHANIC, ROLES.MECHANIC_EMPLOYEE)),
   catchAsync(updateMechanicAvailabilityController)
 );
 

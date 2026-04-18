@@ -1,8 +1,11 @@
 import { sendResponse } from "../../utils/sendResponse.js";
 import {
   attachStripeCardPaymentMethod,
+  createMechanicStripeDashboardLink,
+  createMechanicStripeOnboardingLink,
   createPaymentMethod,
   createStripeSetupIntentForUser,
+  getMechanicStripePayoutAccount,
   getStripeBillingConfig,
   handleStripeWebhook,
   listPaymentMethods,
@@ -40,6 +43,30 @@ export const createStripeSetupIntentController = async (req, res) => {
   return sendResponse(res, {
     message: "Stripe setup intent created",
     data: setupIntent,
+  });
+};
+
+export const mechanicStripePayoutAccountController = async (req, res) => {
+  const account = await getMechanicStripePayoutAccount(req.user);
+  return sendResponse(res, {
+    message: "Mechanic Stripe payout account fetched",
+    data: account,
+  });
+};
+
+export const mechanicStripeOnboardingLinkController = async (req, res) => {
+  const result = await createMechanicStripeOnboardingLink(req.user, req.body);
+  return sendResponse(res, {
+    message: "Mechanic Stripe onboarding link created",
+    data: result,
+  });
+};
+
+export const mechanicStripeDashboardLinkController = async (req, res) => {
+  const result = await createMechanicStripeDashboardLink(req.user);
+  return sendResponse(res, {
+    message: "Mechanic Stripe dashboard link created",
+    data: result,
   });
 };
 

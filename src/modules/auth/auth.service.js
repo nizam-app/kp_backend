@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import AppError from "../../utils/AppError.js";
 import { User } from "../user/user.model.js";
+import { CompanyInvite } from "../company/companyInvite.model.js";
 import {
   signAccessToken,
   signRefreshToken,
@@ -18,8 +19,11 @@ const hashToken = (token) =>
   crypto.createHash("sha256").update(token).digest("hex");
 
 const assertRoleAllowed = (role) => {
-  if (![ROLES.FLEET, ROLES.MECHANIC].includes(role)) {
-    throw new AppError("Invalid role. Allowed: FLEET, MECHANIC", 400);
+  if (![ROLES.FLEET, ROLES.MECHANIC, ROLES.COMPANY, ROLES.MECHANIC_EMPLOYEE].includes(role)) {
+    throw new AppError(
+      "Invalid role. Allowed: FLEET, MECHANIC, COMPANY, MECHANIC_EMPLOYEE",
+      400
+    );
   }
 };
 
@@ -35,6 +39,30 @@ const assertMechanicPayload = (payload) => {
     !Object.values(MECHANIC_BUSINESS_TYPE).includes(payload.businessType)
   ) {
     throw new AppError("Invalid mechanic businessType", 400);
+  }
+};
+
+const assertCompanyPayload = (payload) => {
+  if (!payload.companyName) {
+    throw new AppError("companyName is required for company registration", 400);
+  }
+  if (!payload.fullName) {
+    throw new AppError("fullName is required for company registration", 400);
+  }
+  if (!payload.phone) {
+    throw new AppError("phone is required for company registration", 400);
+  }
+};
+
+const assertMechanicEmployeePayload = (payload) => {
+  if (!payload.inviteToken) {
+    throw new AppError("inviteToken is required for mechanic employee registration", 400);
+  }
+  if (!payload.fullName && !payload.displayName) {
+    throw new AppError("fullName is required for mechanic employee registration", 400);
+  }
+  if (!payload.phone) {
+    throw new AppError("phone is required for mechanic employee registration", 400);
   }
 };
 
@@ -56,7 +84,16 @@ const resolveNextStep = (user) => {
   if (user.role === ROLES.FLEET && !user.fleetProfile?.profileCompleted) {
     return "COMPLETE_PROFILE";
   }
+  if (user.role === ROLES.COMPANY && !user.companyProfile?.profileCompleted) {
+    return "COMPLETE_PROFILE";
+  }
   if (user.role === ROLES.MECHANIC && !user.mechanicProfile?.profileCompleted) {
+    return "COMPLETE_PROFILE";
+  }
+  if (
+    user.role === ROLES.MECHANIC_EMPLOYEE &&
+    !user.mechanicProfile?.profileCompleted
+  ) {
     return "COMPLETE_PROFILE";
   }
   return "GO_DASHBOARD";
@@ -75,6 +112,22 @@ const applyRoleProfile = (role, payload) => {
         fleetSize: payload.fleetSize,
         defaultAddress: payload.defaultAddress,
         billingAddress: payload.billingAddress,
+      },
+    };
+  }
+
+  if (role === ROLES.COMPANY) {
+    return {
+      companyProfile: {
+        companyName: payload.companyName,
+        contactName: payload.contactName || payload.fullName,
+        contactRole: payload.contactRole,
+        phone: payload.phone,
+        regNumber: payload.regNumber,
+        vatNumber: payload.vatNumber,
+        billingAddress: payload.billingAddress,
+        baseLocationText: payload.baseLocationText,
+        serviceRadiusMiles: payload.coverageRadius ?? payload.serviceRadiusMiles,
       },
     };
   }
@@ -116,18 +169,62 @@ export const registerUser = async (payload = {}) => {
 
   assertRoleAllowed(role);
   if (role === ROLES.MECHANIC) assertMechanicPayload(payload);
+  if (role === ROLES.COMPANY) assertCompanyPayload(payload);
+  if (role === ROLES.MECHANIC_EMPLOYEE) assertMechanicEmployeePayload(payload);
 
   const existing = await User.findOne({ email: email.toLowerCase() });
   if (existing) throw new AppError("Email already in use", 409);
 
-  const profileFields = applyRoleProfile(role, payload);
+  let invite = null;
+  if (role === ROLES.MECHANIC_EMPLOYEE) {
+    invite = await CompanyInvite.findOne({
+      token: payload.inviteToken,
+      email: email.toLowerCase(),
+      status: "PENDING",
+      expiresAt: { $gt: new Date() },
+    });
+    if (!invite) {
+      throw new AppError("Invite is invalid or expired", 400);
+    }
+  }
+
+  const profileFields = applyRoleProfile(
+    role === ROLES.MECHANIC_EMPLOYEE ? ROLES.MECHANIC : role,
+    {
+      ...payload,
+      businessType: MECHANIC_BUSINESS_TYPE.COMPANY,
+      businessName: payload.businessName || undefined,
+    }
+  );
+
   const user = await User.create({
     email,
     password,
     role,
-    status: role === ROLES.MECHANIC ? USER_STATUS.PENDING_REVIEW : USER_STATUS.ACTIVE,
+    status:
+      role === ROLES.MECHANIC ? USER_STATUS.PENDING_REVIEW : USER_STATUS.ACTIVE,
     ...profileFields,
+    ...(role === ROLES.MECHANIC_EMPLOYEE && invite
+      ? {
+          companyMembership: {
+            company: invite.company,
+            invitedBy: invite.invitedBy,
+            joinedAt: new Date(),
+            status: "ACTIVE",
+          },
+        }
+      : {}),
   });
+
+  if (role === ROLES.MECHANIC_EMPLOYEE && invite) {
+    invite.status = "ACCEPTED";
+    invite.acceptedAt = new Date();
+    await invite.save();
+
+    await User.findByIdAndUpdate(invite.company, {
+      $inc: { "companyProfile.teamSize": 1 },
+    });
+  }
 
   const { accessToken, refreshToken } = await issueAuthTokens(user);
   const nextStep = resolveNextStep(user);

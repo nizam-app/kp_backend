@@ -11,6 +11,10 @@ import earningRouter from "../modules/earning/earning.router.js";
 import notificationRouter from "../modules/notification/notification.router.js";
 import supportTicketRouter from "../modules/supportTicket/supportTicket.router.js";
 import adminRouter from "../modules/admin/admin.router.js";
+import reviewRouter from "../modules/review/review.router.js";
+import disputeRouter from "../modules/dispute/dispute.router.js";
+import chatRouter from "../modules/chat/chat.router.js";
+import companyRouter from "../modules/company/company.router.js";
 
 const router = Router();
 
@@ -25,6 +29,10 @@ router.use("/invoices", invoiceRouter);
 router.use("/earnings", earningRouter);
 router.use("/notifications", notificationRouter);
 router.use("/support/tickets", supportTicketRouter);
+router.use("/fleet/reviews", reviewRouter);
+router.use("/fleet/disputes", disputeRouter);
+router.use("/chat", chatRouter);
 router.use("/admin", adminRouter);
+router.use("/company", companyRouter);
 
 export default router;

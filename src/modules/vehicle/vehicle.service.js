@@ -82,3 +82,20 @@ export const updateVehicle = async (fleetUser, vehicleId, payload) => {
   await vehicle.save();
   return vehicle;
 };
+
+export const deleteVehicle = async (fleetUser, vehicleId) => {
+  const vehicle = await Vehicle.findOne({
+    _id: vehicleId,
+    fleet: fleetUser._id,
+  });
+  if (!vehicle) throw new AppError("Vehicle not found", 404);
+
+  vehicle.isActive = false;
+  await vehicle.save({ validateBeforeSave: false });
+
+  return {
+    _id: vehicle._id,
+    registration: vehicle.registration,
+    isActive: vehicle.isActive,
+  };
+};

@@ -1,4 +1,7 @@
 import AppError from "../../utils/AppError.js";
+import fs from "fs/promises";
+import path from "path";
+import crypto from "crypto";
 import { ROLES, JOB_STATUS, QUOTE_STATUS } from "../../constants/domain.js";
 import { Job } from "./job.model.js";
 import { Quote } from "../quote/quote.model.js";
@@ -9,8 +12,15 @@ import { EarningTransaction } from "../earning/earningTransaction.model.js";
 import { PaymentMethod } from "../billing/paymentMethod.model.js";
 import { createStripePaymentIntent } from "../billing/stripe.service.js";
 import { getProfileCompletionSummary } from "../user/user.service.js";
+import {
+  emitJobEvent,
+  emitJobLocationPing,
+  emitJobPosted,
+  emitJobStatusChanged,
+} from "../../realtime/socket.js";
 
 const toObjectIdString = (value) => (value?._id || value)?.toString();
+const uploadsRoot = path.resolve(process.cwd(), "uploads", "jobs");
 
 const parsePage = (value) => {
   const n = Number(value);
@@ -137,6 +147,14 @@ const serializeJobCard = (job, viewer, extra = {}) => {
           rating: job.assignedMechanic.mechanicProfile?.rating?.average ?? null,
         }
       : null,
+    assignedCompany: job.assignedCompany
+      ? {
+          _id: job.assignedCompany._id || job.assignedCompany,
+          companyName: job.assignedCompany.companyProfile?.companyName || null,
+          contactName: job.assignedCompany.companyProfile?.contactName || null,
+          phone: job.assignedCompany.companyProfile?.phone || null,
+        }
+      : null,
     actions: {
       canTrack:
         viewer.role === ROLES.FLEET &&
@@ -144,13 +162,24 @@ const serializeJobCard = (job, viewer, extra = {}) => {
       canApproveCompletion:
         viewer.role === ROLES.FLEET && job.status === JOB_STATUS.AWAITING_APPROVAL,
       canStartJourney:
-        viewer.role === ROLES.MECHANIC && job.status === JOB_STATUS.ASSIGNED,
+        [ROLES.MECHANIC, ROLES.MECHANIC_EMPLOYEE].includes(viewer.role) &&
+        job.status === JOB_STATUS.ASSIGNED,
       canArrive:
-        viewer.role === ROLES.MECHANIC && job.status === JOB_STATUS.EN_ROUTE,
+        [ROLES.MECHANIC, ROLES.MECHANIC_EMPLOYEE].includes(viewer.role) &&
+        job.status === JOB_STATUS.EN_ROUTE,
       canStartWork:
-        viewer.role === ROLES.MECHANIC && job.status === JOB_STATUS.ON_SITE,
+        [ROLES.MECHANIC, ROLES.MECHANIC_EMPLOYEE].includes(viewer.role) &&
+        job.status === JOB_STATUS.ON_SITE,
       canCompleteWork:
-        viewer.role === ROLES.MECHANIC && job.status === JOB_STATUS.IN_PROGRESS,
+        [ROLES.MECHANIC, ROLES.MECHANIC_EMPLOYEE].includes(viewer.role) &&
+        job.status === JOB_STATUS.IN_PROGRESS,
+      canAssignMechanic:
+        viewer.role === ROLES.COMPANY &&
+        toObjectIdString(job.assignedCompany) === toObjectIdString(viewer._id) &&
+        !job.assignedMechanic &&
+        [JOB_STATUS.ASSIGNED, JOB_STATUS.EN_ROUTE, JOB_STATUS.ON_SITE, JOB_STATUS.IN_PROGRESS].includes(
+          job.status
+        ),
       cancellation,
     },
     ...extra,
@@ -287,8 +316,8 @@ const createJobEvent = async ({
   toStatus,
   note,
   payload,
-}) =>
-  JobEvent.create({
+}) => {
+  const event = await JobEvent.create({
     job: jobId,
     actor: actorId,
     type,
@@ -297,6 +326,22 @@ const createJobEvent = async ({
     note,
     payload,
   });
+  emitJobEvent({
+    jobId: toObjectIdString(jobId),
+    event: {
+      _id: event._id,
+      jobId: toObjectIdString(jobId),
+      actorId: toObjectIdString(actorId),
+      type,
+      fromStatus: fromStatus || null,
+      toStatus: toStatus || null,
+      note: note || null,
+      payload: payload || null,
+      createdAt: event.createdAt,
+    },
+  });
+  return event;
+};
 
 const ensureFleetOwner = (job, fleetUserId) => {
   if (toObjectIdString(job.fleet) !== toObjectIdString(fleetUserId)) {
@@ -309,6 +354,55 @@ const ensureAssignedMechanic = (job, mechanicUserId) => {
     throw new AppError("Forbidden", 403);
   }
 };
+
+const ensureJobParticipantAccess = (job, user) => {
+  if (user.role === ROLES.ADMIN) return;
+
+  const fleetId = toObjectIdString(job.fleet);
+  const mechanicId = toObjectIdString(job.assignedMechanic);
+  const companyId = toObjectIdString(job.assignedCompany);
+  const userId = toObjectIdString(user._id);
+
+  if (user.role === ROLES.FLEET && fleetId === userId) return;
+  if (user.role === ROLES.MECHANIC && mechanicId === userId) return;
+  if (user.role === ROLES.MECHANIC_EMPLOYEE && mechanicId === userId) return;
+  if (user.role === ROLES.COMPANY && companyId === userId) return;
+
+  throw new AppError("Forbidden", 403);
+};
+
+const mimeToExtension = (mime) => {
+  const normalized = `${mime || ""}`.trim().toLowerCase();
+  const map = {
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "image/png": "png",
+    "image/webp": "webp",
+    "image/gif": "gif",
+    "image/heic": "heic",
+    "image/heif": "heif",
+  };
+  return map[normalized] || null;
+};
+
+const parseDataUrl = (value) => {
+  const match = `${value || ""}`.match(/^data:(image\/[a-z0-9.+-]+);base64,(.+)$/i);
+  if (!match) throw new AppError("photo dataUrl must be a valid base64 image data URL", 400);
+
+  const extension = mimeToExtension(match[1]);
+  if (!extension) throw new AppError("Unsupported image type", 400);
+
+  return {
+    extension,
+    buffer: Buffer.from(match[2], "base64"),
+  };
+};
+
+const sanitizeFileName = (value) =>
+  `${value || ""}`
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]/g, "-")
+    .replace(/-+/g, "-");
 
 const upsertFinancialRecordsForCompletedJob = async (job, paymentContext = {}) => {
   if (!job.assignedMechanic) return { invoice: null, earningTransaction: null };
@@ -469,7 +563,107 @@ export const createJob = async (payload, fleetUser) => {
     toStatus: JOB_STATUS.POSTED,
   });
 
+  emitJobPosted(job);
+  emitJobStatusChanged(job, {
+    previousStatus: null,
+    changedBy: toObjectIdString(fleetUser._id),
+  });
+
   return job;
+};
+
+export const addJobPhotos = async (jobId, user, payload = {}) => {
+  const job = await Job.findById(jobId);
+  if (!job) throw new AppError("Job not found", 404);
+  ensureJobParticipantAccess(job, user);
+
+  const incoming = Array.isArray(payload.photos)
+    ? payload.photos
+    : payload.photo
+    ? [payload.photo]
+    : payload.dataUrl || payload.url
+    ? [payload]
+    : [];
+
+  if (!incoming.length) {
+    throw new AppError("At least one photo payload is required", 400);
+  }
+
+  const savedUrls = [];
+  const targetDir = path.join(uploadsRoot, toObjectIdString(job._id));
+  await fs.mkdir(targetDir, { recursive: true });
+
+  for (const item of incoming) {
+    if (item?.url) {
+      savedUrls.push(`${item.url}`.trim());
+      continue;
+    }
+
+    const { extension, buffer } = parseDataUrl(item?.dataUrl);
+    const baseName = sanitizeFileName(item?.filename) || `photo-${crypto.randomUUID()}`;
+    const fileName = `${baseName}-${Date.now()}-${crypto.randomUUID().slice(0, 8)}.${extension}`;
+    const filePath = path.join(targetDir, fileName);
+    await fs.writeFile(filePath, buffer);
+    savedUrls.push(`/uploads/jobs/${toObjectIdString(job._id)}/${fileName}`);
+  }
+
+  job.photos = [...(job.photos || []), ...savedUrls];
+  await job.save();
+
+  await createJobEvent({
+    jobId: job._id,
+    actorId: user._id,
+    type: "JOB_PHOTOS_ADDED",
+    note: `Added ${savedUrls.length} photo${savedUrls.length === 1 ? "" : "s"}`,
+    payload: {
+      count: savedUrls.length,
+      photos: savedUrls,
+    },
+  });
+
+  return {
+    jobId: job._id,
+    photos: job.photos,
+    added: savedUrls,
+  };
+};
+
+export const removeJobPhoto = async (jobId, user, payload = {}) => {
+  const job = await Job.findById(jobId);
+  if (!job) throw new AppError("Job not found", 404);
+  ensureJobParticipantAccess(job, user);
+
+  const photoUrl = `${payload.photoUrl || ""}`.trim();
+  if (!photoUrl) throw new AppError("photoUrl is required", 400);
+  if (!(job.photos || []).includes(photoUrl)) {
+    throw new AppError("Photo not found on this job", 404);
+  }
+
+  job.photos = (job.photos || []).filter((item) => item !== photoUrl);
+  await job.save();
+
+  const uploadsPrefix = `/uploads/jobs/${toObjectIdString(job._id)}/`;
+  if (photoUrl.startsWith(uploadsPrefix)) {
+    const fileName = photoUrl.slice(uploadsPrefix.length);
+    const filePath = path.join(uploadsRoot, toObjectIdString(job._id), fileName);
+    await fs.unlink(filePath).catch(() => null);
+  }
+
+  await createJobEvent({
+    jobId: job._id,
+    actorId: user._id,
+    type: "JOB_PHOTO_REMOVED",
+    note: "Removed a job photo",
+    payload: {
+      photoUrl,
+    },
+  });
+
+  return {
+    jobId: job._id,
+    photos: job.photos,
+    removed: photoUrl,
+  };
 };
 
 export const listJobs = async (user, query) => {
@@ -498,7 +692,7 @@ export const listJobs = async (user, query) => {
   }
 
   let nearPoint = null;
-  if (user.role === ROLES.MECHANIC) {
+  if ([ROLES.MECHANIC, ROLES.MECHANIC_EMPLOYEE].includes(user.role)) {
     if (`${query.feed}` === "true") {
       filter.status = { $in: [JOB_STATUS.POSTED, JOB_STATUS.QUOTING] };
       if (query.lat && query.lng) {
@@ -543,11 +737,62 @@ export const listJobs = async (user, query) => {
     }
   }
 
+  if (user.role === ROLES.COMPANY) {
+    if (`${query.feed}` === "true") {
+      filter.status = { $in: [JOB_STATUS.POSTED, JOB_STATUS.QUOTING] };
+      if (query.lat && query.lng) {
+        const lat = Number(query.lat);
+        const lng = Number(query.lng);
+        const radiusMiles = Number(
+          query.radiusMiles || query.radius || user.companyProfile?.serviceRadiusMiles || 25
+        );
+        if (Number.isFinite(lat) && Number.isFinite(lng) && Number.isFinite(radiusMiles)) {
+          nearPoint = { lat, lng };
+          filter.location = {
+            $near: {
+              $geometry: { type: "Point", coordinates: [lng, lat] },
+              $maxDistance: milesToMeters(radiusMiles),
+            },
+          };
+        }
+      }
+      if (query.issueType) {
+        filter.issueType = { $in: `${query.issueType}`.split(",") };
+      }
+      if (query.minPayout) {
+        const min = Number(query.minPayout);
+        if (Number.isFinite(min)) {
+          filter.estimatedPayout = { $gte: min };
+        }
+      }
+    } else if (query.tab === "completed") {
+      filter.assignedCompany = user._id;
+      filter.status = JOB_STATUS.COMPLETED;
+    } else if (query.tab === "active" || query.tab === "tracking") {
+      filter.assignedCompany = user._id;
+      filter.status = {
+        $in: [
+          JOB_STATUS.ASSIGNED,
+          JOB_STATUS.EN_ROUTE,
+          JOB_STATUS.ON_SITE,
+          JOB_STATUS.IN_PROGRESS,
+          JOB_STATUS.AWAITING_APPROVAL,
+        ],
+      };
+    } else {
+      filter.assignedCompany = user._id;
+    }
+  }
+
   const queryBuilder = Job.find(filter)
     .sort({ createdAt: -1 })
     .skip(skip)
     .limit(limit)
     .populate("fleet", "email fleetProfile.companyName fleetProfile.contactName fleetProfile.phone")
+    .populate(
+      "assignedCompany",
+      "email role companyProfile.companyName companyProfile.contactName companyProfile.phone"
+    )
     .populate("assignedMechanic", "email role mechanicProfile.displayName mechanicProfile.phone mechanicProfile.rating")
     .lean();
 
@@ -583,7 +828,10 @@ export const listJobs = async (user, query) => {
       total,
       totalPages: Math.ceil(total / limit) || 1,
       ...insightBase,
-      mode: user.role === ROLES.MECHANIC && `${query.feed}` === "true" ? "feed" : "list",
+      mode:
+        [ROLES.MECHANIC, ROLES.COMPANY].includes(user.role) && `${query.feed}` === "true"
+          ? "feed"
+          : "list",
     },
   };
 };
@@ -591,6 +839,10 @@ export const listJobs = async (user, query) => {
 export const getJobByIdForUser = async (jobId, user) => {
   const job = await Job.findById(jobId)
     .populate("fleet", "email role fleetProfile.companyName fleetProfile.contactName fleetProfile.phone fleetProfile.billingAddress")
+    .populate(
+      "assignedCompany",
+      "email role companyProfile.companyName companyProfile.contactName companyProfile.phone"
+    )
     .populate(
       "assignedMechanic",
       "email role mechanicProfile.displayName mechanicProfile.phone mechanicProfile.rating"
@@ -601,24 +853,33 @@ export const getJobByIdForUser = async (jobId, user) => {
 
   const userId = toObjectIdString(user._id);
   const fleetId = toObjectIdString(job.fleet?._id || job.fleet);
+  const companyId = toObjectIdString(job.assignedCompany?._id || job.assignedCompany);
   const mechanicId = toObjectIdString(job.assignedMechanic?._id || job.assignedMechanic);
 
   if (user.role === ROLES.FLEET && fleetId === userId) {
     return serializeJobDetail(job.toObject(), user);
   }
-  if (user.role === ROLES.MECHANIC && mechanicId === userId) {
+  if ([ROLES.MECHANIC, ROLES.MECHANIC_EMPLOYEE].includes(user.role) && mechanicId === userId) {
+    return serializeJobDetail(job.toObject(), user);
+  }
+  if (user.role === ROLES.COMPANY && companyId === userId) {
     return serializeJobDetail(job.toObject(), user);
   }
 
   if (
-    user.role === ROLES.MECHANIC &&
+    [ROLES.MECHANIC, ROLES.COMPANY].includes(user.role) &&
     [JOB_STATUS.POSTED, JOB_STATUS.QUOTING].includes(job.status)
   ) {
     return serializeJobDetail(job.toObject(), user);
   }
 
-  const hasQuote = await Quote.exists({ job: job._id, mechanic: user._id });
-  if (user.role === ROLES.MECHANIC && hasQuote) return serializeJobDetail(job.toObject(), user);
+  const hasQuote = await Quote.exists({
+    job: job._id,
+    ...(user.role === ROLES.COMPANY ? { company: user._id } : { mechanic: user._id }),
+  });
+  if ([ROLES.MECHANIC, ROLES.COMPANY].includes(user.role) && hasQuote) {
+    return serializeJobDetail(job.toObject(), user);
+  }
 
   throw new AppError("Forbidden", 403);
 };
@@ -654,6 +915,11 @@ const transitionAssignedJob = async ({
     toStatus,
     note,
     payload,
+  });
+
+  emitJobStatusChanged(job, {
+    previousStatus: fromStatus,
+    changedBy: toObjectIdString(user._id),
   });
 
   return job;
@@ -707,6 +973,7 @@ export const completeJobWork = async (jobId, mechanicUser, payload) =>
 export const approveJobCompletion = async (jobId, fleetUser, payload) => {
   const job = await Job.findById(jobId)
     .populate("fleet", "fleetProfile")
+    .populate("assignedCompany", "companyProfile")
     .populate("assignedMechanic", "mechanicProfile");
   if (!job) throw new AppError("Job not found", 404);
 
@@ -796,6 +1063,13 @@ export const approveJobCompletion = async (jobId, fleetUser, payload) => {
     },
   });
 
+  emitJobStatusChanged(job, {
+    previousStatus: fromStatus,
+    changedBy: toObjectIdString(fleetUser._id),
+    invoiceId: financials.invoice?._id?.toString?.() || null,
+    paymentStatus: paymentContext.paymentStatus,
+  });
+
   return {
     job,
     invoice: financials.invoice,
@@ -836,6 +1110,12 @@ export const cancelJob = async (jobId, fleetUser, payload = {}) => {
       fee: cancellation.fee,
       currency: cancellation.currency,
     },
+  });
+
+  emitJobStatusChanged(job, {
+    previousStatus: fromStatus,
+    changedBy: toObjectIdString(fleetUser._id),
+    cancellation,
   });
 
   return {
@@ -900,6 +1180,16 @@ export const createJobLocationPing = async (jobId, user, payload) => {
       accuracy,
       etaMinutes,
     },
+  });
+
+  emitJobLocationPing(job, {
+    lat: latNum,
+    lng: lngNum,
+    heading,
+    speed,
+    accuracy,
+    etaMinutes,
+    updatedAt: now,
   });
 
   return {

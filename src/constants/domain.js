@@ -1,6 +1,8 @@
 export const ROLES = Object.freeze({
   FLEET: "FLEET",
   MECHANIC: "MECHANIC",
+  COMPANY: "COMPANY",
+  MECHANIC_EMPLOYEE: "MECHANIC_EMPLOYEE",
   ADMIN: "ADMIN",
 });
 

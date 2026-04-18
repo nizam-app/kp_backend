@@ -4,6 +4,9 @@ import { protect } from "../../middlewares/auth.js";
 import {
   attachStripePaymentMethodController,
   createPaymentMethodController,
+  mechanicStripeDashboardLinkController,
+  mechanicStripeOnboardingLinkController,
+  mechanicStripePayoutAccountController,
   createStripeSetupIntentController,
   listPaymentMethodsController,
   removePaymentMethodController,
@@ -20,6 +23,18 @@ router.use(catchAsync(protect));
 
 router.get("/stripe/config", catchAsync(stripeBillingConfigController));
 router.post("/stripe/setup-intent", catchAsync(createStripeSetupIntentController));
+router.get(
+  "/stripe/mechanic-payout-account",
+  catchAsync(mechanicStripePayoutAccountController)
+);
+router.post(
+  "/stripe/mechanic-payout-account/onboarding-link",
+  catchAsync(mechanicStripeOnboardingLinkController)
+);
+router.post(
+  "/stripe/mechanic-payout-account/dashboard-link",
+  catchAsync(mechanicStripeDashboardLinkController)
+);
 router.post(
   "/stripe/payment-methods/attach",
   catchAsync(attachStripePaymentMethodController)

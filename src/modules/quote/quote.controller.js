@@ -1,11 +1,13 @@
 import { sendResponse } from "../../utils/sendResponse.js";
 import {
   acceptQuote,
+  amendQuote,
   declineQuote,
   getQuoteByIdForUser,
   listJobQuotes,
   listMechanicQuotes,
   submitQuote,
+  withdrawQuote,
 } from "./quote.service.js";
 
 export const submitQuoteController = async (req, res) => {
@@ -45,6 +47,22 @@ export const declineQuoteController = async (req, res) => {
   const quote = await declineQuote(req.params.quoteId, req.user);
   return sendResponse(res, {
     message: "Quote declined",
+    data: quote,
+  });
+};
+
+export const amendQuoteController = async (req, res) => {
+  const quote = await amendQuote(req.params.quoteId, req.body, req.user);
+  return sendResponse(res, {
+    message: "Quote amended",
+    data: quote,
+  });
+};
+
+export const withdrawQuoteController = async (req, res) => {
+  const quote = await withdrawQuote(req.params.quoteId, req.user);
+  return sendResponse(res, {
+    message: "Quote withdrawn",
     data: quote,
   });
 };

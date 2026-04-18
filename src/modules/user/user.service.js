@@ -103,6 +103,62 @@ const buildFleetCompletion = (user, defaultPaymentMethod) => {
   };
 };
 
+const buildCompanyCompletion = (user, defaultPaymentMethod) => {
+  const companyProfile = user.companyProfile || {};
+  const businessIdentityComplete = Boolean(
+    companyProfile.companyName &&
+      companyProfile.regNumber &&
+      companyProfile.vatNumber
+  );
+  const contactPersonComplete = Boolean(
+    companyProfile.contactName &&
+      companyProfile.contactRole &&
+      companyProfile.phone &&
+      user.email
+  );
+  const operatingProfileComplete = Boolean(
+    companyProfile.baseLocationText &&
+      Number.isFinite(companyProfile.serviceRadiusMiles)
+  );
+  const billingComplete = Boolean(defaultPaymentMethod || companyProfile.billingAddress);
+
+  const items = [
+    {
+      key: "businessIdentity",
+      label: "Business Identity",
+      complete: businessIdentityComplete,
+      fields: ["companyName", "regNumber", "vatNumber"],
+    },
+    {
+      key: "contactPerson",
+      label: "Primary Contact",
+      complete: contactPersonComplete,
+      fields: ["contactName", "contactRole", "phone", "email"],
+    },
+    {
+      key: "operations",
+      label: "Operations Setup",
+      complete: operatingProfileComplete,
+      fields: ["baseLocationText", "serviceRadiusMiles"],
+    },
+    {
+      key: "billing",
+      label: "Billing & Payout",
+      complete: billingComplete,
+      fields: ["billingAddress", "defaultPaymentMethod"],
+    },
+  ];
+
+  const completeCount = items.filter((item) => item.complete).length;
+
+  return {
+    percentage: Math.round((completeCount / items.length) * 100),
+    isComplete: completeCount === items.length,
+    items,
+    missing: items.filter((item) => !item.complete).map((item) => item.label),
+  };
+};
+
 const buildMechanicCompletion = (user, defaultPaymentMethod) => {
   const mechanicProfile = user.mechanicProfile || {};
   const identityComplete = Boolean(
@@ -168,10 +224,17 @@ export const getProfileCompletionSummary = async (user) => {
     };
   }
 
-  if (user.role === "MECHANIC") {
+  if (user.role === "MECHANIC" || user.role === "MECHANIC_EMPLOYEE") {
     return {
       defaultPaymentMethod,
       profileCompletion: buildMechanicCompletion(user, defaultPaymentMethod),
+    };
+  }
+
+  if (user.role === "COMPANY") {
+    return {
+      defaultPaymentMethod,
+      profileCompletion: buildCompanyCompletion(user, defaultPaymentMethod),
     };
   }
 
@@ -212,7 +275,7 @@ const buildProfileResponse = async (user) => {
 
   if (profileCompletion) response.profileCompletion = profileCompletion;
 
-  if (base.role === "MECHANIC") {
+  if (base.role === "MECHANIC" || base.role === "MECHANIC_EMPLOYEE") {
     response.performance = {
       jobsDone: base.mechanicProfile?.stats?.jobsDone ?? 0,
       avgRating: base.mechanicProfile?.rating?.average ?? 0,
@@ -229,6 +292,21 @@ const buildProfileResponse = async (user) => {
       contactRole: base.fleetProfile?.contactRole || null,
       phone: base.fleetProfile?.phone || null,
       billingAddress: base.fleetProfile?.billingAddress || null,
+    };
+  }
+
+  if (base.role === "COMPANY") {
+    response.companySummary = {
+      companyName: base.companyProfile?.companyName || null,
+      contactName: base.companyProfile?.contactName || null,
+      contactRole: base.companyProfile?.contactRole || null,
+      phone: base.companyProfile?.phone || null,
+      regNumber: base.companyProfile?.regNumber || null,
+      vatNumber: base.companyProfile?.vatNumber || null,
+      billingAddress: base.companyProfile?.billingAddress || null,
+      baseLocationText: base.companyProfile?.baseLocationText || null,
+      serviceRadiusMiles: base.companyProfile?.serviceRadiusMiles ?? null,
+      teamSize: base.companyProfile?.teamSize ?? 0,
     };
   }
 
@@ -321,6 +399,71 @@ export const updateOwnProfile = async (user, payload) => {
     };
   }
 
+  if (user.role === "MECHANIC_EMPLOYEE") {
+    const patch = filterObject(payload, [
+      "displayName",
+      "phone",
+      "baseLocationText",
+      "basePostcode",
+      "hourlyRate",
+      "emergencyRate",
+      "emergencySurcharge",
+      "callOutFee",
+      "callOutCharge",
+      "rateCurrency",
+      "serviceRadiusMiles",
+      "coverageRadius",
+      "skills",
+      "availability",
+      "lastKnownLocation",
+      "profileCompleted",
+      "profilePhotoUrl",
+    ]);
+
+    const normalizedPatch = {
+      ...patch,
+      callOutFee: patch.callOutCharge ?? patch.callOutFee,
+      serviceRadiusMiles: patch.coverageRadius ?? patch.serviceRadiusMiles,
+    };
+
+    if (payload.lastKnownLocation !== undefined) {
+      normalizedPatch.lastKnownLocation = normalizePoint(payload.lastKnownLocation);
+    }
+
+    delete normalizedPatch.callOutCharge;
+    delete normalizedPatch.coverageRadius;
+
+    user.mechanicProfile = {
+      ...(user.mechanicProfile || {}),
+      ...normalizedPatch,
+    };
+  }
+
+  if (user.role === "COMPANY") {
+    const patch = filterObject(payload, [
+      "profilePhotoUrl",
+      "companyName",
+      "contactName",
+      "contactRole",
+      "phone",
+      "regNumber",
+      "vatNumber",
+      "billingAddress",
+      "baseLocationText",
+      "serviceRadiusMiles",
+      "coverageRadius",
+      "teamSize",
+      "profileCompleted",
+    ]);
+
+    user.companyProfile = {
+      ...(user.companyProfile || {}),
+      ...patch,
+      serviceRadiusMiles: patch.coverageRadius ?? patch.serviceRadiusMiles ?? user.companyProfile?.serviceRadiusMiles,
+    };
+    delete user.companyProfile.coverageRadius;
+  }
+
   const { profileCompletion } = await getProfileCompletionSummary(user);
   if (user.role === "FLEET") {
     user.fleetProfile = {
@@ -329,9 +472,16 @@ export const updateOwnProfile = async (user, payload) => {
     };
   }
 
-  if (user.role === "MECHANIC") {
+  if (user.role === "MECHANIC" || user.role === "MECHANIC_EMPLOYEE") {
     user.mechanicProfile = {
       ...(user.mechanicProfile || {}),
+      profileCompleted: profileCompletion?.isComplete || false,
+    };
+  }
+
+  if (user.role === "COMPANY") {
+    user.companyProfile = {
+      ...(user.companyProfile || {}),
       profileCompleted: profileCompletion?.isComplete || false,
     };
   }
@@ -341,7 +491,7 @@ export const updateOwnProfile = async (user, payload) => {
 };
 
 export const updateMechanicAvailability = async (user, payload) => {
-  if (user.role !== "MECHANIC") {
+  if (!["MECHANIC", "MECHANIC_EMPLOYEE"].includes(user.role)) {
     throw new AppError("Only mechanics can update availability", 403);
   }
 

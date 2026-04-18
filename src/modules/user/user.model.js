@@ -105,6 +105,31 @@ const mechanicProfileSchema = new Schema(
       jobsDone: { type: Number, min: 0, default: 0 },
       responseMinutesAvg: { type: Number, min: 0, default: 0 },
     },
+    stripeConnectAccountId: { type: String, trim: true },
+    stripeConnectOnboardingComplete: { type: Boolean, default: false },
+    stripeConnectDetailsSubmitted: { type: Boolean, default: false },
+    stripeConnectChargesEnabled: { type: Boolean, default: false },
+    stripeConnectPayoutsEnabled: { type: Boolean, default: false },
+    stripeConnectStatusUpdatedAt: Date,
+  },
+  { _id: false }
+);
+
+const companyProfileSchema = new Schema(
+  {
+    profilePhotoUrl: { type: String, trim: true },
+    companyName: { type: String, trim: true },
+    contactName: { type: String, trim: true },
+    contactRole: { type: String, trim: true },
+    phone: { type: String, trim: true },
+    regNumber: { type: String, trim: true },
+    vatNumber: { type: String, trim: true },
+    billingAddress: { type: String, trim: true },
+    baseLocationText: { type: String, trim: true },
+    serviceRadiusMiles: { type: Number, min: 1, default: 25 },
+    teamSize: { type: Number, min: 0, default: 0 },
+    profileCompleted: { type: Boolean, default: false },
+    stripeCustomerId: { type: String, trim: true },
   },
   { _id: false }
 );
@@ -127,6 +152,21 @@ const adminSettingsSchema = new Schema(
     regionalFormat: { type: String, trim: true, default: "en-GB" },
     billingEmail: { type: String, trim: true, lowercase: true },
     privacyMode: { type: String, trim: true, default: "STANDARD" },
+  },
+  { _id: false }
+);
+
+const companyMembershipSchema = new Schema(
+  {
+    company: { type: Schema.Types.ObjectId, ref: "User", index: true },
+    invitedBy: { type: Schema.Types.ObjectId, ref: "User" },
+    jobTitle: { type: String, trim: true },
+    joinedAt: Date,
+    status: {
+      type: String,
+      enum: ["PENDING", "ACTIVE", "INACTIVE"],
+      default: "ACTIVE",
+    },
   },
   { _id: false }
 );
@@ -174,7 +214,9 @@ const userSchema = new Schema(
     adminProfile: adminProfileSchema,
     adminSettings: adminSettingsSchema,
     fleetProfile: fleetProfileSchema,
+    companyProfile: companyProfileSchema,
     mechanicProfile: mechanicProfileSchema,
+    companyMembership: companyMembershipSchema,
     passwordChangedAt: Date,
     passwordResetToken: {
       type: String,
@@ -205,6 +247,7 @@ const userSchema = new Schema(
 userSchema.index({ "mechanicProfile.lastKnownLocation": "2dsphere" });
 userSchema.index({ role: 1, status: 1 });
 userSchema.index({ "mechanicProfile.verification.status": 1, status: 1 });
+userSchema.index({ "companyMembership.company": 1, role: 1, status: 1 });
 
 userSchema.pre("save", async function () {
   if (!this.isModified("password")) return;

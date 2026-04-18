@@ -2,6 +2,7 @@ import { Router } from "express";
 import { catchAsync } from "../../utils/catchAsync.js";
 import { authorize, protect, requireActive } from "../../middlewares/auth.js";
 import {
+  addJobPhotosController,
   approveCompletionController,
   arriveAtJobController,
   cancelJobController,
@@ -13,6 +14,7 @@ import {
   startWorkController,
   jobLocationPingController,
   jobTimelineController,
+  removeJobPhotoController,
 } from "./job.controller.js";
 import {
   listJobQuotesController,
@@ -28,6 +30,8 @@ router.use(catchAsync(requireActive));
 router.post("/", catchAsync(authorize(ROLES.FLEET)), catchAsync(createJobController));
 router.get("/", catchAsync(listJobsController));
 router.get("/:jobId", catchAsync(getJobByIdController));
+router.post("/:jobId/photos", catchAsync(addJobPhotosController));
+router.patch("/:jobId/photos/remove", catchAsync(removeJobPhotoController));
 router.patch(
   "/:jobId/cancel",
   catchAsync(authorize(ROLES.FLEET)),
@@ -35,22 +39,22 @@ router.patch(
 );
 router.patch(
   "/:jobId/journey/start",
-  catchAsync(authorize(ROLES.MECHANIC)),
+  catchAsync(authorize(ROLES.MECHANIC, ROLES.MECHANIC_EMPLOYEE)),
   catchAsync(startJourneyController)
 );
 router.patch(
   "/:jobId/arrive",
-  catchAsync(authorize(ROLES.MECHANIC)),
+  catchAsync(authorize(ROLES.MECHANIC, ROLES.MECHANIC_EMPLOYEE)),
   catchAsync(arriveAtJobController)
 );
 router.patch(
   "/:jobId/work/start",
-  catchAsync(authorize(ROLES.MECHANIC)),
+  catchAsync(authorize(ROLES.MECHANIC, ROLES.MECHANIC_EMPLOYEE)),
   catchAsync(startWorkController)
 );
 router.patch(
   "/:jobId/work/complete",
-  catchAsync(authorize(ROLES.MECHANIC)),
+  catchAsync(authorize(ROLES.MECHANIC, ROLES.MECHANIC_EMPLOYEE)),
   catchAsync(completeWorkController)
 );
 router.patch(
@@ -62,7 +66,7 @@ router.patch(
 
 router.post(
   "/:jobId/location-pings",
-  catchAsync(authorize(ROLES.MECHANIC)),
+  catchAsync(authorize(ROLES.MECHANIC, ROLES.MECHANIC_EMPLOYEE)),
   catchAsync(jobLocationPingController)
 );
 router.get(
@@ -71,7 +75,7 @@ router.get(
 );
 router.post(
   "/:jobId/quotes",
-  catchAsync(authorize(ROLES.MECHANIC)),
+  catchAsync(authorize(ROLES.MECHANIC, ROLES.COMPANY, ROLES.MECHANIC_EMPLOYEE)),
   catchAsync(submitQuoteController)
 );
 router.get(

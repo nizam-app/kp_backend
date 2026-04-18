@@ -2,11 +2,15 @@ import AppError from "../../utils/AppError.js";
 import { PaymentMethod } from "./paymentMethod.model.js";
 import {
   attachStripePaymentMethodToCustomer,
+  createStripeConnectAccountLink,
+  createStripeConnectLoginLink,
   constructStripeWebhookEvent,
   createStripeSetupIntent,
   ensureStripeCustomerForUser,
+  ensureStripeConnectAccountForMechanic,
   getStripePublicConfig,
   retrieveStripePaymentMethod,
+  syncMechanicStripeConnectAccount,
 } from "./stripe.service.js";
 import { processStripeWebhookEvent } from "./stripeWebhook.service.js";
 
@@ -180,11 +184,125 @@ export const createPaymentMethod = async (user, payload = {}) => {
 
 export const getStripeBillingConfig = async () => getStripePublicConfig();
 
+const assertMechanicRole = (user) => {
+  if (user.role !== "MECHANIC") {
+    throw new AppError("Mechanic payout actions are only available to mechanics", 403);
+  }
+};
+
+const assertAbsoluteHttpUrl = (value, fieldName) => {
+  const input = `${value || ""}`.trim();
+  if (!input) throw new AppError(`${fieldName} is required`, 400);
+
+  let parsed;
+  try {
+    parsed = new URL(input);
+  } catch {
+    throw new AppError(`${fieldName} must be a valid absolute URL`, 400);
+  }
+
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    throw new AppError(`${fieldName} must use http or https`, 400);
+  }
+
+  return parsed.toString();
+};
+
 export const createStripeSetupIntentForUser = async (user) => {
   const result = await createStripeSetupIntent(user);
   return {
     ...result,
     ...getStripePublicConfig(),
+  };
+};
+
+export const getMechanicStripePayoutAccount = async (user) => {
+  assertMechanicRole(user);
+
+  const account = await syncMechanicStripeConnectAccount(user);
+  if (!account) {
+    return {
+      ...getStripePublicConfig(),
+      hasAccount: false,
+      onboardingComplete: false,
+      detailsSubmitted: false,
+      chargesEnabled: false,
+      payoutsEnabled: false,
+      accountId: null,
+      status: "not_started",
+    };
+  }
+
+  return {
+    ...getStripePublicConfig(),
+    hasAccount: true,
+    accountId: account.id,
+    accountType: account.type || null,
+    onboardingComplete:
+      Boolean(account.details_submitted) &&
+      Boolean(account.charges_enabled || account.payouts_enabled),
+    detailsSubmitted: Boolean(account.details_submitted),
+    chargesEnabled: Boolean(account.charges_enabled),
+    payoutsEnabled: Boolean(account.payouts_enabled),
+    status:
+      account.details_submitted && (account.charges_enabled || account.payouts_enabled)
+        ? "ready"
+        : account.details_submitted
+          ? "under_review"
+          : "needs_onboarding",
+  };
+};
+
+export const createMechanicStripeOnboardingLink = async (
+  user,
+  payload = {}
+) => {
+  assertMechanicRole(user);
+
+  const returnUrl = assertAbsoluteHttpUrl(payload.returnUrl, "returnUrl");
+  const refreshUrl = assertAbsoluteHttpUrl(payload.refreshUrl, "refreshUrl");
+  const accountId = await ensureStripeConnectAccountForMechanic(user);
+
+  const accountLink = await createStripeConnectAccountLink({
+    accountId,
+    returnUrl,
+    refreshUrl,
+  });
+
+  return {
+    ...getStripePublicConfig(),
+    accountId,
+    url: accountLink.url,
+    expiresAt: accountLink.expires_at
+      ? new Date(accountLink.expires_at * 1000).toISOString()
+      : null,
+  };
+};
+
+export const createMechanicStripeDashboardLink = async (user) => {
+  assertMechanicRole(user);
+
+  const account = await syncMechanicStripeConnectAccount(user);
+  if (!account?.id) {
+    throw new AppError("Stripe payout onboarding has not started yet", 400);
+  }
+
+  if (!account.details_submitted) {
+    throw new AppError(
+      "Complete Stripe payout onboarding before opening the payout dashboard",
+      400
+    );
+  }
+
+  const loginLink = await createStripeConnectLoginLink(account.id);
+
+  return {
+    ...getStripePublicConfig(),
+    accountId: account.id,
+    url: loginLink.url,
+    createdAt: loginLink.created
+      ? new Date(loginLink.created * 1000).toISOString()
+      : null,
   };
 };
 

@@ -63,6 +63,11 @@ const getStripeCustomerId = (user) =>
     ? user.fleetProfile?.stripeCustomerId || null
     : null;
 
+const getStripeConnectAccountId = (user) =>
+  user.role === "MECHANIC"
+    ? user.mechanicProfile?.stripeConnectAccountId || null
+    : null;
+
 export const ensureStripeCustomerForUser = async (user) => {
   if (user.role !== "FLEET") {
     throw new AppError("Stripe customer setup is only available for fleet users", 400);
@@ -166,6 +171,123 @@ export const createStripePaymentIntent = async ({
     },
   });
 };
+
+const syncMechanicStripeConnectStatus = async (userId, account) => {
+  await User.updateOne(
+    { _id: userId },
+    {
+      $set: {
+        "mechanicProfile.stripeConnectOnboardingComplete":
+          Boolean(account?.details_submitted) &&
+          Boolean(account?.charges_enabled || account?.payouts_enabled),
+        "mechanicProfile.stripeConnectDetailsSubmitted": Boolean(
+          account?.details_submitted
+        ),
+        "mechanicProfile.stripeConnectChargesEnabled": Boolean(
+          account?.charges_enabled
+        ),
+        "mechanicProfile.stripeConnectPayoutsEnabled": Boolean(
+          account?.payouts_enabled
+        ),
+        "mechanicProfile.stripeConnectStatusUpdatedAt": new Date(),
+      },
+    }
+  );
+};
+
+export const ensureStripeConnectAccountForMechanic = async (user) => {
+  if (user.role !== "MECHANIC") {
+    throw new AppError(
+      "Stripe payout onboarding is only available for mechanic users",
+      400
+    );
+  }
+
+  const existingAccountId = getStripeConnectAccountId(user);
+  if (existingAccountId) return existingAccountId;
+
+  const businessType =
+    user.mechanicProfile?.businessType === "SOLE_TRADER" ? "individual" : "company";
+
+  const account = await stripeRequest("/accounts", {
+    method: "POST",
+    body: {
+      type: "express",
+      country: "GB",
+      email: user.email,
+      business_type: businessType,
+      metadata: {
+        userId: user._id.toString(),
+        role: user.role,
+      },
+      business_profile: {
+        name:
+          user.mechanicProfile?.businessName ||
+          user.mechanicProfile?.displayName ||
+          user.email,
+        product_description: "TruckFix roadside mechanic services",
+        support_email: user.email,
+      },
+      capabilities: {
+        card_payments: { requested: true },
+        transfers: { requested: true },
+      },
+    },
+  });
+
+  await User.updateOne(
+    { _id: user._id },
+    {
+      $set: {
+        "mechanicProfile.stripeConnectAccountId": account.id,
+        "mechanicProfile.stripeConnectStatusUpdatedAt": new Date(),
+      },
+    }
+  );
+
+  return account.id;
+};
+
+export const retrieveStripeConnectAccount = async (accountId) =>
+  stripeRequest(`/accounts/${accountId}`);
+
+export const syncMechanicStripeConnectAccount = async (user) => {
+  if (user.role !== "MECHANIC") {
+    throw new AppError(
+      "Stripe payout onboarding is only available for mechanic users",
+      400
+    );
+  }
+
+  const accountId = getStripeConnectAccountId(user);
+  if (!accountId) {
+    return null;
+  }
+
+  const account = await retrieveStripeConnectAccount(accountId);
+  await syncMechanicStripeConnectStatus(user._id, account);
+  return account;
+};
+
+export const createStripeConnectAccountLink = async ({
+  accountId,
+  returnUrl,
+  refreshUrl,
+}) =>
+  stripeRequest("/account_links", {
+    method: "POST",
+    body: {
+      account: accountId,
+      type: "account_onboarding",
+      return_url: returnUrl,
+      refresh_url: refreshUrl,
+    },
+  });
+
+export const createStripeConnectLoginLink = async (accountId) =>
+  stripeRequest(`/accounts/${accountId}/login_links`, {
+    method: "POST",
+  });
 
 const parseStripeSignatureHeader = (signatureHeader) =>
   `${signatureHeader || ""}`

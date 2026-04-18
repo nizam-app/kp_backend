@@ -1,6 +1,10 @@
 import AppError from "../../utils/AppError.js";
 import { Notification } from "./notification.model.js";
 import { DeviceToken } from "./deviceToken.model.js";
+import {
+  emitNotificationCreated,
+  emitNotificationRead,
+} from "../../realtime/socket.js";
 
 const parsePage = (value) => {
   const n = Number(value);
@@ -34,6 +38,12 @@ const serializeDeviceToken = (token) => ({
   createdAt: token.createdAt,
   updatedAt: token.updatedAt,
 });
+
+export const createNotification = async (payload = {}) => {
+  const notification = await Notification.create(payload);
+  emitNotificationCreated(notification);
+  return serializeNotification(notification);
+};
 
 export const listNotifications = async (user, query = {}) => {
   const page = parsePage(query.page);
@@ -75,6 +85,11 @@ export const markNotificationRead = async (user, notificationId) => {
   notification.isRead = true;
   notification.readAt = new Date();
   await notification.save({ validateBeforeSave: false });
+  emitNotificationRead({
+    userId: user._id,
+    notificationId: notification._id,
+    readAt: notification.readAt,
+  });
 
   return serializeNotification(notification);
 };

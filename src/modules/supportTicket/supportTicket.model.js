@@ -2,6 +2,17 @@ import mongoose from "mongoose";
 
 const { Schema, model } = mongoose;
 
+const supportReplySchema = new Schema(
+  {
+    sender: { type: Schema.Types.ObjectId, ref: "User", required: true },
+    role: { type: String, trim: true, required: true },
+    message: { type: String, required: true, trim: true },
+    internal: { type: Boolean, default: false },
+    createdAt: { type: Date, default: Date.now },
+  },
+  { _id: true }
+);
+
 const supportTicketSchema = new Schema(
   {
     user: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
@@ -17,6 +28,10 @@ const supportTicketSchema = new Schema(
     assignedTo: { type: Schema.Types.ObjectId, ref: "User" },
     resolution: { type: String, trim: true },
     resolvedAt: Date,
+    replies: {
+      type: [supportReplySchema],
+      default: [],
+    },
   },
   { timestamps: true }
 );
