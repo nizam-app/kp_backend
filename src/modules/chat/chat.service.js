@@ -22,6 +22,8 @@ const parseLimit = (value, fallback = 30, max = 100) => {
 
 const toId = (value) => (value?._id || value)?.toString?.() || null;
 
+const uniqueIds = (values = []) => [...new Set(values.map(toId).filter(Boolean))];
+
 const participantLabel = (user) => {
   if (!user) return null;
   if (user.role === ROLES.FLEET) {
@@ -33,6 +35,16 @@ const participantLabel = (user) => {
       user.mechanicProfile?.businessName ||
       user.email
     );
+  }
+  if (user.role === ROLES.COMPANY) {
+    return (
+      user.companyProfile?.companyName ||
+      user.companyProfile?.contactName ||
+      user.email
+    );
+  }
+  if (user.role === ROLES.MECHANIC_EMPLOYEE) {
+    return user.companyMembership?.displayName || user.email;
   }
   return user.email || null;
 };
@@ -60,9 +72,10 @@ const serializeMessage = (message, userId) => ({
 const ensureChatAccess = async (jobId, user) => {
   const job = await Job.findById(jobId)
     .populate("fleet", "email role fleetProfile.companyName fleetProfile.contactName")
+    .populate("assignedCompany", "email role companyProfile.companyName companyProfile.contactName")
     .populate(
       "assignedMechanic",
-      "email role mechanicProfile.displayName mechanicProfile.businessName"
+      "email role mechanicProfile.displayName mechanicProfile.businessName companyMembership.displayName companyMembership.company"
     );
 
   if (!job) throw new AppError("Job not found", 404);
@@ -71,20 +84,35 @@ const ensureChatAccess = async (jobId, user) => {
   const userId = toId(user._id);
   const fleetId = toId(job.fleet);
   const mechanicId = toId(job.assignedMechanic);
+  const companyId = toId(job.assignedCompany);
+  const employeeCompanyId = toId(user.companyMembership?.company);
 
   if (user.role === ROLES.FLEET && fleetId === userId) return job;
   if (user.role === ROLES.MECHANIC && mechanicId === userId) return job;
+  if (user.role === ROLES.COMPANY && companyId === userId) return job;
+  if (user.role === ROLES.MECHANIC_EMPLOYEE && mechanicId === userId) return job;
+  if (user.role === ROLES.MECHANIC_EMPLOYEE && employeeCompanyId && companyId === employeeCompanyId) {
+    return job;
+  }
 
   throw new AppError("Forbidden", 403);
 };
 
 const buildCounterparty = (job, user) => {
   if (user.role === ROLES.FLEET) {
-    return job.assignedMechanic
+    if (job.assignedMechanic) {
+      return {
+        _id: toId(job.assignedMechanic),
+        role: job.assignedMechanic.role,
+        label: participantLabel(job.assignedMechanic),
+      };
+    }
+
+    return job.assignedCompany
       ? {
-          _id: toId(job.assignedMechanic),
-          role: job.assignedMechanic.role,
-          label: participantLabel(job.assignedMechanic),
+          _id: toId(job.assignedCompany),
+          role: job.assignedCompany.role,
+          label: participantLabel(job.assignedCompany),
         }
       : null;
   }
@@ -106,20 +134,28 @@ export const listChatThreads = async (user, query = {}) => {
   const jobFilter = {};
   if (user.role === ROLES.FLEET) jobFilter.fleet = user._id;
   if (user.role === ROLES.MECHANIC) jobFilter.assignedMechanic = user._id;
+  if (user.role === ROLES.COMPANY) jobFilter.assignedCompany = user._id;
+  if (user.role === ROLES.MECHANIC_EMPLOYEE) {
+    jobFilter.$or = [
+      { assignedMechanic: user._id },
+      { assignedCompany: user.companyMembership?.company },
+    ].filter((item) => Object.values(item)[0]);
+  }
 
   const jobs = await Job.find(jobFilter)
     .sort({ updatedAt: -1, createdAt: -1 })
     .populate("fleet", "email role fleetProfile.companyName fleetProfile.contactName")
+    .populate("assignedCompany", "email role companyProfile.companyName companyProfile.contactName")
     .populate(
       "assignedMechanic",
-      "email role mechanicProfile.displayName mechanicProfile.businessName"
+      "email role mechanicProfile.displayName mechanicProfile.businessName companyMembership.displayName companyMembership.company"
     )
     .lean();
 
   const jobIds = jobs.map((job) => job._id);
   const messages = await ChatMessage.find({ job: { $in: jobIds } })
     .sort({ createdAt: -1 })
-    .populate("sender", "email role fleetProfile.companyName fleetProfile.contactName mechanicProfile.displayName mechanicProfile.businessName")
+    .populate("sender", "email role fleetProfile.companyName fleetProfile.contactName mechanicProfile.displayName mechanicProfile.businessName companyProfile.companyName companyProfile.contactName companyMembership.displayName companyMembership.company")
     .lean();
 
   const threads = jobs
@@ -173,7 +209,7 @@ export const listJobMessages = async (jobId, user, query = {}) => {
     .limit(limit)
     .populate(
       "sender",
-      "email role fleetProfile.companyName fleetProfile.contactName mechanicProfile.displayName mechanicProfile.businessName"
+      "email role fleetProfile.companyName fleetProfile.contactName mechanicProfile.displayName mechanicProfile.businessName companyProfile.companyName companyProfile.contactName companyMembership.displayName companyMembership.company"
     );
 
   return {
@@ -194,9 +230,11 @@ export const sendJobMessage = async (jobId, user, payload = {}) => {
   const text = `${payload.text || ""}`.trim();
   if (!text) throw new AppError("text is required", 400);
 
-  const recipient =
-    user.role === ROLES.FLEET ? job.assignedMechanic : job.fleet;
-  if (!recipient) {
+  const recipients =
+    user.role === ROLES.FLEET
+      ? uniqueIds([job.assignedMechanic, job.assignedCompany])
+      : uniqueIds([job.fleet]);
+  if (!recipients.length) {
     throw new AppError("No chat recipient is available for this job", 400);
   }
 
@@ -208,17 +246,21 @@ export const sendJobMessage = async (jobId, user, payload = {}) => {
     readBy: [{ user: user._id, readAt: new Date() }],
   });
 
-  await createNotification({
-    user: recipient._id || recipient,
-    type: "CHAT_MESSAGE",
-    title: `New job message for ${job.jobCode}`,
-    body: text.length > 120 ? `${text.slice(0, 117)}...` : text,
-    data: {
-      jobId: toId(job._id),
-      jobCode: job.jobCode,
-      senderId: toId(user._id),
-    },
-  });
+  await Promise.all(
+    recipients.map((recipient) =>
+      createNotification({
+        user: recipient,
+        type: "CHAT_MESSAGE",
+        title: `New job message for ${job.jobCode}`,
+        body: text.length > 120 ? `${text.slice(0, 117)}...` : text,
+        data: {
+          jobId: toId(job._id),
+          jobCode: job.jobCode,
+          senderId: toId(user._id),
+        },
+      })
+    )
+  );
 
   await JobEvent.create({
     job: job._id,
@@ -232,14 +274,15 @@ export const sendJobMessage = async (jobId, user, payload = {}) => {
 
   const populated = await ChatMessage.findById(message._id).populate(
     "sender",
-    "email role fleetProfile.companyName fleetProfile.contactName mechanicProfile.displayName mechanicProfile.businessName"
+    "email role fleetProfile.companyName fleetProfile.contactName mechanicProfile.displayName mechanicProfile.businessName companyProfile.companyName companyProfile.contactName companyMembership.displayName companyMembership.company"
   );
 
   const serialized = serializeMessage(populated, toId(user._id));
+  const participants = uniqueIds([job.fleet, job.assignedMechanic, job.assignedCompany]);
   emitChatMessage({
     jobId: toId(job._id),
     message: serialized,
-    participants: [toId(job.fleet), toId(job.assignedMechanic)],
+    participants,
   });
 
   return serialized;
@@ -264,7 +307,7 @@ export const markJobMessagesRead = async (jobId, user) => {
     jobId: toId(job._id),
     readerId: toId(user._id),
     markedCount: unreadMessages.length,
-    participants: [toId(job.fleet), toId(job.assignedMechanic)],
+    participants: uniqueIds([job.fleet, job.assignedMechanic, job.assignedCompany]),
   });
 
   return {

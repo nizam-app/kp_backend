@@ -68,6 +68,14 @@ const journeyLocationSchema = new Schema(
   { _id: false }
 );
 
+const availabilityWindowSchema = new Schema(
+  {
+    from: Date,
+    to: Date,
+  },
+  { _id: false }
+);
+
 const jobSchema = new Schema(
   {
     jobCode: { type: String, unique: true, index: true },
@@ -94,6 +102,7 @@ const jobSchema = new Schema(
       default: "EMERGENCY",
     },
     scheduledFor: Date,
+    availabilityWindow: availabilityWindowSchema,
     location: { type: locationSchema, required: true },
     photos: { type: [String], default: [] },
     status: {
@@ -133,6 +142,7 @@ const jobSchema = new Schema(
 
 jobSchema.index({ "location": "2dsphere" });
 jobSchema.index({ mode: 1, scheduledFor: 1 });
+jobSchema.index({ mode: 1, "availabilityWindow.from": 1, "availabilityWindow.to": 1 });
 jobSchema.index({ fleet: 1, status: 1, createdAt: -1 });
 jobSchema.index({ assignedMechanic: 1, status: 1, createdAt: -1 });
 jobSchema.index({ assignedCompany: 1, status: 1, createdAt: -1 });

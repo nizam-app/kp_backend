@@ -2,7 +2,7 @@ import { Server } from "socket.io";
 import { verifyAccessToken } from "../utils/token.js";
 import { User } from "../modules/user/user.model.js";
 import { Job } from "../modules/job/job.model.js";
-import { USER_STATUS } from "../constants/domain.js";
+import { ROLES, USER_STATUS } from "../constants/domain.js";
 
 let ioInstance = null;
 
@@ -11,6 +11,8 @@ const roleRoom = (role) => `role:${role}`;
 const jobRoom = (jobId) => `job:${jobId}`;
 
 const toId = (value) => (value?._id || value)?.toString?.() || null;
+
+const uniqueIds = (values = []) => [...new Set(values.map(toId).filter(Boolean))];
 
 const parseSocketToken = (socket) => {
   const authToken = socket.handshake.auth?.token || socket.handshake.auth?.accessToken;
@@ -26,14 +28,17 @@ const parseSocketToken = (socket) => {
 };
 
 const canAccessJob = async (jobId, user) => {
-  const job = await Job.findById(jobId).select("fleet assignedMechanic");
+  const job = await Job.findById(jobId).select("fleet assignedMechanic assignedCompany");
   if (!job) return false;
-  if (user.role === "ADMIN") return true;
+  if (user.role === ROLES.ADMIN) return true;
 
   const userId = toId(user._id);
+  const companyId = toId(user.companyMembership?.company);
   return (
     toId(job.fleet) === userId ||
-    toId(job.assignedMechanic) === userId
+    toId(job.assignedMechanic) === userId ||
+    toId(job.assignedCompany) === userId ||
+    (companyId && toId(job.assignedCompany) === companyId)
   );
 };
 
@@ -62,7 +67,9 @@ export const initRealtimeServer = (httpServer) => {
       if (!token) return next(new Error("Unauthorized"));
 
       const decoded = verifyAccessToken(token);
-      const user = await User.findById(decoded.sub).select("_id role status email");
+      const user = await User.findById(decoded.sub).select(
+        "_id role status email companyMembership.company"
+      );
       if (!user) return next(new Error("User not found"));
       if ([USER_STATUS.BLOCKED, USER_STATUS.SUSPENDED].includes(user.status)) {
         return next(new Error("Account is not active"));
@@ -72,6 +79,7 @@ export const initRealtimeServer = (httpServer) => {
         _id: user._id.toString(),
         role: user.role,
         email: user.email,
+        companyMembership: user.companyMembership || null,
       };
       next();
     } catch (error) {
@@ -138,7 +146,7 @@ export const emitNotificationRead = ({ userId, notificationId, readAt }) => {
 
 export const emitJobPosted = (job) => {
   if (!ioInstance || !job?._id) return;
-  ioInstance.to(roleRoom("MECHANIC")).emit("job:posted", {
+  const payload = {
     jobId: toId(job._id),
     jobCode: job.jobCode || null,
     title: job.title || null,
@@ -148,6 +156,10 @@ export const emitJobPosted = (job) => {
     location: job.location || null,
     estimatedPayout: job.estimatedPayout ?? null,
     createdAt: job.createdAt || new Date(),
+  };
+
+  [ROLES.MECHANIC, ROLES.MECHANIC_EMPLOYEE, ROLES.COMPANY].forEach((role) => {
+    ioInstance.to(roleRoom(role)).emit("job:posted", payload);
   });
 };
 
@@ -166,7 +178,7 @@ export const emitJobStatusChanged = (job, payload = {}) => {
 
   ioInstance.to(jobRoom(toId(job._id))).emit("job:statusChanged", eventPayload);
 
-  const recipients = [toId(job.fleet), toId(job.assignedMechanic)].filter(Boolean);
+  const recipients = uniqueIds([job.fleet, job.assignedMechanic, job.assignedCompany]);
   recipients.forEach((recipient) => {
     ioInstance.to(userRoom(recipient)).emit("job:statusChanged", eventPayload);
   });
@@ -184,7 +196,7 @@ export const emitJobLocationPing = (job, payload = {}) => {
 
   ioInstance.to(jobRoom(toId(job._id))).emit("job:location", eventPayload);
 
-  const recipients = [toId(job.fleet), toId(job.assignedMechanic)].filter(Boolean);
+  const recipients = uniqueIds([job.fleet, job.assignedMechanic, job.assignedCompany]);
   recipients.forEach((recipient) => {
     ioInstance.to(userRoom(recipient)).emit("job:location", eventPayload);
   });
@@ -224,4 +236,3 @@ export const emitChatMessagesRead = ({ jobId, readerId, markedCount, participant
     ioInstance.to(userRoom(`${participant}`)).emit("chat:read", payload);
   });
 };
-

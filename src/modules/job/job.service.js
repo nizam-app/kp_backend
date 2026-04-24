@@ -122,6 +122,7 @@ const serializeJobCard = (job, viewer, extra = {}) => {
     finalAmount: job.finalAmount ?? null,
     quoteCount: job.quoteCount || 0,
     scheduledFor: job.scheduledFor || null,
+    availabilityWindow: job.availabilityWindow || null,
     postedAt: createdAt,
     assignedAt: job.assignedAt || null,
     completedAt: job.completedAt || null,
@@ -305,6 +306,29 @@ const ensureLocation = (payload) => {
     type: "Point",
     coordinates,
     address: location.address || payload.address,
+  };
+};
+
+const normalizeAvailabilityWindow = (payload = {}) => {
+  const rawWindow = payload.availabilityWindow || {};
+  const fromValue = rawWindow.from || payload.availabilityFrom || payload.scheduledFor;
+  const toValue = rawWindow.to || payload.availabilityTo;
+  const from = fromValue ? new Date(fromValue) : null;
+  const to = toValue ? new Date(toValue) : null;
+
+  if (fromValue && Number.isNaN(from.getTime())) {
+    throw new AppError("availabilityWindow.from must be a valid date", 400);
+  }
+  if (toValue && Number.isNaN(to.getTime())) {
+    throw new AppError("availabilityWindow.to must be a valid date", 400);
+  }
+  if (from && to && to <= from) {
+    throw new AppError("availabilityWindow.to must be after availabilityWindow.from", 400);
+  }
+
+  return {
+    scheduledFor: from || undefined,
+    availabilityWindow: from || to ? { from: from || undefined, to: to || undefined } : undefined,
   };
 };
 
@@ -533,6 +557,8 @@ export const createJob = async (payload, fleetUser) => {
     throw new AppError("Complete your profile before posting a job", 400);
   }
 
+  const scheduling = normalizeAvailabilityWindow(payload);
+
   const job = await Job.create({
     jobCode: await generateJobCode(),
     fleet: fleetUser._id,
@@ -553,7 +579,8 @@ export const createJob = async (payload, fleetUser) => {
     postedAt: new Date(),
     estimatedPayout: payload.estimatedPayout,
     mode: payload.mode || undefined,
-    scheduledFor: payload.scheduledFor,
+    scheduledFor: scheduling.scheduledFor,
+    availabilityWindow: scheduling.availabilityWindow,
   });
 
   await createJobEvent({
