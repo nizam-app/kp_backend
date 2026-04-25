@@ -5,9 +5,13 @@ import { ROLES } from "../../constants/domain.js";
 import {
   adminDashboardController,adminAuditLogsController,adminDisputesController,adminFinancialController,adminFleetController,adminLiveTrackingController,
   adminNotificationsController,adminPromotionsController,adminReportsController,adminReviewsController,adminServiceCatalogController,
-  adminServiceRequestsController,adminSettingsController,adminSupportTicketsController,adminUsersController,approveMechanicController,
+  adminServiceRequestByIdController,adminServiceRequestsController,adminSettingsController,adminSupportTicketsController,adminUserByIdController,adminUserMembersController,adminUsersController,approveMechanicController,
   createAdminFinancialInvoiceController,createAdminFleetController,createAdminFleetVehicleController,createAdminUserController,
-  createAdminDisputeController,createAdminPromotionController,createAdminServiceCatalogController,mechanicReviewQueueController,rejectMechanicController,
+  createAdminDisputeController,createAdminPromotionController,createAdminServiceCatalogController,createAdminServiceRequestInvoiceController,
+  deleteAdminUserController,
+  mechanicReviewQueueController,rejectMechanicController,
+  deleteAdminServiceRequestController,sendAdminServiceRequestMessageController,
+  resetAdminUserPasswordController,sendAdminUserMessageController,
   markAdminNotificationReadController,markAllAdminNotificationsReadController,removeAdminNotificationController,
   exportAdminFinancialController,exportAdminReportsController,
   updateAdminPromotionController,updateAdminReviewController,updateAdminServiceCatalogController,updateAdminDisputeController,
@@ -23,10 +27,19 @@ router.use(catchAsync(authorize(ROLES.ADMIN)));
 
 router.get("/dashboard", catchAsync(adminDashboardController));
 router.get("/service-requests", catchAsync(adminServiceRequestsController));
+router.get("/service-requests/:jobId", catchAsync(adminServiceRequestByIdController));
 router.patch("/service-requests/:jobId", catchAsync(updateAdminServiceRequestController));
+router.post("/service-requests/:jobId/message", catchAsync(sendAdminServiceRequestMessageController));
+router.post("/service-requests/:jobId/invoice", catchAsync(createAdminServiceRequestInvoiceController));
+router.delete("/service-requests/:jobId", catchAsync(deleteAdminServiceRequestController));
 router.get("/users", catchAsync(adminUsersController));
 router.post("/users", catchAsync(createAdminUserController));
+router.get("/users/:userId", catchAsync(adminUserByIdController));
+router.get("/users/:userId/members", catchAsync(adminUserMembersController));
 router.patch("/users/:userId", catchAsync(updateAdminUserController));
+router.post("/users/:userId/reset-password", catchAsync(resetAdminUserPasswordController));
+router.post("/users/:userId/message", catchAsync(sendAdminUserMessageController));
+router.delete("/users/:userId", catchAsync(deleteAdminUserController));
 router.get("/fleet", catchAsync(adminFleetController));
 router.post("/fleet", catchAsync(createAdminFleetController));
 router.patch("/fleet/:fleetId", catchAsync(updateAdminFleetController));

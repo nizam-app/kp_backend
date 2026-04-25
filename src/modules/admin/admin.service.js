@@ -18,6 +18,9 @@ import { ServiceCatalog } from "../serviceCatalog/serviceCatalog.model.js";
 import { Promotion } from "../promotion/promotion.model.js";
 import { Review } from "../review/review.model.js";
 import { AuditLog } from "../auditLog/auditLog.model.js";
+import { JobEvent } from "../jobEvent/jobEvent.model.js";
+import { ChatMessage } from "../chat/chat.model.js";
+import { sendJobMessage } from "../chat/chat.service.js";
 
 const serviceRequestBucketFromJobStatus = (status) => {
   if ([JOB_STATUS.COMPLETED].includes(status)) return "COMPLETED";
@@ -219,6 +222,25 @@ const serializeServiceRequest = (job) => {
   };
 };
 
+const serializeServiceRequestDetail = (job) => ({
+  ...serializeServiceRequest(job),
+  fleet: job.fleet
+    ? {
+        _id: job.fleet._id || job.fleet,
+        email: job.fleet.email || null,
+        companyName: job.fleet.fleetProfile?.companyName || null,
+        contactName: job.fleet.fleetProfile?.contactName || null,
+        phone: job.fleet.fleetProfile?.phone || null,
+      }
+    : null,
+  mode: job.mode || "EMERGENCY",
+  scheduledFor: job.scheduledFor || null,
+  availabilityWindow: job.availabilityWindow || null,
+  location: job.location || null,
+  photos: job.photos || [],
+  completionSummary: job.completionSummary || null,
+});
+
 const serializeAdminUser = (user) => {
   const isFleet = user.role === ROLES.FLEET;
   const isMechanic = user.role === ROLES.MECHANIC;
@@ -230,11 +252,15 @@ const serializeAdminUser = (user) => {
       user.email,
     email: user.email,
     phone:
-      user.fleetProfile?.phone || user.mechanicProfile?.phone || null,
+      user.fleetProfile?.phone ||
+      user.mechanicProfile?.phone ||
+      user.adminProfile?.phoneNumber ||
+      null,
     role: isFleet ? "COMPANY" : isMechanic ? "TECHNICIAN" : user.role,
     status: user.status,
     joinDate: user.createdAt,
     company: user.fleetProfile?.companyName || user.mechanicProfile?.businessName || null,
+    memberCount: 0,
     activity: isFleet
       ? {
           kind: "trucks",
@@ -579,6 +605,65 @@ export const updateAdminServiceRequest = async (jobId, payload = {}, adminUser) 
     job.urgency = parsePriority(payload.priority);
   }
 
+  if (payload.title !== undefined) {
+    const nextTitle = `${payload.title || ""}`.trim();
+    if (!nextTitle) throw new AppError("title cannot be empty", 400);
+    job.title = nextTitle;
+  }
+
+  if (payload.description !== undefined) {
+    const nextDescription = `${payload.description || ""}`.trim();
+    if (!nextDescription) throw new AppError("description cannot be empty", 400);
+    job.description = nextDescription;
+  }
+
+  if (payload.issueType !== undefined) {
+    job.issueType = `${payload.issueType || ""}`.trim().toUpperCase() || job.issueType;
+  }
+
+  if (payload.mode !== undefined) {
+    const nextMode = `${payload.mode || ""}`.trim().toUpperCase();
+    if (!["EMERGENCY", "SCHEDULABLE"].includes(nextMode)) {
+      throw new AppError("mode must be EMERGENCY or SCHEDULABLE", 400);
+    }
+    job.mode = nextMode;
+  }
+
+  if (payload.vehicle && typeof payload.vehicle === "object") {
+    job.vehicle = {
+      ...(job.vehicle?.toObject?.() || job.vehicle || {}),
+      ...payload.vehicle,
+    };
+  }
+
+  if (payload.location && typeof payload.location === "object") {
+    const nextLocation = {
+      ...(job.location?.toObject?.() || job.location || {}),
+      ...payload.location,
+    };
+
+    if (
+      nextLocation.coordinates &&
+      (!Array.isArray(nextLocation.coordinates) || nextLocation.coordinates.length !== 2)
+    ) {
+      throw new AppError("location.coordinates must be [lng, lat]", 400);
+    }
+
+    job.location = nextLocation;
+  }
+
+  if (payload.scheduledFor !== undefined) {
+    job.scheduledFor = payload.scheduledFor ? new Date(payload.scheduledFor) : undefined;
+  }
+
+  if (payload.availabilityWindow !== undefined) {
+    const nextWindow = payload.availabilityWindow || {};
+    job.availabilityWindow = {
+      from: nextWindow.from ? new Date(nextWindow.from) : undefined,
+      to: nextWindow.to ? new Date(nextWindow.to) : undefined,
+    };
+  }
+
   if (payload.status) {
     const nextStatus = parseStatus(payload.status);
     if (!jobStatusValues.includes(nextStatus)) {
@@ -641,12 +726,156 @@ export const updateAdminServiceRequest = async (jobId, payload = {}, adminUser) 
   return serializeServiceRequest(refreshedJob);
 };
 
+export const getAdminServiceRequestById = async (jobId) => {
+  const job = await Job.findById(jobId)
+    .populate("fleet", "email fleetProfile.companyName fleetProfile.contactName fleetProfile.phone")
+    .populate("assignedMechanic", "email mechanicProfile.displayName mechanicProfile.phone")
+    .lean();
+
+  if (!job) throw new AppError("Service request not found", 404);
+
+  return serializeServiceRequestDetail(job);
+};
+
+export const sendAdminServiceRequestMessage = async (jobId, payload = {}, adminUser) => {
+  const message = await sendJobMessage(jobId, adminUser, payload);
+
+  await writeAuditLog(
+    adminUser,
+    "Sent Service Request Message",
+    `${jobId}`,
+    "Service Management"
+  );
+
+  return message;
+};
+
+export const createAdminServiceRequestInvoice = async (jobId, payload = {}, adminUser) => {
+  const job = await Job.findById(jobId)
+    .populate("fleet", "email fleetProfile.companyName fleetProfile.contactName")
+    .populate(
+      "assignedMechanic",
+      "email mechanicProfile.displayName mechanicProfile.businessName mechanicProfile.rating"
+    );
+
+  if (!job) throw new AppError("Service request not found", 404);
+  if (!job.fleet) throw new AppError("Fleet account missing on service request", 400);
+  if (!job.assignedMechanic) {
+    throw new AppError("Assign a mechanic before generating an invoice", 400);
+  }
+
+  const existingInvoice = await Invoice.findOne({ job: job._id }).select("_id invoiceNo");
+  if (existingInvoice) {
+    throw new AppError(`Invoice already exists for this request: ${existingInvoice.invoiceNo}`, 409);
+  }
+
+  const subtotal = Number(payload.subtotal ?? job.finalAmount ?? job.acceptedAmount ?? job.estimatedPayout);
+  if (!Number.isFinite(subtotal) || subtotal <= 0) {
+    throw new AppError("A valid subtotal is required to generate an invoice", 400);
+  }
+
+  return createAdminFinancialInvoice(
+    {
+      jobId: job._id,
+      fleetId: job.fleet._id,
+      mechanicId: job.assignedMechanic._id,
+      subtotal,
+      totalAmount: payload.totalAmount,
+      vatAmount: payload.vatAmount,
+      currency: payload.currency || job.currency || "GBP",
+      description: payload.description || `${job.jobCode} - ${job.title}`,
+      companyName: job.fleet.fleetProfile?.companyName || undefined,
+      mechanicName: job.assignedMechanic.mechanicProfile?.displayName || undefined,
+      mechanicBusinessName:
+        job.assignedMechanic.mechanicProfile?.businessName || undefined,
+      mechanicRating: job.assignedMechanic.mechanicProfile?.rating?.average || undefined,
+    },
+    adminUser
+  );
+};
+
+export const deleteAdminServiceRequest = async (jobId, adminUser) => {
+  const job = await Job.findById(jobId);
+  if (!job) throw new AppError("Service request not found", 404);
+
+  if (
+    [
+      JOB_STATUS.ASSIGNED,
+      JOB_STATUS.EN_ROUTE,
+      JOB_STATUS.ON_SITE,
+      JOB_STATUS.IN_PROGRESS,
+      JOB_STATUS.AWAITING_APPROVAL,
+      JOB_STATUS.COMPLETED,
+    ].includes(job.status)
+  ) {
+    throw new AppError(
+      "Only posted, quoting, or cancelled requests can be deleted. Cancel the live request first if needed.",
+      400
+    );
+  }
+
+  const hasInvoice = await Invoice.exists({ job: job._id });
+  if (hasInvoice) {
+    throw new AppError("Cannot delete a service request that already has an invoice", 400);
+  }
+
+  await Promise.all([
+    ChatMessage.deleteMany({ job: job._id }),
+    JobEvent.deleteMany({ job: job._id }),
+    JobLocationPing.deleteMany({ job: job._id }),
+    Notification.deleteMany({ "data.jobId": `${job._id}` }),
+    Job.deleteOne({ _id: job._id }),
+  ]);
+
+  await writeAuditLog(
+    adminUser,
+    "Deleted Service Request",
+    job.jobCode || job._id.toString(),
+    "Service Management"
+  );
+
+  return {
+    _id: job._id,
+    requestId: job.jobCode,
+    deleted: true,
+  };
+};
+
+const serializeAdminUserDetail = (user, extras = {}) => ({
+  ...serializeAdminUser(user),
+  fleetProfile: user.fleetProfile || null,
+  mechanicProfile: user.mechanicProfile || null,
+  adminProfile: user.adminProfile || null,
+  companyMembership: user.companyMembership || null,
+  ...extras,
+});
+
+const serializeAdminUserMember = (user) => ({
+  _id: user._id,
+  name:
+    user.mechanicProfile?.displayName ||
+    user.adminProfile?.fullName ||
+    user.email,
+  email: user.email,
+  phone:
+    user.mechanicProfile?.phone ||
+    user.fleetProfile?.phone ||
+    user.adminProfile?.phoneNumber ||
+    null,
+  role: user.role === ROLES.MECHANIC ? "TECHNICIAN" : user.role,
+  status: user.status,
+  jobTitle: user.companyMembership?.jobTitle || null,
+  membershipStatus: user.companyMembership?.status || null,
+  joinedAt: user.companyMembership?.joinedAt || user.createdAt,
+});
+
 export const listAdminUsers = async (query = {}) => {
   const page = parsePage(query.page);
   const limit = parseLimit(query.limit);
   const skip = (page - 1) * limit;
   const filter = {};
   const roleFilter = parseRoleFilter(query.role);
+  const statusFilter = parseStatus(query.status);
 
   if (roleFilter === "COMPANIES" || roleFilter === "COMPANY") {
     filter.role = ROLES.FLEET;
@@ -656,6 +885,12 @@ export const listAdminUsers = async (query = {}) => {
     filter.role = ROLES.ADMIN;
   } else if (roleFilter === "DRIVERS" || roleFilter === "DRIVER") {
     filter.role = "__NO_DRIVER_ROLE__";
+  }
+
+  if (statusFilter === "PENDING") {
+    filter.status = { $in: [USER_STATUS.PENDING, USER_STATUS.PENDING_REVIEW] };
+  } else if (statusFilter && statusFilter !== "ALL") {
+    filter.status = statusFilter;
   }
 
   if (query.search) {
@@ -703,9 +938,31 @@ export const listAdminUsers = async (query = {}) => {
     vehicleCountsAgg.map((entry) => [entry._id.toString(), entry.count])
   );
 
+  const memberCountsAgg = fleetIds.length
+    ? await User.aggregate([
+        {
+          $match: {
+            "companyMembership.company": { $in: fleetIds },
+            "companyMembership.status": "ACTIVE",
+          },
+        },
+        {
+          $group: {
+            _id: "$companyMembership.company",
+            count: { $sum: 1 },
+          },
+        },
+      ])
+    : [];
+
+  const memberCountMap = new Map(
+    memberCountsAgg.map((entry) => [entry._id.toString(), entry.count])
+  );
+
   const items = users.map((user) => {
     const item = serializeAdminUser(user);
     if (user.role === ROLES.FLEET) {
+      item.memberCount = memberCountMap.get(user._id.toString()) || 0;
       item.activity = {
         kind: "trucks",
         value: vehicleCountMap.get(user._id.toString()) || 0,
@@ -727,6 +984,53 @@ export const listAdminUsers = async (query = {}) => {
       totalMembers,
       activeTechnicians,
       activeDrivers: 0,
+    },
+  };
+};
+
+export const getAdminUserById = async (userId) => {
+  const user = await User.findById(userId).lean();
+  if (!user) throw new AppError("User not found", 404);
+
+  let memberCount = 0;
+  if (user.role === ROLES.FLEET) {
+    memberCount = await User.countDocuments({
+      "companyMembership.company": user._id,
+      "companyMembership.status": "ACTIVE",
+    });
+  }
+
+  return serializeAdminUserDetail(user, { memberCount });
+};
+
+export const listAdminUserMembers = async (userId) => {
+  const company = await User.findById(userId).lean();
+  if (!company) throw new AppError("User not found", 404);
+  if (company.role !== ROLES.FLEET) {
+    throw new AppError("Members are only available for company accounts", 400);
+  }
+
+  const members = await User.find({
+    "companyMembership.company": company._id,
+  })
+    .sort({ "companyMembership.joinedAt": -1, createdAt: -1 })
+    .lean();
+
+  return {
+    company: {
+      _id: company._id,
+      companyName: company.fleetProfile?.companyName || company.email,
+      email: company.email,
+    },
+    items: members.map(serializeAdminUserMember),
+    stats: {
+      total: members.length,
+      active: members.filter(
+        (member) => member.companyMembership?.status === "ACTIVE"
+      ).length,
+      pending: members.filter(
+        (member) => member.companyMembership?.status === "PENDING"
+      ).length,
     },
   };
 };
@@ -892,6 +1196,117 @@ export const updateAdminUser = async (userId, payload = {}, adminUser) => {
   );
 
   return serializeAdminUser(user.toObject());
+};
+
+export const resetAdminUserPassword = async (userId, payload = {}, adminUser) => {
+  const user = await User.findById(userId);
+  if (!user) throw new AppError("User not found", 404);
+
+  const nextPassword = `${payload.newPassword || payload.password || ""}`.trim();
+  if (nextPassword.length < 8) {
+    throw new AppError("newPassword must be at least 8 characters", 400);
+  }
+
+  user.password = nextPassword;
+  user.passwordChangedAt = new Date();
+  await user.save();
+
+  await writeAuditLog(
+    adminUser,
+    "Reset User Password",
+    `${user.role}:${user.email}`,
+    "User Management"
+  );
+
+  return {
+    _id: user._id,
+    email: user.email,
+    passwordReset: true,
+  };
+};
+
+export const sendAdminUserMessage = async (userId, payload = {}, adminUser) => {
+  const user = await User.findById(userId).lean();
+  if (!user) throw new AppError("User not found", 404);
+
+  const body = `${payload.body || payload.message || payload.text || ""}`.trim();
+  if (!body) throw new AppError("message body is required", 400);
+
+  const title =
+    `${payload.title || ""}`.trim() ||
+    `Message from ${getAdminActorLabel(adminUser)}`;
+
+  const notification = await Notification.create({
+    user: user._id,
+    type: "ADMIN_DIRECT_MESSAGE",
+    title,
+    body,
+    data: {
+      fromAdminId: adminUser?._id || null,
+      fromAdminLabel: getAdminActorLabel(adminUser),
+    },
+    isRead: false,
+  });
+
+  await writeAuditLog(
+    adminUser,
+    "Sent User Message",
+    `${user.role}:${user.email}`,
+    "User Management"
+  );
+
+  return {
+    _id: notification._id,
+    userId: user._id,
+    title: notification.title,
+    body: notification.body,
+    createdAt: notification.createdAt,
+  };
+};
+
+export const deleteAdminUser = async (userId, adminUser) => {
+  const user = await User.findById(userId);
+  if (!user) throw new AppError("User not found", 404);
+
+  if (`${user._id}` === `${adminUser?._id || ""}`) {
+    throw new AppError("You cannot remove your own admin account", 400);
+  }
+
+  const [jobsCount, vehiclesCount, memberCount] = await Promise.all([
+    Job.countDocuments({
+      $or: [{ fleet: user._id }, { assignedMechanic: user._id }],
+    }),
+    user.role === ROLES.FLEET ? Vehicle.countDocuments({ fleet: user._id }) : 0,
+    user.role === ROLES.FLEET
+      ? User.countDocuments({
+          "companyMembership.company": user._id,
+          "companyMembership.status": { $in: ["ACTIVE", "PENDING"] },
+        })
+      : 0,
+  ]);
+
+  if (jobsCount > 0 || vehiclesCount > 0 || memberCount > 0) {
+    throw new AppError(
+      "This account still has linked jobs, fleet vehicles, or members and cannot be removed yet",
+      400
+    );
+  }
+
+  await Notification.deleteMany({ user: user._id });
+  await User.deleteOne({ _id: user._id });
+
+  await writeAuditLog(
+    adminUser,
+    "Removed User",
+    `${user.role}:${user.email}`,
+    "User Management"
+  );
+
+  return {
+    _id: user._id,
+    email: user.email,
+    deleted: true,
+  };
 };
 
 export const listAdminFleet = async (query = {}) => {

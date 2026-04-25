@@ -6,7 +6,10 @@ import {
   createAdminDispute,
   createAdminPromotion,
   createAdminServiceCatalogItem,
+  createAdminServiceRequestInvoice,
   createAdminUserOrCompany,
+  deleteAdminUser,
+  deleteAdminServiceRequest,
   approveMechanic,
   exportAdminFinancialOverview,
   exportAdminReports,
@@ -15,6 +18,8 @@ import {
   getAdminLiveTracking,
   getAdminReports,
   getAdminSettings,
+  getAdminServiceRequestById,
+  getAdminUserById,
   listAdminFleet,
   listAdminDisputes,
   listAdminNotifications,
@@ -24,12 +29,16 @@ import {
   listAdminAuditLogs,
   listAdminSupportTickets,
   listAdminServiceRequests,
+  listAdminUserMembers,
   listAdminUsers,
   listMechanicReviewQueue,
   markAdminNotificationRead,
   markAllAdminNotificationsRead,
   rejectMechanic,
   removeAdminNotification,
+  resetAdminUserPassword,
+  sendAdminUserMessage,
+  sendAdminServiceRequestMessage,
   updateAdminFleetCompany,
   updateAdminFleetVehicle,
   updateAdminServiceRequest,
@@ -71,6 +80,40 @@ export const updateAdminServiceRequestController = async (req, res) => {
   });
 };
 
+export const adminServiceRequestByIdController = async (req, res) => {
+  const result = await getAdminServiceRequestById(req.params.jobId);
+  return sendResponse(res, {
+    message: "Admin service request fetched",
+    data: result,
+  });
+};
+
+export const createAdminServiceRequestInvoiceController = async (req, res) => {
+  const result = await createAdminServiceRequestInvoice(req.params.jobId, req.body, req.user);
+  return sendResponse(res, {
+    statusCode: 201,
+    message: "Admin service request invoice created",
+    data: result,
+  });
+};
+
+export const sendAdminServiceRequestMessageController = async (req, res) => {
+  const result = await sendAdminServiceRequestMessage(req.params.jobId, req.body, req.user);
+  return sendResponse(res, {
+    statusCode: 201,
+    message: "Admin service request message sent",
+    data: result,
+  });
+};
+
+export const deleteAdminServiceRequestController = async (req, res) => {
+  const result = await deleteAdminServiceRequest(req.params.jobId, req.user);
+  return sendResponse(res, {
+    message: "Admin service request deleted",
+    data: result,
+  });
+};
+
 export const adminUsersController = async (req, res) => {
   const result = await listAdminUsers(req.query);
   return sendResponse(res, {
@@ -92,10 +135,51 @@ export const createAdminUserController = async (req, res) => {
   });
 };
 
+export const adminUserByIdController = async (req, res) => {
+  const result = await getAdminUserById(req.params.userId);
+  return sendResponse(res, {
+    message: "Admin user fetched",
+    data: result,
+  });
+};
+
 export const updateAdminUserController = async (req, res) => {
   const result = await updateAdminUser(req.params.userId, req.body, req.user);
   return sendResponse(res, {
     message: "Admin user updated",
+    data: result,
+  });
+};
+
+export const adminUserMembersController = async (req, res) => {
+  const result = await listAdminUserMembers(req.params.userId);
+  return sendResponse(res, {
+    message: "Admin user members fetched",
+    data: result,
+  });
+};
+
+export const resetAdminUserPasswordController = async (req, res) => {
+  const result = await resetAdminUserPassword(req.params.userId, req.body, req.user);
+  return sendResponse(res, {
+    message: "Admin user password reset",
+    data: result,
+  });
+};
+
+export const sendAdminUserMessageController = async (req, res) => {
+  const result = await sendAdminUserMessage(req.params.userId, req.body, req.user);
+  return sendResponse(res, {
+    statusCode: 201,
+    message: "Admin user message sent",
+    data: result,
+  });
+};
+
+export const deleteAdminUserController = async (req, res) => {
+  const result = await deleteAdminUser(req.params.userId, req.user);
+  return sendResponse(res, {
+    message: "Admin user removed",
     data: result,
   });
 };
