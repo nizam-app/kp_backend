@@ -1424,6 +1424,14 @@ export const updateAdminFleetCompany = async (fleetId, payload = {}, adminUser) 
   return serializeFleetManagementItem(fleet.toObject(), vehicles);
 };
 
+export const deleteAdminFleetCompany = async (fleetId, adminUser) => {
+  const fleet = await User.findOne({ _id: fleetId, role: ROLES.FLEET });
+  if (!fleet) throw new AppError("Fleet company not found", 404);
+
+  // Reuse the existing admin user deletion rules (no linked jobs/vehicles/members).
+  return deleteAdminUser(fleet._id, adminUser);
+};
+
 export const createAdminFleetVehicle = async (fleetId, payload = {}, adminUser) => {
   const fleet = await User.findOne({ _id: fleetId, role: ROLES.FLEET }).lean();
   if (!fleet) throw new AppError("Fleet company not found", 404);
@@ -2150,6 +2158,13 @@ export const updateAdminPromotion = async (promotionId, payload = {}) => {
   return item;
 };
 
+export const deleteAdminPromotion = async (promotionId) => {
+  const item = await Promotion.findById(promotionId);
+  if (!item) throw new AppError("Promotion not found", 404);
+  await item.deleteOne();
+  return { _id: item._id, deleted: true };
+};
+
 export const listAdminReviews = async (query = {}) => {
   const filter = {};
   if (query.status) filter.status = parseStatus(query.status);
@@ -2206,6 +2221,19 @@ export const updateAdminReview = async (reviewId, payload = {}) => {
   if (payload.comment !== undefined) review.comment = payload.comment;
   await review.save();
   return review;
+};
+
+export const getAdminReviewById = async (reviewId) => {
+  const review = await Review.findById(reviewId).lean();
+  if (!review) throw new AppError("Review not found", 404);
+  return review;
+};
+
+export const deleteAdminReview = async (reviewId) => {
+  const review = await Review.findById(reviewId);
+  if (!review) throw new AppError("Review not found", 404);
+  await review.deleteOne();
+  return { _id: review._id, deleted: true };
 };
 
 export const listAdminAuditLogs = async (query = {}) => {

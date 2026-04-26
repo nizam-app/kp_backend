@@ -9,6 +9,8 @@ import {
   createAdminFinancialInvoiceController,createAdminFleetController,createAdminFleetVehicleController,createAdminUserController,
   createAdminDisputeController,createAdminPromotionController,createAdminServiceCatalogController,createAdminServiceRequestInvoiceController,
   deleteAdminUserController,
+  deleteAdminFleetController,
+  deleteAdminPromotionController,
   mechanicReviewQueueController,rejectMechanicController,
   deleteAdminServiceRequestController,sendAdminServiceRequestMessageController,
   resetAdminUserPasswordController,sendAdminUserMessageController,
@@ -17,6 +19,7 @@ import {
   updateAdminPromotionController,updateAdminReviewController,updateAdminServiceCatalogController,updateAdminDisputeController,
   updateAdminFleetController,updateAdminFleetVehicleController,updateAdminServiceRequestController,updateAdminSettingsController,updateAdminSupportTicketController,
   updateAdminUserController,updateUserStatusController,
+  adminReviewByIdController,deleteAdminReviewController,
 } from "./admin.controller.js";
 
 const router = Router();
@@ -43,6 +46,7 @@ router.delete("/users/:userId", catchAsync(deleteAdminUserController));
 router.get("/fleet", catchAsync(adminFleetController));
 router.post("/fleet", catchAsync(createAdminFleetController));
 router.patch("/fleet/:fleetId", catchAsync(updateAdminFleetController));
+router.delete("/fleet/:fleetId", catchAsync(deleteAdminFleetController));
 router.post("/fleet/:fleetId/vehicles", catchAsync(createAdminFleetVehicleController));
 router.patch("/fleet/:fleetId/vehicles/:vehicleId", catchAsync(updateAdminFleetVehicleController));
 router.get("/financial", catchAsync(adminFinancialController));
@@ -75,8 +79,11 @@ router.patch(
   "/promotions/:promotionId",
   catchAsync(updateAdminPromotionController)
 );
+router.delete("/promotions/:promotionId", catchAsync(deleteAdminPromotionController));
 router.get("/reviews", catchAsync(adminReviewsController));
+router.get("/reviews/:reviewId", catchAsync(adminReviewByIdController));
 router.patch("/reviews/:reviewId", catchAsync(updateAdminReviewController));
+router.delete("/reviews/:reviewId", catchAsync(deleteAdminReviewController));
 router.get(
   "/mechanics/review-queue",
   catchAsync(mechanicReviewQueueController)

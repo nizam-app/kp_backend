@@ -8,6 +8,7 @@ import {
   createAdminServiceCatalogItem,
   createAdminServiceRequestInvoice,
   createAdminUserOrCompany,
+  deleteAdminFleetCompany,
   deleteAdminUser,
   deleteAdminServiceRequest,
   approveMechanic,
@@ -50,6 +51,9 @@ import {
   updateAdminSupportTicket,
   updateAdminUser,
   updateUserStatus,
+  deleteAdminPromotion,
+  getAdminReviewById,
+  deleteAdminReview,
 } from "./admin.service.js";
 
 export const adminDashboardController = async (_req, res) => {
@@ -209,6 +213,14 @@ export const updateAdminFleetController = async (req, res) => {
   });
 };
 
+export const deleteAdminFleetController = async (req, res) => {
+  const result = await deleteAdminFleetCompany(req.params.fleetId, req.user);
+  return sendResponse(res, {
+    message: "Admin fleet company removed",
+    data: result,
+  });
+};
+
 export const createAdminFleetVehicleController = async (req, res) => {
   const result = await createAdminFleetVehicle(req.params.fleetId, req.body, req.user);
   return sendResponse(res, {
@@ -250,6 +262,38 @@ export const createAdminFinancialInvoiceController = async (req, res) => {
 
 export const exportAdminFinancialController = async (req, res) => {
   const result = await exportAdminFinancialOverview(req.query);
+
+  const format = `${req.query?.format || "CSV"}`.trim().toUpperCase();
+  if (format === "CSV") {
+    const escapeCsv = (value) => {
+      if (value === null || value === undefined) return "";
+      const raw = String(value);
+      if (/[",\n\r]/.test(raw)) return `"${raw.replace(/"/g, '""')}"`;
+      return raw;
+    };
+
+    const rows = [
+      ["Invoice No", "Company", "Service", "Amount", "Currency", "Payment Method", "Status", "Date"],
+      ...(result.items || []).map((item) => [
+        item.invoiceNo,
+        item.company,
+        item.service,
+        item.amount,
+        item.currency,
+        item.paymentMethod,
+        item.status,
+        item.date,
+      ]),
+    ];
+
+    const csv = rows.map((row) => row.map(escapeCsv).join(",")).join("\n");
+    const filename = `financial-report-${new Date().toISOString().slice(0, 10)}.csv`;
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    return res.status(200).send(csv);
+  }
+
   return sendResponse(res, {
     message: "Admin financial export prepared",
     data: result,
@@ -395,6 +439,14 @@ export const updateAdminPromotionController = async (req, res) => {
   });
 };
 
+export const deleteAdminPromotionController = async (req, res) => {
+  const result = await deleteAdminPromotion(req.params.promotionId);
+  return sendResponse(res, {
+    message: "Admin promotion deleted",
+    data: result,
+  });
+};
+
 export const adminReviewsController = async (req, res) => {
   const result = await listAdminReviews(req.query);
   return sendResponse(res, {
@@ -403,10 +455,26 @@ export const adminReviewsController = async (req, res) => {
   });
 };
 
+export const adminReviewByIdController = async (req, res) => {
+  const result = await getAdminReviewById(req.params.reviewId);
+  return sendResponse(res, {
+    message: "Admin review fetched",
+    data: result,
+  });
+};
+
 export const updateAdminReviewController = async (req, res) => {
   const result = await updateAdminReview(req.params.reviewId, req.body);
   return sendResponse(res, {
     message: "Admin review updated",
+    data: result,
+  });
+};
+
+export const deleteAdminReviewController = async (req, res) => {
+  const result = await deleteAdminReview(req.params.reviewId);
+  return sendResponse(res, {
+    message: "Admin review deleted",
     data: result,
   });
 };
@@ -429,6 +497,73 @@ export const adminReportsController = async (req, res) => {
 
 export const exportAdminReportsController = async (req, res) => {
   const result = await exportAdminReports(req.query);
+  const format = `${req.query?.format || "PDF"}`.trim().toUpperCase();
+
+  // Production-ready export: CSV download for frontend.
+  if (format === "CSV") {
+    const escapeCsv = (value) => {
+      if (value === null || value === undefined) return "";
+      const raw = String(value);
+      if (/[",\n\r]/.test(raw)) return `"${raw.replace(/"/g, '""')}"`;
+      return raw;
+    };
+
+    const report = result.report || {};
+    const rows = [];
+    rows.push(["Report Type", report.reportType || ""]);
+    rows.push(["Generated At", new Date(result.generatedAt).toISOString()]);
+    rows.push([]);
+
+    // Summary
+    rows.push(["Summary"]);
+    rows.push(["Total Revenue", report.summary?.totalRevenue ?? 0]);
+    rows.push(["Total Services", report.summary?.totalServices ?? 0]);
+    rows.push(["Active Companies", report.summary?.activeCompanies ?? 0]);
+    rows.push(["Avg Service Value", report.summary?.avgServiceValue ?? 0]);
+    rows.push([]);
+
+    // Monthly trend
+    rows.push(["Monthly Revenue Trend"]);
+    rows.push(["Month", "Revenue", "Services"]);
+    for (const item of report.monthlyRevenueTrend || []) {
+      rows.push([item.month, item.revenue, item.services]);
+    }
+    rows.push([]);
+
+    // Top services
+    rows.push(["Top Services"]);
+    rows.push(["Service", "Count", "Revenue"]);
+    for (const item of report.topServices || []) {
+      rows.push([item.name, item.count, item.revenue]);
+    }
+    rows.push([]);
+
+    // Top companies
+    rows.push(["Top Companies"]);
+    rows.push(["Company", "Services", "Revenue"]);
+    for (const item of report.topCompanies || []) {
+      rows.push([item.companyName, item.services, item.revenue]);
+    }
+    rows.push([]);
+
+    // Mechanic performance
+    rows.push(["Mechanic Performance"]);
+    rows.push(["Mechanic", "Services", "Rating", "Revenue"]);
+    for (const item of report.mechanicPerformance || []) {
+      rows.push([item.mechanicName, item.services, item.rating, item.revenue]);
+    }
+
+    const csv = rows.map((row) => row.map(escapeCsv).join(",")).join("\n");
+    const filename = `admin-report-${(report.reportType || "REPORT")
+      .toString()
+      .toLowerCase()
+      .replace(/\s+/g, "-")}-${new Date().toISOString().slice(0, 10)}.csv`;
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    return res.status(200).send(csv);
+  }
+
   return sendResponse(res, {
     message: "Admin report export prepared",
     data: result,
