@@ -12,8 +12,10 @@ const start = async () => {
   const httpServer = createServer(app);
   initRealtimeServer(httpServer);
 
-  server = httpServer.listen(env.PORT, env.HOST, () => {
-    console.log(`Server running on ${env.HOST}:${env.PORT} (${env.NODE_ENV})`);
+  // Cloud hosts (Render, etc.) require listening on 0.0.0.0 and their injected PORT.
+  const host = env.NODE_ENV === "production" ? "0.0.0.0" : env.HOST;
+  server = httpServer.listen(env.PORT, host, () => {
+    console.log(`Server running on ${host}:${env.PORT} (${env.NODE_ENV})`);
   });
 };
 
