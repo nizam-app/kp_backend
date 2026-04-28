@@ -266,6 +266,26 @@ export const listMechanicDisputes = async (mechanicUser, query = {}) => {
   };
 };
 
+export const getMechanicDisputeById = async (mechanicUser, disputeId) => {
+  if (mechanicUser.role !== ROLES.MECHANIC) {
+    throw new AppError("Only mechanic users can view this dispute", 403);
+  }
+
+  const dispute = await Dispute.findOne({
+    _id: disputeId,
+    mechanic: mechanicUser._id,
+  })
+    .populate("company", "fleetProfile.companyName fleetProfile.contactName")
+    .populate("mechanic", "mechanicProfile.displayName")
+    .populate("job", "jobCode title status")
+    .populate("invoice", "invoiceNo totalAmount currency status")
+    .lean();
+
+  if (!dispute) throw new AppError("Dispute not found", 404);
+
+  return serializeDispute(dispute);
+};
+
 export const updateMechanicDispute = async (
   mechanicUser,
   disputeId,

@@ -122,6 +122,25 @@ export const initRealtimeServer = (httpServer) => {
       socket.leave(jobRoom(jobId));
       ack?.({ ok: true });
     });
+
+    /** Typing indicator for job-scoped chat (mechanic ↔ fleet) */
+    socket.on("chat:typing", async (payload = {}, ack) => {
+      try {
+        const jobId = `${payload.jobId || ""}`.trim();
+        if (!jobId) throw new Error("jobId is required");
+        const allowed = await canAccessJob(jobId, user);
+        if (!allowed) throw new Error("Forbidden");
+        socket.to(jobRoom(jobId)).emit("chat:typing", {
+          jobId,
+          userId: user._id,
+          role: user.role,
+          typing: Boolean(payload.typing),
+        });
+        ack?.({ ok: true });
+      } catch (error) {
+        ack?.({ ok: false, error: error.message || "Unable to send typing" });
+      }
+    });
   });
 
   return ioInstance;

@@ -1,6 +1,7 @@
 import { sendResponse } from "../../utils/sendResponse.js";
 import {
   createFleetDispute,
+  getMechanicDisputeById,
   listMechanicDisputes,
   listFleetDisputes,
   updateMechanicDispute,
@@ -39,6 +40,14 @@ export const listMechanicDisputesController = async (req, res) => {
     message: "Mechanic disputes fetched",
     data: result.items,
     meta: result.meta,
+  });
+};
+
+export const getMechanicDisputeByIdController = async (req, res) => {
+  const dispute = await getMechanicDisputeById(req.user, req.params.disputeId);
+  return sendResponse(res, {
+    message: "Dispute fetched",
+    data: dispute,
   });
 };
 

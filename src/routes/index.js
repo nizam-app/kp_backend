@@ -15,6 +15,8 @@ import reviewRouter from "../modules/review/review.router.js";
 import disputeRouter from "../modules/dispute/dispute.router.js";
 import chatRouter from "../modules/chat/chat.router.js";
 import companyRouter from "../modules/company/company.router.js";
+import feedPresetRouter from "../modules/feedPreset/feedPreset.router.js";
+import mediaRouter from "../modules/media/media.router.js";
 
 const router = Router();
 
@@ -34,5 +36,7 @@ router.use("/fleet/disputes", disputeRouter);
 router.use("/chat", chatRouter);
 router.use("/admin", adminRouter);
 router.use("/company", companyRouter);
+router.use("/feed-presets", feedPresetRouter);
+router.use("/media", mediaRouter);
 
 export default router;

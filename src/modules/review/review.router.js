@@ -4,6 +4,7 @@ import { authorize, protect, requireActive } from "../../middlewares/auth.js";
 import { ROLES } from "../../constants/domain.js";
 import {
   createFleetReviewController,
+  getMechanicReviewByIdController,
   listFleetReviewsController,
   listMechanicReviewsController,
 } from "./review.controller.js";
@@ -22,6 +23,11 @@ router.get(
   "/me",
   catchAsync(authorize(ROLES.MECHANIC)),
   catchAsync(listMechanicReviewsController)
+);
+router.get(
+  "/me/:reviewId",
+  catchAsync(authorize(ROLES.MECHANIC)),
+  catchAsync(getMechanicReviewByIdController)
 );
 router.post(
   "/",

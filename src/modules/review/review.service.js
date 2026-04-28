@@ -227,3 +227,22 @@ export const listMechanicReviews = async (mechanicUser, query = {}) => {
     },
   };
 };
+
+export const getMechanicReviewById = async (mechanicUser, reviewId) => {
+  if (mechanicUser.role !== ROLES.MECHANIC) {
+    throw new AppError("Only mechanic users can view this review", 403);
+  }
+
+  const review = await Review.findOne({
+    _id: reviewId,
+    mechanic: mechanicUser._id,
+  })
+    .populate("fleet", "fleetProfile.companyName fleetProfile.contactName")
+    .populate("mechanic", "mechanicProfile.displayName")
+    .populate("job", "jobCode title description completedAt")
+    .lean();
+
+  if (!review) throw new AppError("Review not found", 404);
+
+  return serializeReview(review);
+};

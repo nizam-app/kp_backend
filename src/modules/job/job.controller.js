@@ -1,16 +1,19 @@
 import { sendResponse } from "../../utils/sendResponse.js";
 import {
   addJobPhotos,
+  addJobAttachments,
   approveJobCompletion,
   arriveAtJob,
   cancelJob,
   completeJobWork,
   createJob,
   removeJobPhoto,
+  removeJobAttachment,
   getJobByIdForUser,
   getJobTimeline,
   createJobLocationPing,
   listJobs,
+  previewJobCancellation,
   startJobWork,
   startJourney,
 } from "./job.service.js";
@@ -89,6 +92,14 @@ export const cancelJobController = async (req, res) => {
   });
 };
 
+export const previewJobCancellationController = async (req, res) => {
+  const data = await previewJobCancellation(req.params.jobId, req.user);
+  return sendResponse(res, {
+    message: "Cancellation preview",
+    data,
+  });
+};
+
 export const jobTimelineController = async (req, res) => {
   const timeline = await getJobTimeline(req.params.jobId, req.user);
   return sendResponse(res, {
@@ -118,6 +129,27 @@ export const removeJobPhotoController = async (req, res) => {
   const result = await removeJobPhoto(req.params.jobId, req.user, req.body);
   return sendResponse(res, {
     message: "Job photo removed",
+    data: result,
+  });
+};
+
+export const addJobAttachmentsController = async (req, res) => {
+  const result = await addJobAttachments(req.params.jobId, req.user, req.body);
+  return sendResponse(res, {
+    statusCode: 201,
+    message: "Job attachments added",
+    data: result,
+  });
+};
+
+export const removeJobAttachmentController = async (req, res) => {
+  const result = await removeJobAttachment(
+    req.params.jobId,
+    req.user,
+    req.params.attachmentId
+  );
+  return sendResponse(res, {
+    message: "Job attachment removed",
     data: result,
   });
 };

@@ -76,6 +76,39 @@ const availabilityWindowSchema = new Schema(
   { _id: false }
 );
 
+export const JOB_ATTACHMENT_CATEGORIES = [
+  "BEFORE",
+  "AFTER",
+  "COMPLETION",
+  "DIAGNOSTIC",
+  "PARTS",
+  "INCIDENT",
+  "INVOICE",
+  "OTHER",
+];
+
+export const JOB_ATTACHMENT_FILE_TYPES = ["IMAGE", "PDF", "DOCUMENT", "OTHER"];
+
+const jobAttachmentSchema = new Schema(
+  {
+    url: { type: String, required: true, trim: true },
+    fileType: {
+      type: String,
+      enum: JOB_ATTACHMENT_FILE_TYPES,
+      default: "IMAGE",
+    },
+    category: {
+      type: String,
+      enum: JOB_ATTACHMENT_CATEGORIES,
+      default: "OTHER",
+    },
+    mimeType: { type: String, trim: true },
+    originalName: { type: String, trim: true },
+    uploadedBy: { type: Schema.Types.ObjectId, ref: "User" },
+  },
+  { timestamps: true }
+);
+
 const jobSchema = new Schema(
   {
     jobCode: { type: String, unique: true, index: true },
@@ -105,6 +138,8 @@ const jobSchema = new Schema(
     availabilityWindow: availabilityWindowSchema,
     location: { type: locationSchema, required: true },
     photos: { type: [String], default: [] },
+    /** Structured proof / documents (images + PDF + office docs) */
+    attachments: { type: [jobAttachmentSchema], default: [] },
     status: {
       type: String,
       enum: jobStatusValues,

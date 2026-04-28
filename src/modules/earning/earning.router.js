@@ -4,6 +4,8 @@ import { authorize, protect, requireActive } from "../../middlewares/auth.js";
 import { ROLES } from "../../constants/domain.js";
 import {
   earningJobsController,
+  earningPayoutInfoController,
+  earningStatementController,
   earningSummaryController,
 } from "./earning.controller.js";
 
@@ -14,6 +16,8 @@ router.use(catchAsync(requireActive));
 router.use(catchAsync(authorize(ROLES.MECHANIC)));
 
 router.get("/summary", catchAsync(earningSummaryController));
+router.get("/payout-info", catchAsync(earningPayoutInfoController));
+router.get("/statement", catchAsync(earningStatementController));
 router.get("/jobs", catchAsync(earningJobsController));
 
 export default router;

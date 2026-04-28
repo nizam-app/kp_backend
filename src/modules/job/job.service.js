@@ -3,7 +3,12 @@ import fs from "fs/promises";
 import path from "path";
 import crypto from "crypto";
 import { ROLES, JOB_STATUS, QUOTE_STATUS } from "../../constants/domain.js";
-import { Job } from "./job.model.js";
+import mongoose from "mongoose";
+import {
+  Job,
+  JOB_ATTACHMENT_CATEGORIES,
+  JOB_ATTACHMENT_FILE_TYPES,
+} from "./job.model.js";
 import { Quote } from "../quote/quote.model.js";
 import { JobEvent } from "../jobEvent/jobEvent.model.js";
 import { JobLocationPing } from "../jobLocationPing/jobLocationPing.model.js";
@@ -116,6 +121,7 @@ const serializeJobCard = (job, viewer, extra = {}) => {
     vehicle: job.vehicle || null,
     location: job.location || null,
     photos: job.photos || [],
+    attachments: (job.attachments || []).map(serializeJobAttachment),
     currency: job.currency || "GBP",
     estimatedPayout: job.estimatedPayout ?? job.acceptedAmount ?? job.finalAmount ?? null,
     acceptedAmount: job.acceptedAmount ?? null,
@@ -422,6 +428,66 @@ const parseDataUrl = (value) => {
   };
 };
 
+const mimeToDocExtension = (mime) => {
+  const m = `${mime || ""}`.trim().toLowerCase();
+  const map = {
+    "application/pdf": "pdf",
+    "application/msword": "doc",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+    "text/plain": "txt",
+  };
+  if (map[m]) return map[m];
+  return null;
+};
+
+const classifyAttachmentFileType = (mime) => {
+  const m = `${mime || ""}`.trim().toLowerCase();
+  if (m.startsWith("image/")) return "IMAGE";
+  if (m === "application/pdf") return "PDF";
+  if (m.includes("word") || m.includes("officedocument") || m === "text/plain") {
+    return "DOCUMENT";
+  }
+  return "OTHER";
+};
+
+const parseGenericAttachmentDataUrl = (value) => {
+  const match = `${value || ""}`.match(/^data:([^;]+);base64,(.+)$/i);
+  if (!match) throw new AppError("dataUrl must be a valid base64 data URL", 400);
+
+  const mime = match[1].trim().toLowerCase();
+  const buffer = Buffer.from(match[2], "base64");
+  const maxBytes = 12 * 1024 * 1024;
+  if (buffer.length > maxBytes) {
+    throw new AppError("Attachment exceeds size limit (12mb)", 400);
+  }
+
+  const fileType = classifyAttachmentFileType(mime);
+  let ext;
+  if (fileType === "IMAGE") {
+    ext = mimeToExtension(mime);
+  } else {
+    ext = mimeToDocExtension(mime);
+  }
+  if (!ext) {
+    if (fileType === "OTHER") ext = "bin";
+    else throw new AppError("Unsupported file type for this upload", 400);
+  }
+
+  return { mime, buffer, fileType, ext };
+};
+
+const serializeJobAttachment = (a) => ({
+  _id: a._id,
+  url: a.url,
+  fileType: a.fileType,
+  category: a.category,
+  mimeType: a.mimeType || null,
+  originalName: a.originalName || null,
+  uploadedBy: a.uploadedBy?._id || a.uploadedBy,
+  createdAt: a.createdAt,
+  updatedAt: a.updatedAt,
+});
+
 const sanitizeFileName = (value) =>
   `${value || ""}`
     .trim()
@@ -690,6 +756,124 @@ export const removeJobPhoto = async (jobId, user, payload = {}) => {
     jobId: job._id,
     photos: job.photos,
     removed: photoUrl,
+  };
+};
+
+export const addJobAttachments = async (jobId, user, payload = {}) => {
+  const job = await Job.findById(jobId);
+  if (!job) throw new AppError("Job not found", 404);
+  ensureJobParticipantAccess(job, user);
+
+  const items = Array.isArray(payload.items)
+    ? payload.items
+    : payload.item
+    ? [payload.item]
+    : [];
+  if (!items.length) {
+    throw new AppError("At least one item is required (use { items: [...] })", 400);
+  }
+
+  const targetDir = path.join(uploadsRoot, toObjectIdString(job._id));
+  await fs.mkdir(targetDir, { recursive: true });
+  const added = [];
+
+  for (const item of items) {
+    const category = JOB_ATTACHMENT_CATEGORIES.includes(item?.category)
+      ? item.category
+      : "OTHER";
+    const fileTypeOverride = JOB_ATTACHMENT_FILE_TYPES.includes(item?.fileType)
+      ? item.fileType
+      : null;
+
+    if (item?.url) {
+      const url = `${item.url}`.trim();
+      job.attachments.push({
+        url,
+        fileType: fileTypeOverride || "OTHER",
+        category,
+        mimeType: item.mimeType || null,
+        originalName: item.originalName || null,
+        uploadedBy: user._id,
+      });
+      added.push(url);
+      continue;
+    }
+
+    if (!item?.dataUrl) {
+      throw new AppError("Each item needs dataUrl, or url for an external file", 400);
+    }
+    const { mime, buffer, fileType, ext } = parseGenericAttachmentDataUrl(item.dataUrl);
+    const resolvedType = fileTypeOverride || fileType;
+    const baseName = sanitizeFileName(item?.filename) || `file-${crypto.randomUUID().slice(0, 8)}`;
+    const fileName = `${baseName}-${Date.now()}.${ext}`;
+    const filePath = path.join(targetDir, fileName);
+    await fs.writeFile(filePath, buffer);
+    const publicUrl = `/uploads/jobs/${toObjectIdString(job._id)}/${fileName}`;
+    job.attachments.push({
+      url: publicUrl,
+      fileType: resolvedType,
+      category,
+      mimeType: mime,
+      originalName: item?.originalName || null,
+      uploadedBy: user._id,
+    });
+    added.push(publicUrl);
+    if (resolvedType === "IMAGE" && !(job.photos || []).includes(publicUrl)) {
+      job.photos = [...(job.photos || []), publicUrl];
+    }
+  }
+
+  await job.save();
+
+  await createJobEvent({
+    jobId: job._id,
+    actorId: user._id,
+    type: "JOB_ATTACHMENTS_ADDED",
+    note: `Added ${added.length} attachment(s)`,
+    payload: { count: added.length },
+  });
+
+  return {
+    jobId: job._id,
+    attachments: (job.attachments || []).map(serializeJobAttachment),
+    added,
+  };
+};
+
+export const removeJobAttachment = async (jobId, user, attachmentId) => {
+  if (!mongoose.Types.ObjectId.isValid(attachmentId)) {
+    throw new AppError("Invalid attachment id", 400);
+  }
+  const job = await Job.findById(jobId);
+  if (!job) throw new AppError("Job not found", 404);
+  ensureJobParticipantAccess(job, user);
+
+  const att = job.attachments.id(attachmentId);
+  if (!att) throw new AppError("Attachment not found", 404);
+  const url = att.url;
+  att.deleteOne();
+  job.photos = (job.photos || []).filter((p) => p !== url);
+  await job.save();
+
+  const uploadsPrefix = `/uploads/jobs/${toObjectIdString(job._id)}/`;
+  if (url.startsWith(uploadsPrefix)) {
+    const fileName = url.slice(uploadsPrefix.length);
+    const filePath = path.join(uploadsRoot, toObjectIdString(job._id), fileName);
+    await fs.unlink(filePath).catch(() => null);
+  }
+
+  await createJobEvent({
+    jobId: job._id,
+    actorId: user._id,
+    type: "JOB_ATTACHMENT_REMOVED",
+    note: "Removed a job attachment",
+    payload: { attachmentId, url },
+  });
+
+  return {
+    jobId: job._id,
+    attachments: (job.attachments || []).map(serializeJobAttachment),
+    removed: attachmentId,
   };
 };
 
@@ -1148,6 +1332,29 @@ export const cancelJob = async (jobId, fleetUser, payload = {}) => {
   return {
     job,
     cancellation,
+  };
+};
+
+/** Fleet-only: preview fee/policy before calling PATCH .../cancel */
+export const previewJobCancellation = async (jobId, fleetUser) => {
+  if (fleetUser.role !== ROLES.FLEET) {
+    throw new AppError("Only fleet users can preview cancellation", 403);
+  }
+  const job = await Job.findById(jobId).select("status fleet jobCode");
+  if (!job) throw new AppError("Job not found", 404);
+  ensureFleetOwner(job, fleetUser._id);
+
+  const cancellation = computeCancellation(job.status);
+  return {
+    jobId: job._id,
+    jobCode: job.jobCode || null,
+    status: job.status,
+    preview: {
+      ...cancellation,
+      summary: cancellation.isFree
+        ? "No cancellation fee at this stage — job has not yet moved to en-route or active work."
+        : "A £35 GBP cancellation fee applies when the job is already en route, on site, in progress, or awaiting approval.",
+    },
   };
 };
 

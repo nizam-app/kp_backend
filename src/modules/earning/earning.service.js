@@ -1,6 +1,7 @@
 import AppError from "../../utils/AppError.js";
 import { EarningTransaction } from "./earningTransaction.model.js";
 import { Invoice } from "../invoice/invoice.model.js";
+import { User } from "../user/user.model.js";
 
 const parsePage = (value) => {
   const n = Number(value);
@@ -208,5 +209,92 @@ export const listEarningJobs = async (user, query = {}) => {
       total,
       totalPages: Math.ceil(total / limit) || 1,
     },
+  };
+};
+
+/** Stripe Connect + platform fee metadata for mechanic earnings UI */
+export const getPayoutInfo = async (user) => {
+  ensureMechanic(user);
+
+  const fresh = await User.findById(user._id)
+    .select(
+      "mechanicProfile.stripeConnectAccountId mechanicProfile.stripeConnectOnboardingComplete mechanicProfile.stripeConnectPayoutsEnabled mechanicProfile.stripeConnectChargesEnabled"
+    )
+    .lean();
+
+  const mp = fresh?.mechanicProfile || {};
+
+  return {
+    platformFeePercent: 12,
+    currency: "GBP",
+    stripe: {
+      connectAccountId: mp.stripeConnectAccountId || null,
+      onboardingComplete: !!mp.stripeConnectOnboardingComplete,
+      chargesEnabled: !!mp.stripeConnectChargesEnabled,
+      payoutsEnabled: !!mp.stripeConnectPayoutsEnabled,
+    },
+    notes:
+      "Net job earnings are credited after fleet payment clears; schedules follow Stripe Connect payout settings.",
+  };
+};
+
+/** Monthly breakdown for tax / statements UI */
+export const getEarningsStatement = async (user, query = {}) => {
+  ensureMechanic(user);
+
+  const year = Math.min(
+    2099,
+    Math.max(2020, Number.parseInt(query.year, 10) || new Date().getFullYear())
+  );
+  const month =
+    Math.min(12, Math.max(1, Number.parseInt(query.month, 10) || new Date().getMonth() + 1)) - 1;
+
+  const start = new Date(year, month, 1);
+  const end = new Date(year, month + 1, 1);
+
+  const txs = await EarningTransaction.find({
+    mechanic: user._id,
+    paidAt: { $gte: start, $lt: end },
+  })
+    .sort({ paidAt: -1 })
+    .populate("job", "jobCode title completedAt vehicle")
+    .lean();
+
+  const totals = txs.reduce(
+    (acc, t) => {
+      acc.gross += Number(t.grossAmount) || 0;
+      acc.platformFee += Number(t.platformFee) || 0;
+      acc.net += Number(t.netAmount) || 0;
+      return acc;
+    },
+    { gross: 0, platformFee: 0, net: 0 }
+  );
+
+  return {
+    period: {
+      year,
+      month: month + 1,
+      label: start.toLocaleString("en-GB", { month: "long", year: "numeric" }),
+      start,
+      end,
+    },
+    currency: txs[0]?.currency || "GBP",
+    totals,
+    lineItems: txs.map((t) => ({
+      _id: t._id,
+      paidAt: t.paidAt,
+      grossAmount: t.grossAmount,
+      platformFee: t.platformFee,
+      netAmount: t.netAmount,
+      job: t.job
+        ? {
+            _id: t.job._id,
+            jobCode: t.job.jobCode,
+            title: t.job.title,
+            completedAt: t.job.completedAt,
+            vehicleRegistration: t.job.vehicle?.registration || null,
+          }
+        : null,
+    })),
   };
 };

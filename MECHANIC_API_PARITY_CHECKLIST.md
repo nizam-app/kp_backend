@@ -1,177 +1,51 @@
 # Mechanic Mobile/Web App -> Backend API Parity Checklist
 
-This checklist compares the mechanic mobile app and mechanic website against the current `kp_backend` API.
-
 Status legend:
 - `Done`: backend route/service clearly exists
-- `Partial`: backend support exists, but not enough for full app parity
-- `Missing`: no clear API support found yet
+- `Partial`: optional product depth beyond MVP
 
-## Core Auth And Mechanic Account
+## Summary
 
-- `Done` Register/login/refresh/logout
-- `Done` Role-aware mechanic auth
-- `Done` Mechanic profile read/update
-- `Done` Mechanic availability update
-- `Done` Mechanic preferences update
-- `Done` Profile completion summary
-Notes:
-Mechanic profile and availability are already handled through the shared user APIs in [user.router.js](/Users/Win%2010/Downloads/TruckFix%20Interactive%20Prototype/kp_backend/src/modules/user/user.router.js).
+Mechanic-facing **MVP backend surface is complete**: auth, profile, feed, quotes, jobs, tracker, attachments (proof + PDF/docs), chat (HTTP + Socket.IO), notifications, earnings (summary, jobs list, monthly **statement**, payout info), billing, support, reviews, disputes.
 
-## Job Feed / Nearby Jobs
+## Job feed & saved filters
 
-- `Done` Mechanic feed query using jobs list API
-- `Done` Radius-aware nearby job discovery
-- `Done` Issue-type filtering support
-- `Done` Minimum payout filtering support
-- `Partial` Full marketplace sorting/filter combinations from frontend
-- `Missing` Dedicated saved filters / feed presets API
-Notes:
-The backend feed is driven through `GET /api/v1/jobs?feed=true` style filtering from the jobs service.
+- `Done` `GET /api/v1/jobs?feed=true` … nearby, issue type, min payout
+- `Done` **Feed presets** — `GET|POST /api/v1/feed-presets`, `PATCH|DELETE /api/v1/feed-presets/:presetId` (mechanic, fleet, company, mechanic employee)
 
-## Quote Flow
+## Quotes
 
-- `Done` Submit quote
-- `Done` List mechanic quotes
-- `Done` Get quote detail
-- `Done` Fleet accept quote
-- `Done` Fleet decline quote
-- `Partial` Mechanic quote edit/withdraw/resubmit lifecycle
-- `Missing` Explicit withdraw-quote endpoint
-- `Missing` Explicit revise-quote endpoint
-Notes:
-The core quote path is there, but richer mechanic quote management is still limited.
+- `Done` Submit, list (`/quotes/me`), amend, withdraw, fleet accept/decline
 
-## My Jobs
+## Jobs & proof
 
-- `Done` Mechanic active jobs list
-- `Done` Mechanic completed jobs list
-- `Done` Job detail for assigned mechanic
-- `Partial` Rich job archive/history workflow
-Notes:
-The backend supports the key list/detail flow, but not a specialized history/archive module beyond the jobs list.
+- `Done` Lifecycle, timeline, location pings, cancellation preview (fleet)
+- `Done` Legacy photos: `POST /api/v1/jobs/:jobId/photos`, `PATCH .../photos/remove`
+- `Done` **Structured attachments**: `POST /api/v1/jobs/:jobId/attachments` with `{ items: [{ dataUrl?, url?, category, fileType?, filename?, originalName? }] }` — categories `BEFORE`, `AFTER`, `COMPLETION`, `DIAGNOSTIC`, `PARTS`, `INCIDENT`, `INVOICE`, `OTHER`; file types `IMAGE`, `PDF`, `DOCUMENT`, `OTHER` (images also mirrored into `photos` when applicable)
+- `Done` `DELETE /api/v1/jobs/:jobId/attachments/:attachmentId`
 
-## Job Tracker / Live Work
+## Realtime
 
-- `Done` Start journey
-- `Done` Arrive on site
-- `Done` Start work
-- `Done` Complete work
-- `Done` Job timeline
-- `Done` Job location pings
-- `Done` Access job detail with tracking context
-- `Partial` Real-time/live-tracking delivery
-- `Missing` Websocket/live stream support
-Notes:
-Status progression is covered well, but realtime transport is not implemented.
+- `Done` Socket.IO jobs + `chat:message`, `chat:read`, `chat:typing`
 
-## Mechanic Chat
+## Earnings
 
-- `Done` List chat threads
-- `Done` List job messages
-- `Done` Send job message
-- `Done` Mark chat messages as read
-- `Partial` Real-time chat delivery
-- `Missing` Typing indicators / presence / websocket messaging
-Notes:
-Job-scoped chat is now available and works for both mechanic and fleet, but it is request-based rather than realtime.
+- `Done` `GET /api/v1/earnings/summary`
+- `Done` `GET /api/v1/earnings/jobs`
+- `Done` `GET /api/v1/earnings/payout-info`
+- `Done` **`GET /api/v1/earnings/statement?year=&month=`** — monthly line items + totals
 
-## Notifications
+## Reviews & disputes
 
-- `Done` List notifications
-- `Done` Mark notification read
-- `Done` Device token registration
-- `Partial` Full notification event coverage for every mechanic-side action
-Notes:
-The basics are there and new backend flows now generate notifications, but coverage can still grow.
+- `Done` `GET /api/v1/fleet/reviews/me`, `GET .../me/:reviewId`
+- `Done` `GET /api/v1/fleet/disputes/me`, `GET .../me/:disputeId`, `PATCH .../me/:disputeId`
 
-## Earnings / Payouts
+## Optional / future
 
-- `Done` Earnings summary
-- `Done` Earning jobs list
-- `Done` Invoice association in earning items
-- `Partial` Rich payout history / settlement workflow
-- `Missing` Dedicated payout withdrawal / payout schedule API
-Notes:
-This is strong for reporting and visibility, but not yet a complete finance operations module.
+- `Partial` Custom payout rules outside Stripe Connect defaults
+- `Partial` Third-party map route polyline as a separate service
+- `Partial` Full notification coverage for every edge-case product event
 
-## Payment Methods / Payout Methods
+## Socket (reference)
 
-- `Done` List payment methods
-- `Done` Create payment method
-- `Done` Set default payment method
-- `Done` Remove payment method
-- `Partial` Mechanic-specific payout onboarding UX support
-Notes:
-The backend methods are generic enough to support mechanic payout methods too.
-
-## Support
-
-- `Done` Create support ticket
-- `Done` List support tickets
-- `Done` Get support ticket detail
-- `Done` Update support ticket status
-- `Done` Reply inside ticket thread
-- `Partial` Full support operations workflow with assignment and SLA semantics
-Notes:
-Support is now much closer to a real threaded case flow.
-
-## Job Photos / Proof / Attachments
-
-- `Done` Add job photos
-- `Done` Remove job photos
-- `Partial` Proof-of-work completion flows
-- `Missing` Separate proof categories such as before/after/completion evidence
-- `Missing` Non-image attachment support
-Notes:
-Photo support now exists, but the mechanic-side “proof” workflow can still become richer.
-
-## Reviews / Ratings
-
-- `Done` Fleet can create mechanic reviews
-- `Done` Mechanic rating aggregate updates from published reviews
-- `Partial` Mechanic review visibility
-- `Missing` Dedicated mechanic endpoint to view own reviews
-Notes:
-The review write path exists, but mechanic-facing review-read APIs are still missing.
-
-## Disputes
-
-- `Partial` Fleet dispute creation/update exists
-- `Partial` Mechanic receives dispute notifications
-- `Missing` Dedicated mechanic dispute listing/detail/update API
-Notes:
-The dispute system exists, but mechanic-side access is still indirect rather than first-class.
-
-## Mechanic App Completion Verdict
-
-- `Done` for core mechanic operational lifecycle:
-  - auth
-  - profile
-  - availability
-  - feed
-  - quotes
-  - my jobs
-  - tracker progression
-  - location pings
-  - chat
-  - notifications
-  - earnings
-  - support
-  - job photos
-
-- `Not complete yet` for full mechanic parity and production depth:
-  - realtime transport for chat/tracking
-  - quote revision/withdraw flows
-  - richer proof-of-work workflows
-  - mechanic-facing review listing
-  - mechanic-facing dispute management
-  - deeper payout operations
-
-## Recommended Next Backend Tasks
-
-1. Add mechanic-facing review list/detail endpoints.
-2. Add mechanic-facing dispute list/detail endpoints.
-3. Add quote withdraw / resubmit endpoints.
-4. Add richer proof-of-work attachment semantics.
-5. Add websocket or push strategy for realtime chat and tracking.
+Connect with JWT. Events: `job:subscribe`, `job:statusChanged`, `job:location`, `chat:message`, `chat:read`, `chat:typing`, `notification:new`.

@@ -1,6 +1,7 @@
 import { sendResponse } from "../../utils/sendResponse.js";
 import {
   createFleetReview,
+  getMechanicReviewById,
   listFleetReviews,
   listMechanicReviews,
 } from "./review.service.js";
@@ -29,5 +30,13 @@ export const listMechanicReviewsController = async (req, res) => {
     message: "Mechanic reviews fetched",
     data: result.items,
     meta: result.meta,
+  });
+};
+
+export const getMechanicReviewByIdController = async (req, res) => {
+  const review = await getMechanicReviewById(req.user, req.params.reviewId);
+  return sendResponse(res, {
+    message: "Review fetched",
+    data: review,
   });
 };

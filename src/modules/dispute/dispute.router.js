@@ -4,6 +4,7 @@ import { authorize, protect, requireActive } from "../../middlewares/auth.js";
 import { ROLES } from "../../constants/domain.js";
 import {
   createFleetDisputeController,
+  getMechanicDisputeByIdController,
   listMechanicDisputesController,
   listFleetDisputesController,
   updateMechanicDisputeController,
@@ -24,6 +25,11 @@ router.get(
   "/me",
   catchAsync(authorize(ROLES.MECHANIC)),
   catchAsync(listMechanicDisputesController)
+);
+router.get(
+  "/me/:disputeId",
+  catchAsync(authorize(ROLES.MECHANIC)),
+  catchAsync(getMechanicDisputeByIdController)
 );
 router.post(
   "/",
