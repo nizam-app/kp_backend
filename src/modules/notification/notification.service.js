@@ -5,6 +5,7 @@ import {
   emitNotificationCreated,
   emitNotificationRead,
 } from "../../realtime/socket.js";
+import { sendPushForPersistedNotification } from "./pushFcm.service.js";
 
 const parsePage = (value) => {
   const n = Number(value);
@@ -42,6 +43,9 @@ const serializeDeviceToken = (token) => ({
 export const createNotification = async (payload = {}) => {
   const notification = await Notification.create(payload);
   emitNotificationCreated(notification);
+  sendPushForPersistedNotification(notification).catch((err) => {
+    console.error("[push] sendPushForPersistedNotification:", err?.message || err);
+  });
   return serializeNotification(notification);
 };
 

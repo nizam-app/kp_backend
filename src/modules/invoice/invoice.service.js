@@ -1,7 +1,23 @@
 import AppError from "../../utils/AppError.js";
+import { ROLES } from "../../constants/domain.js";
+import { companyEarningsBreakdown } from "../../utils/companyEarningsMath.js";
+import { resolveMechanicRatingForInvoiceContext } from "../../utils/mechanicRating.js";
 import { Invoice } from "./invoice.model.js";
 
 const toObjectIdString = (value) => value?.toString();
+
+const formatJobDurationLabel = (job) => {
+  if (!job?.completedAt) return null;
+  const start = job.assignedAt || job.postedAt || job.createdAt;
+  if (!start) return null;
+  const ms = Math.max(new Date(job.completedAt).getTime() - new Date(start).getTime(), 0);
+  const mins = Math.round(ms / 60000);
+  if (!Number.isFinite(mins) || mins <= 0) return null;
+  if (mins < 60) return `${mins}m`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return m ? `${h}h ${m}m` : `${h}h`;
+};
 
 const parsePage = (value) => {
   const n = Number(value);
@@ -56,7 +72,10 @@ const toInvoiceSummary = (invoice) => ({
     : null,
 });
 
-const toInvoiceDetail = (invoice) => ({
+const toInvoiceDetail = (invoice) => {
+  const ce = companyEarningsBreakdown(invoice.job, invoice);
+
+  return {
   ...toInvoiceSummary(invoice),
   billedTo: {
     companyName:
@@ -82,19 +101,43 @@ const toInvoiceDetail = (invoice) => ({
       invoice.mechanicSnapshot?.businessName ||
       invoice.mechanic?.mechanicProfile?.businessName ||
       null,
-    rating:
-      invoice.mechanicSnapshot?.rating ||
-      invoice.mechanic?.mechanicProfile?.rating?.average ||
+    rating: resolveMechanicRatingForInvoiceContext(invoice, invoice.mechanic),
+    profilePhotoUrl:
+      invoice.mechanicSnapshot?.profilePhotoUrl ||
+      invoice.mechanic?.mechanicProfile?.profilePhotoUrl ||
       null,
   },
   job: {
     _id: invoice.job?._id || invoice.job,
     jobCode: invoice.job?.jobCode || null,
     title: invoice.job?.title || null,
+    description: invoice.job?.description || null,
+    completionSummary: invoice.job?.completionSummary || null,
     vehicle: invoice.job?.vehicle || null,
     location: invoice.job?.location || null,
     completedAt: invoice.job?.completedAt || null,
+    completedDateLabel: invoice.job?.completedAt
+      ? new Date(invoice.job.completedAt).toLocaleDateString("en-GB", {
+          day: "numeric",
+          month: "short",
+          year: "numeric",
+        })
+      : null,
+    assignedAt: invoice.job?.assignedAt || null,
+    postedAt: invoice.job?.postedAt || null,
+    durationLabel: formatJobDurationLabel(invoice.job),
   },
+  /** Same figures as `GET /company/earnings/jobs` rows when job is linked. */
+  companyPayout: invoice.job
+    ? {
+        platformFeePercent: ce.platformFeePercent,
+        grossAmount: ce.grossAmount,
+        platformFeeAmount: ce.platformFeeAmount,
+        platformFee: ce.platformFeeAmount,
+        netAmount: ce.netAmount,
+        currency: ce.currency,
+      }
+    : null,
   lineItems: buildFallbackLineItems(invoice),
   totals: {
     subtotal: invoice.subtotal,
@@ -114,7 +157,17 @@ const toInvoiceDetail = (invoice) => ({
     updatedAt: invoice.payment?.updatedAt || null,
   },
   downloadUrl: invoice.pdfUrl || `/api/v1/invoices/${invoice._id}/download`,
-});
+  primaryActions: [
+    {
+      key: "DOWNLOAD_INVOICE",
+      label: "DOWNLOAD INVOICE",
+      icon: "DOWNLOAD",
+      method: "GET",
+      path: `/api/v1/invoices/${invoice._id}/download`,
+    },
+  ],
+  };
+};
 
 const ensureInvoiceAccess = (invoice, user) => {
   if (!invoice) throw new AppError("Invoice not found", 404);
@@ -127,6 +180,12 @@ const ensureInvoiceAccess = (invoice, user) => {
   const userId = toObjectIdString(user._id);
 
   if (userId === relatedFleetId || userId === relatedMechanicId) return;
+
+  if (user.role === ROLES.COMPANY) {
+    const assignedCompanyId = toObjectIdString(invoice.job?.assignedCompany);
+    if (assignedCompanyId && assignedCompanyId === userId) return;
+  }
+
   throw new AppError("Forbidden", 403);
 };
 
@@ -163,11 +222,14 @@ export const listInvoices = async (user, query = {}) => {
 
 export const getInvoiceByIdForUser = async (invoiceId, user) => {
   const invoice = await Invoice.findById(invoiceId)
-    .populate("job", "jobCode title description completionSummary vehicle location completedAt")
+    .populate(
+      "job",
+      "jobCode title description completionSummary vehicle location completedAt assignedAt postedAt createdAt assignedCompany finalAmount acceptedAmount estimatedPayout"
+    )
     .populate("fleet", "email fleetProfile.companyName fleetProfile.vatNumber fleetProfile.billingAddress")
     .populate(
       "mechanic",
-      "email mechanicProfile.displayName mechanicProfile.businessName mechanicProfile.rating"
+      "email mechanicProfile.displayName mechanicProfile.businessName mechanicProfile.rating mechanicProfile.profilePhotoUrl"
     )
     .lean();
 
@@ -176,7 +238,9 @@ export const getInvoiceByIdForUser = async (invoiceId, user) => {
 };
 
 export const getInvoiceDownloadForUser = async (invoiceId, user) => {
-  const invoice = await Invoice.findById(invoiceId).lean();
+  const invoice = await Invoice.findById(invoiceId)
+    .populate("job", "assignedCompany")
+    .lean();
   ensureInvoiceAccess(invoice, user);
 
   return {

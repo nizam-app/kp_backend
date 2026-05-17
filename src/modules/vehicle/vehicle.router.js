@@ -5,6 +5,7 @@ import { ROLES } from "../../constants/domain.js";
 import {
   createVehicleController,
   deleteVehicleController,
+  getVehicleByIdController,
   listVehiclesController,
   updateVehicleController,
 } from "./vehicle.controller.js";
@@ -17,6 +18,7 @@ router.use(catchAsync(authorize(ROLES.FLEET)));
 
 router.post("/", catchAsync(createVehicleController));
 router.get("/", catchAsync(listVehiclesController));
+router.get("/:vehicleId", catchAsync(getVehicleByIdController));
 router.patch("/:vehicleId", catchAsync(updateVehicleController));
 router.delete("/:vehicleId", catchAsync(deleteVehicleController));
 

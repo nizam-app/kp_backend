@@ -5,9 +5,28 @@ import { Quote } from "./quote.model.js";
 import { Job } from "../job/job.model.js";
 import { JobEvent } from "../jobEvent/jobEvent.model.js";
 import { User } from "../user/user.model.js";
+import { readMechanicProfileRatingAverage } from "../../utils/mechanicRating.js";
 
 const now = () => new Date();
 const sessionOptions = (session) => (session ? { session } : {});
+
+const diffMinutesFromNow = (value) => {
+  if (!value) return null;
+  const ms = Date.now() - new Date(value).getTime();
+  if (!Number.isFinite(ms)) return null;
+  return Math.max(Math.round(ms / 60000), 0);
+};
+
+const formatQuoteRelativeAge = (value) => {
+  const minutes = diffMinutesFromNow(value);
+  if (minutes === null) return null;
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} hr${hours === 1 ? "" : "s"} ago`;
+  const days = Math.floor(hours / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
+};
 
 const quoteBreakdown = (quote) => {
   const total = Number(quote?.amount) || 0;
@@ -28,6 +47,61 @@ const quoteStatusUi = (status) => {
   return map[status] || { label: status, tone: "neutral" };
 };
 
+/** Matches `user.model` mechanicProfile.skills enum; used for Fleet quote cards. */
+const MECHANIC_SKILL_LABELS = {
+  TYRES: "Tyres",
+  BATTERY: "Battery",
+  ENGINE: "Engine",
+  BRAKES: "Brakes",
+  ELECTRICAL: "Electrical",
+  OTHER: "Other",
+};
+
+const mechanicSpecialtyFields = (user) => {
+  const raw = user?.mechanicProfile?.skills;
+  if (!Array.isArray(raw) || !raw.length) {
+    return { skills: [], specialtySummary: null };
+  }
+  const labels = raw.map((s) => MECHANIC_SKILL_LABELS[s] || s);
+  return { skills: raw, specialtySummary: labels.join(" & ") };
+};
+
+/** Prefer mechanic avatar; company accounts quoting use companyProfile photo. */
+const pickUserProfilePhotoUrl = (user) => {
+  if (!user || typeof user !== "object") return null;
+  const fromMechanic = `${user.mechanicProfile?.profilePhotoUrl ?? ""}`.trim();
+  if (fromMechanic) return fromMechanic;
+  const fromCompany = `${user.companyProfile?.profilePhotoUrl ?? ""}`.trim();
+  return fromCompany || null;
+};
+
+const EARTH_RADIUS_KM = 6371;
+const toRad = (deg) => (deg * Math.PI) / 180;
+
+const haversineKm = (lng1, lat1, lng2, lat2) => {
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return EARTH_RADIUS_KM * c;
+};
+
+/** Distance from mechanic's last known point to job site; requires both GeoJSON points. */
+const quoteDistanceKm = (quote) => {
+  const jc = quote.job?.location?.coordinates;
+  const mc = quote.mechanic?.mechanicProfile?.lastKnownLocation?.coordinates;
+  if (!Array.isArray(jc) || jc.length !== 2 || !Array.isArray(mc) || mc.length !== 2) {
+    return null;
+  }
+  const [jlng, jlat] = jc.map(Number);
+  const [mlng, mlat] = mc.map(Number);
+  if (![jlng, jlat, mlng, mlat].every((n) => Number.isFinite(n))) return null;
+  const km = haversineKm(jlng, jlat, mlng, mlat);
+  return Math.round(km * 10) / 10;
+};
+
 const serializeQuote = (quote) => ({
   _id: quote._id,
   amount: quote.amount,
@@ -42,7 +116,10 @@ const serializeQuote = (quote) => ({
   acceptedAt: quote.acceptedAt || null,
   declinedAt: quote.declinedAt || null,
   expiredAt: quote.expiredAt || null,
+  withdrawnAt: quote.withdrawnAt || null,
   createdAt: quote.createdAt,
+  quotedAgoLabel: formatQuoteRelativeAge(quote.createdAt),
+  distanceKm: quoteDistanceKm(quote),
   breakdown: quoteBreakdown(quote),
   summaryLine:
     quote.status === QUOTE_STATUS.ACCEPTED
@@ -66,13 +143,15 @@ const serializeQuote = (quote) => ({
           quote.mechanic.mechanicProfile?.phone ||
           quote.mechanic.companyProfile?.phone ||
           null,
-        rating: quote.mechanic.mechanicProfile?.rating?.average ?? null,
+        rating: readMechanicProfileRatingAverage(quote.mechanic),
         jobsDone: quote.mechanic.mechanicProfile?.stats?.jobsDone ?? null,
         responseMinutesAvg: quote.mechanic.mechanicProfile?.stats?.responseMinutesAvg ?? null,
         verified:
           ["APPROVED", "SUBMITTED", "UNDER_REVIEW"].includes(
             quote.mechanic.mechanicProfile?.verification?.status
           ),
+        profilePhotoUrl: pickUserProfilePhotoUrl(quote.mechanic),
+        ...mechanicSpecialtyFields(quote.mechanic),
       }
     : null,
   job: quote.job
@@ -83,8 +162,21 @@ const serializeQuote = (quote) => ({
         description: quote.job.description || null,
         urgency: quote.job.urgency || null,
         status: quote.job.status || null,
+        postedAt: quote.job.postedAt || null,
+        createdAt: quote.job.createdAt || null,
         location: quote.job.location || null,
         vehicle: quote.job.vehicle || null,
+        assignedCompany: quote.job.assignedCompany || null,
+        assignedMechanic: quote.job.assignedMechanic || null,
+        fleet:
+          quote.job.fleet && typeof quote.job.fleet === "object"
+            ? {
+                _id: quote.job.fleet._id || quote.job.fleet,
+                companyName: quote.job.fleet.fleetProfile?.companyName || null,
+                rating: quote.job.fleet.fleetProfile?.rating?.average ?? null,
+                ratingCount: quote.job.fleet.fleetProfile?.rating?.count ?? null,
+              }
+            : null,
       }
     : null,
   company: quote.company
@@ -93,6 +185,7 @@ const serializeQuote = (quote) => ({
         companyName: quote.company.companyProfile?.companyName || null,
         contactName: quote.company.companyProfile?.contactName || null,
         phone: quote.company.companyProfile?.phone || null,
+        profilePhotoUrl: pickUserProfilePhotoUrl(quote.company),
       }
     : null,
   actions: {
@@ -105,12 +198,17 @@ const serializeQuote = (quote) => ({
   },
 });
 
-const expireWaitingQuotes = async (filter = {}, session = null) =>
-  Quote.updateMany(
+/** Waiting quotes end when the job is terminal or when an optional `expiresAt` time passes (legacy). */
+const JOB_TERMINAL_FOR_QUOTES = [JOB_STATUS.CANCELLED, JOB_STATUS.COMPLETED];
+
+const expireWaitingQuotes = async (filter = {}, session = null) => {
+  const opts = sessionOptions(session);
+
+  await Quote.updateMany(
     {
       ...filter,
       status: QUOTE_STATUS.WAITING,
-      expiresAt: { $lte: now() },
+      expiresAt: { $ne: null, $lte: now() },
     },
     {
       $set: {
@@ -118,8 +216,30 @@ const expireWaitingQuotes = async (filter = {}, session = null) =>
         expiredAt: now(),
       },
     },
-    sessionOptions(session)
+    opts
   );
+
+  let closedJobQuery = Job.find({ status: { $in: JOB_TERMINAL_FOR_QUOTES } }).select("_id");
+  if (session) closedJobQuery = closedJobQuery.session(session);
+  const closedJobs = await closedJobQuery.lean();
+  const closedJobIds = closedJobs.map((j) => j._id);
+  if (!closedJobIds.length) return;
+
+  await Quote.updateMany(
+    {
+      ...filter,
+      status: QUOTE_STATUS.WAITING,
+      job: { $in: closedJobIds },
+    },
+    {
+      $set: {
+        status: QUOTE_STATUS.EXPIRED,
+        expiredAt: now(),
+      },
+    },
+    opts
+  );
+};
 
 const withOptionalTransaction = async (work) => {
   const session = await mongoose.startSession();
@@ -153,17 +273,129 @@ const ensureFleetJobOwner = async (jobId, fleetUserId) => {
 
 const baseQuotePopulate = (query) =>
   query
-    .populate(
-      "mechanic",
-      "email role mechanicProfile.displayName mechanicProfile.phone mechanicProfile.rating mechanicProfile.stats mechanicProfile.verification companyProfile.companyName companyProfile.phone"
-    )
+    .populate({
+      path: "mechanic",
+      // Whole subdocuments — avoid dot-notation select, which often drops sibling keys in populated lean docs.
+      select: "email role mechanicProfile companyProfile",
+    })
     .populate(
       "company",
-      "email role companyProfile.companyName companyProfile.contactName companyProfile.phone companyProfile.contactRole"
+      "email role companyProfile.companyName companyProfile.contactName companyProfile.phone companyProfile.contactRole companyProfile.profilePhotoUrl"
     )
-    .populate("submittedBy", "email role mechanicProfile.displayName companyProfile.companyName")
-    .populate("job", "jobCode title description urgency status location vehicle photos issueType fleet")
+    .populate({
+      path: "submittedBy",
+      select: "email role mechanicProfile companyProfile",
+    })
+    .populate({
+      path: "job",
+      select:
+        "jobCode title description urgency status location vehicle photos issueType fleet assignedCompany assignedMechanic createdAt postedAt",
+      populate: {
+        path: "fleet",
+        select:
+          "email fleetProfile.companyName fleetProfile.contactName fleetProfile.phone fleetProfile.rating",
+      },
+    })
     .populate("fleet", "email fleetProfile.companyName fleetProfile.contactName fleetProfile.phone");
+
+/** `populate().lean()` can omit nested fields (e.g. profilePhotoUrl) even when they exist on User — merge from DB. */
+const quoteMechanicIdKey = (q) => {
+  const m = q?.mechanic;
+  if (!m) return null;
+  const id = m._id ?? m;
+  return id?.toString?.() || null;
+};
+
+const quoteCompanyIdKey = (q) => {
+  const c = q?.company;
+  if (!c) return null;
+  const id = c._id ?? c;
+  return id?.toString?.() || null;
+};
+
+const quoteSubmittedByIdKey = (q) => {
+  const s = q?.submittedBy;
+  if (!s) return null;
+  const id = s._id ?? s;
+  return id?.toString?.() || null;
+};
+
+const mergeQuoteActorsProfileExtrasFromDb = async (quotesLean) => {
+  const list = Array.isArray(quotesLean) ? quotesLean : [quotesLean];
+  const userIds = [
+    ...new Set(
+      [
+        ...list.map(quoteMechanicIdKey),
+        ...list.map(quoteCompanyIdKey),
+        ...list.map(quoteSubmittedByIdKey),
+      ].filter(Boolean)
+    ),
+  ];
+  if (!userIds.length) return;
+
+  const users = await User.find({ _id: { $in: userIds } })
+    .select(
+      "mechanicProfile.profilePhotoUrl mechanicProfile.lastKnownLocation companyProfile.profilePhotoUrl"
+    )
+    .lean();
+
+  const byId = Object.fromEntries(users.map((u) => [u._id.toString(), u]));
+
+  for (const q of list) {
+    const mid = quoteMechanicIdKey(q);
+    if (mid && byId[mid]) {
+      const src = byId[mid];
+      if (!q.mechanic || typeof q.mechanic !== "object") {
+        q.mechanic = { _id: q.mechanic || mid };
+      }
+      q.mechanic.mechanicProfile = {
+        ...(q.mechanic.mechanicProfile || {}),
+        profilePhotoUrl:
+          src.mechanicProfile?.profilePhotoUrl ?? q.mechanic.mechanicProfile?.profilePhotoUrl,
+        lastKnownLocation:
+          src.mechanicProfile?.lastKnownLocation ?? q.mechanic.mechanicProfile?.lastKnownLocation,
+      };
+      q.mechanic.companyProfile = {
+        ...(q.mechanic.companyProfile || {}),
+        profilePhotoUrl:
+          src.companyProfile?.profilePhotoUrl ?? q.mechanic.companyProfile?.profilePhotoUrl,
+      };
+    }
+
+    const cid = quoteCompanyIdKey(q);
+    if (cid && byId[cid]) {
+      const src = byId[cid];
+      if (!q.company || typeof q.company !== "object") {
+        q.company = { _id: q.company || cid };
+      }
+      q.company.companyProfile = {
+        ...(q.company.companyProfile || {}),
+        profilePhotoUrl:
+          src.companyProfile?.profilePhotoUrl ?? q.company.companyProfile?.profilePhotoUrl,
+      };
+    }
+
+    const sid = quoteSubmittedByIdKey(q);
+    if (sid && byId[sid]) {
+      const src = byId[sid];
+      if (!q.submittedBy || typeof q.submittedBy !== "object") {
+        q.submittedBy = { _id: q.submittedBy || sid };
+      }
+      q.submittedBy.mechanicProfile = {
+        ...(q.submittedBy.mechanicProfile || {}),
+        profilePhotoUrl:
+          src.mechanicProfile?.profilePhotoUrl ?? q.submittedBy.mechanicProfile?.profilePhotoUrl,
+        lastKnownLocation:
+          src.mechanicProfile?.lastKnownLocation ?? q.submittedBy.mechanicProfile?.lastKnownLocation,
+      };
+      q.submittedBy.companyProfile = {
+        ...(q.submittedBy.companyProfile || {}),
+        profilePhotoUrl:
+          src.companyProfile?.profilePhotoUrl ?? q.submittedBy.companyProfile?.profilePhotoUrl,
+      };
+    }
+  }
+};
 
 const ensureQuoteAccess = (quote, user) => {
   if (!quote) throw new AppError("Quote not found", 404);
@@ -235,6 +467,7 @@ export const submitQuote = async (jobId, payload, mechanicUser) => {
   });
 
   const populated = await baseQuotePopulate(Quote.findById(quote._id)).lean();
+  await mergeQuoteActorsProfileExtrasFromDb([populated]);
 
   return serializeQuote(populated);
 };
@@ -245,12 +478,14 @@ export const listJobQuotes = async (jobId, fleetUser) => {
   const quotes = await baseQuotePopulate(
     Quote.find({ job: jobId }).sort({ amount: 1, createdAt: -1 })
   ).lean();
+  await mergeQuoteActorsProfileExtrasFromDb(quotes);
   return quotes.map(serializeQuote);
 };
 
 export const getQuoteByIdForUser = async (quoteId, user) => {
   await expireWaitingQuotes({ _id: quoteId });
   const quote = await baseQuotePopulate(Quote.findById(quoteId)).lean();
+  await mergeQuoteActorsProfileExtrasFromDb([quote]);
   ensureQuoteAccess(quote, user);
   return {
     ...serializeQuote(quote),
@@ -278,6 +513,7 @@ export const getQuoteByIdForUser = async (quoteId, user) => {
             quote.submittedBy.companyProfile?.companyName ||
             quote.submittedBy.email ||
             null,
+          profilePhotoUrl: pickUserProfilePhotoUrl(quote.submittedBy),
         }
       : null,
     cancellationPolicy: {
@@ -372,6 +608,7 @@ export const acceptQuote = async (quoteId, fleetUser) => {
     );
 
     const populated = await baseQuotePopulate(Quote.findById(acceptedQuote._id)).lean();
+    await mergeQuoteActorsProfileExtrasFromDb([populated]);
 
     return { quote: serializeQuote(populated), job };
   });
@@ -401,6 +638,7 @@ export const declineQuote = async (quoteId, fleetUser) => {
   });
 
   const populated = await baseQuotePopulate(Quote.findById(quote._id)).lean();
+  await mergeQuoteActorsProfileExtrasFromDb([populated]);
 
   return serializeQuote(populated);
 };
@@ -454,7 +692,7 @@ export const amendQuote = async (quoteId, payload, mechanicUser) => {
         : Number(payload.etaMinutes);
   }
 
-  quote.expiresAt = new Date(Date.now() + 30 * 60 * 1000);
+  quote.expiresAt = null;
   await quote.save();
 
   await JobEvent.create({
@@ -508,6 +746,7 @@ export const withdrawQuote = async (quoteId, mechanicUser) => {
   });
 
   const populated = await baseQuotePopulate(Quote.findById(quote._id)).lean();
+  await mergeQuoteActorsProfileExtrasFromDb([populated]);
 
   return serializeQuote(populated);
 };
@@ -523,14 +762,92 @@ export const listMechanicQuotes = async (mechanicUser, query) => {
   const filter = { ...baseOwnerFilter };
   const tab = `${query.tab || "ALL"}`.toUpperCase();
 
-  if (tab === "WAITING") filter.status = QUOTE_STATUS.WAITING;
+  if (tab === "WAITING" || tab === "PENDING") filter.status = QUOTE_STATUS.WAITING;
   if (tab === "ACCEPTED") filter.status = QUOTE_STATUS.ACCEPTED;
   if (tab === "EXPIRED") filter.status = QUOTE_STATUS.EXPIRED;
-  if (tab === "DECLINED") filter.status = QUOTE_STATUS.DECLINED;
+  if (tab === "DECLINED" || tab === "REJECTED") filter.status = QUOTE_STATUS.DECLINED;
 
   const quotes = await baseQuotePopulate(
     Quote.find(filter).sort({ createdAt: -1 })
   ).lean();
 
+  await mergeQuoteActorsProfileExtrasFromDb(quotes);
   return quotes.map(serializeQuote);
+};
+
+const parseQuotePage = (value) => {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 1;
+};
+
+const parseQuoteLimit = (value) => {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return 20;
+  return Math.min(Math.floor(n), 100);
+};
+
+export const countOwnerQuotesByStatus = async (ownerUser) => {
+  const filter =
+    ownerUser.role === ROLES.COMPANY
+      ? { company: ownerUser._id }
+      : { mechanic: ownerUser._id };
+  const rows = await Quote.aggregate([
+    { $match: filter },
+    { $group: { _id: "$status", count: { $sum: 1 } } },
+  ]);
+  const counts = {
+    WAITING: 0,
+    ACCEPTED: 0,
+    DECLINED: 0,
+    EXPIRED: 0,
+    WITHDRAWN: 0,
+  };
+  for (const r of rows) {
+    if (r._id && Object.prototype.hasOwnProperty.call(counts, r._id)) {
+      counts[r._id] = r.count;
+    }
+  }
+  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+  return { ...counts, total };
+};
+
+export const listOwnerQuotesPaginated = async (ownerUser, query = {}) => {
+  const page = parseQuotePage(query.page);
+  const limit = parseQuoteLimit(query.limit);
+  const skip = (page - 1) * limit;
+
+  const baseOwnerFilter =
+    ownerUser.role === ROLES.COMPANY
+      ? { company: ownerUser._id }
+      : { mechanic: ownerUser._id };
+
+  await expireWaitingQuotes(baseOwnerFilter);
+
+  const filter = { ...baseOwnerFilter };
+  const tab = `${query.tab || query.status || "ALL"}`.toUpperCase();
+
+  if (tab === "WAITING" || tab === "PENDING") filter.status = QUOTE_STATUS.WAITING;
+  else if (tab === "ACCEPTED") filter.status = QUOTE_STATUS.ACCEPTED;
+  else if (tab === "EXPIRED") filter.status = QUOTE_STATUS.EXPIRED;
+  else if (tab === "DECLINED" || tab === "REJECTED") filter.status = QUOTE_STATUS.DECLINED;
+  else if (tab === "WITHDRAWN") filter.status = QUOTE_STATUS.WITHDRAWN;
+
+  const [total, quotes] = await Promise.all([
+    Quote.countDocuments(filter),
+    baseQuotePopulate(Quote.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit)).lean(),
+  ]);
+
+  await mergeQuoteActorsProfileExtrasFromDb(quotes);
+  const items = quotes.map(serializeQuote);
+  return {
+    items,
+    meta: {
+      page,
+      limit,
+      total,
+      totalPages: Math.ceil(total / limit) || 1,
+      tab: tab === "ALL" || !filter.status ? "ALL" : tab,
+      mode: "quotes",
+    },
+  };
 };

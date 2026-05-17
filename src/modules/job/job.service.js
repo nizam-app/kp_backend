@@ -2,7 +2,18 @@ import AppError from "../../utils/AppError.js";
 import fs from "fs/promises";
 import path from "path";
 import crypto from "crypto";
-import { ROLES, JOB_STATUS, QUOTE_STATUS } from "../../constants/domain.js";
+import {
+  ROLES,
+  JOB_STATUS,
+  QUOTE_STATUS,
+  ISSUE_TYPES,
+  issueTypeValues,
+  jobStatusValues,
+  MECHANIC_AVAILABILITY,
+  mechanicAvailabilityValues,
+  JOB_CATEGORY_SUBTYPE_TO_ISSUE_TYPE,
+  slugifyJobCategoryKey,
+} from "../../constants/domain.js";
 import mongoose from "mongoose";
 import {
   Job,
@@ -15,8 +26,10 @@ import { JobLocationPing } from "../jobLocationPing/jobLocationPing.model.js";
 import { Invoice } from "../invoice/invoice.model.js";
 import { EarningTransaction } from "../earning/earningTransaction.model.js";
 import { PaymentMethod } from "../billing/paymentMethod.model.js";
+import { User } from "../user/user.model.js";
 import { createStripePaymentIntent } from "../billing/stripe.service.js";
 import { getProfileCompletionSummary } from "../user/user.service.js";
+import { readMechanicProfileRatingAverage } from "../../utils/mechanicRating.js";
 import {
   emitJobEvent,
   emitJobLocationPing,
@@ -39,6 +52,92 @@ const parseLimit = (value) => {
 };
 
 const milesToMeters = (value) => Math.max(Number(value) || 1, 1) * 1609.34;
+
+/** Earth radius in metres (WGS84 approximation). */
+const EARTH_RADIUS_M = 6378137;
+
+/** Mongo `$near` conflicts with `.sort()` on the same find — use `$geoWithin` + haversine for distance text. */
+const metersToRadiansForSphere = (meters) => meters / EARTH_RADIUS_M;
+
+const haversineMeters = (lng1, lat1, lng2, lat2) => {
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return EARTH_RADIUS_M * c;
+};
+
+/** Circle filter compatible with compound queries + `.sort()` (unlike `$near`). */
+const locationWithinRadiusFilter = (lng, lat, radiusMiles) => ({
+  $geoWithin: {
+    $centerSphere: [[lng, lat], metersToRadiansForSphere(milesToMeters(radiusMiles))],
+  },
+});
+
+/** Open marketplace jobs for company “Available jobs” (POSTED|QUOTING + optional geo / filters). */
+export const buildCompanyFeedJobsFilter = (companyUser, query = {}) => {
+  const filter = { status: { $in: [JOB_STATUS.POSTED, JOB_STATUS.QUOTING] } };
+  if (query.lat && query.lng) {
+    const lat = Number(query.lat);
+    const lng = Number(query.lng);
+    const radiusMiles = Number(
+      query.radiusMiles || query.radius || companyUser.companyProfile?.serviceRadiusMiles || 25
+    );
+    if (Number.isFinite(lat) && Number.isFinite(lng) && Number.isFinite(radiusMiles)) {
+      filter.location = locationWithinRadiusFilter(lng, lat, radiusMiles);
+    }
+  }
+  if (query.issueType) {
+    filter.issueType = { $in: `${query.issueType}`.split(",") };
+  }
+  if (query.minPayout) {
+    const min = Number(query.minPayout);
+    if (Number.isFinite(min)) {
+      filter.estimatedPayout = { $gte: min };
+    }
+  }
+  return filter;
+};
+
+/**
+ * Company feed: hide marketplace jobs this company (or its employees quoting as that company)
+ * already has a **WAITING** quote on. Reappears if quote is withdrawn / declined / expired / accepted.
+ */
+const applyCompanyFeedExcludeJobsWithWaitingQuote = async (companyUser, filter) => {
+  const jobIds = await Quote.distinct("job", {
+    company: companyUser._id,
+    status: QUOTE_STATUS.WAITING,
+  });
+  if (!jobIds?.length) return;
+  filter._id = { $nin: jobIds };
+};
+
+export const resolveCompanyFeedNearPoint = (companyUser, query = {}) => {
+  if (!query.lat || !query.lng) return null;
+  const lat = Number(query.lat);
+  const lng = Number(query.lng);
+  const radiusMiles = Number(
+    query.radiusMiles || query.radius || companyUser.companyProfile?.serviceRadiusMiles || 25
+  );
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || !Number.isFinite(radiusMiles)) return null;
+  return { lat, lng };
+};
+
+export const countCompanyFeedJobs = async (companyUser, query) => {
+  const filter = buildCompanyFeedJobsFilter(companyUser, query);
+  await applyCompanyFeedExcludeJobsWithWaitingQuote(companyUser, filter);
+  return Job.countDocuments(filter);
+};
+
+export const countCompanyFeedJobsPostedSince = async (companyUser, query, hours = 24) => {
+  const filter = buildCompanyFeedJobsFilter(companyUser, query);
+  await applyCompanyFeedExcludeJobsWithWaitingQuote(companyUser, filter);
+  filter.createdAt = { $gte: new Date(Date.now() - Math.max(1, Number(hours) || 24) * 3600000) };
+  return Job.countDocuments(filter);
+};
 
 const roundMiles = (meters) => {
   if (!Number.isFinite(meters)) return null;
@@ -105,16 +204,109 @@ const quoteBreakdown = (quote) => {
   };
 };
 
+const normalizeTyreSide = (raw) => {
+  const s = `${raw || ""}`.trim().toUpperCase();
+  if (!s) return undefined;
+  if (s === "NEAR_SIDE" || s === "NS") return "NEAR_SIDE";
+  if (s === "OFF_SIDE" || s === "OS") return "OFF_SIDE";
+  if (s === "BOTH") return "BOTH";
+  if (s.includes("BOTH") || (s.includes("NS") && s.includes("OS"))) return "BOTH";
+  if (s.includes("NEAR") || s.includes("LEFT") || s.includes("KERB")) return "NEAR_SIDE";
+  if (s.includes("OFF") || s.includes("RIGHT") || s.includes("ROAD")) return "OFF_SIDE";
+  return undefined;
+};
+
+const resolveIssueClassification = (payload = {}) => {
+  const rawInput = payload.issueSubtype ?? payload.jobCategory ?? "";
+  const trimmed = `${rawInput}`.trim();
+  const slug = trimmed ? slugifyJobCategoryKey(trimmed) : null;
+  const mappedFromCategory =
+    slug && Object.prototype.hasOwnProperty.call(JOB_CATEGORY_SUBTYPE_TO_ISSUE_TYPE, slug)
+      ? JOB_CATEGORY_SUBTYPE_TO_ISSUE_TYPE[slug]
+      : undefined;
+
+  let issueType = payload.issueType ? `${payload.issueType}`.trim().toUpperCase() : undefined;
+
+  if (mappedFromCategory !== undefined) {
+    issueType = mappedFromCategory;
+  } else if (!issueType) {
+    issueType = ISSUE_TYPES.OTHER;
+  }
+
+  if (!issueTypeValues.includes(issueType)) {
+    throw new AppError(`Invalid issueType: ${issueType}`, 400);
+  }
+
+  let issueSubtype;
+  if (trimmed) {
+    issueSubtype =
+      mappedFromCategory !== undefined ? slug : (slug || trimmed).slice(0, 120);
+  }
+
+  return { issueType, issueSubtype };
+};
+
+const buildTyreDetailsFromPayload = (payload = {}) => {
+  let td = payload.tyreDetails;
+  if (typeof td === "string") {
+    try {
+      td = JSON.parse(td);
+    } catch {
+      td = null;
+    }
+  }
+  if (td && typeof td === "object" && !Array.isArray(td)) {
+    const size = `${td.size || ""}`.trim();
+    const axlePosition = `${td.axlePosition || td.axle || ""}`.trim();
+    const side = normalizeTyreSide(td.side);
+    const out = {};
+    if (size) out.size = size;
+    if (axlePosition) out.axlePosition = axlePosition;
+    if (side) out.side = side;
+    return Object.keys(out).length ? out : undefined;
+  }
+
+  const size = `${payload.tyreSize || ""}`.trim();
+  const axlePosition = `${payload.tyreAxlePosition || payload.axlePosition || ""}`.trim();
+  const side = normalizeTyreSide(payload.tyreSide || payload.side);
+  if (!size && !axlePosition && !side) return undefined;
+  const out = {};
+  if (size) out.size = size;
+  if (axlePosition) out.axlePosition = axlePosition;
+  if (side) out.side = side;
+  return out;
+};
+
+const normalizeMechanicAvailabilityStatus = (value) => {
+  const raw = value === undefined || value === null ? "" : `${value}`.trim().toUpperCase();
+  if (!raw) return null;
+  return mechanicAvailabilityValues.includes(raw) ? raw : null;
+};
+
 const serializeJobCard = (job, viewer, extra = {}) => {
   const statusUi = statusPresentation(job.status, job);
   const cancellation = computeCancellation(job.status);
   const createdAt = job.postedAt || job.createdAt;
+  const mechanicAvailabilityRaw = job.assignedMechanic?.mechanicProfile?.availability;
+  let availabilityStatus = null;
+  if (job.assignedMechanic) {
+    availabilityStatus =
+      normalizeMechanicAvailabilityStatus(mechanicAvailabilityRaw) ??
+      MECHANIC_AVAILABILITY.OFFLINE;
+  } else if ([ROLES.MECHANIC, ROLES.MECHANIC_EMPLOYEE].includes(viewer.role)) {
+    /** Feed / open jobs: no assignee yet — surface the viewing mechanic's ONLINE/OFFLINE. */
+    const raw = viewer.mechanicProfile?.availability;
+    availabilityStatus =
+      normalizeMechanicAvailabilityStatus(raw) ?? MECHANIC_AVAILABILITY.OFFLINE;
+  }
   return {
     _id: job._id,
     jobCode: job.jobCode,
     title: job.title,
     description: job.completionSummary || job.description,
     issueType: job.issueType,
+    issueSubtype: job.issueSubtype || null,
+    tyreDetails: job.tyreDetails || null,
     urgency: job.urgency,
     status: job.status,
     statusUi,
@@ -138,12 +330,16 @@ const serializeJobCard = (job, viewer, extra = {}) => {
       count: job.quoteCount || 0,
       label: `${job.quoteCount || 0} quote${job.quoteCount === 1 ? "" : "s"}`,
     },
+    /** OPEN/QUOTING: viewer mechanic availability on feed; assigned: that mechanic's status. */
+    availabilityStatus,
     fleet: job.fleet
       ? {
           _id: job.fleet._id || job.fleet,
           companyName: job.fleet.fleetProfile?.companyName || null,
           contactName: job.fleet.fleetProfile?.contactName || null,
           phone: job.fleet.fleetProfile?.phone || null,
+          rating: job.fleet.fleetProfile?.rating?.average ?? null,
+          ratingCount: job.fleet.fleetProfile?.rating?.count ?? null,
         }
       : null,
     assignedMechanic: job.assignedMechanic
@@ -151,7 +347,9 @@ const serializeJobCard = (job, viewer, extra = {}) => {
           _id: job.assignedMechanic._id || job.assignedMechanic,
           displayName: job.assignedMechanic.mechanicProfile?.displayName || null,
           phone: job.assignedMechanic.mechanicProfile?.phone || null,
-          rating: job.assignedMechanic.mechanicProfile?.rating?.average ?? null,
+          profilePhotoUrl: job.assignedMechanic.mechanicProfile?.profilePhotoUrl || null,
+          rating: readMechanicProfileRatingAverage(job.assignedMechanic),
+          availabilityStatus,
         }
       : null,
     assignedCompany: job.assignedCompany
@@ -193,6 +391,141 @@ const serializeJobCard = (job, viewer, extra = {}) => {
   };
 };
 
+const round2 = (n) => Math.round((Number(n || 0) + Number.EPSILON) * 100) / 100;
+
+/**
+ * Company "Review invoice" breakdown → invoice line items + subtotal (ex VAT).
+ * Supports nested `payload.invoice`. Server totals lines; optional `totalAmount` is verified.
+ */
+const buildLineItemsFromCompanyInvoicePayload = (payload, job) => {
+  const raw = payload?.invoice;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+
+  const callOut = round2(raw.callOutCharge ?? raw.callOutFee ?? 0);
+  if (!Number.isFinite(callOut) || callOut < 0) {
+    throw new AppError("callOutCharge must be a non-negative number", 400);
+  }
+
+  const hours = Number(raw.labourHours ?? raw.labour?.hours ?? 0);
+  const rate = Number(raw.labourRatePerHour ?? raw.labour?.ratePerHour ?? raw.hourlyRate ?? 0);
+  if (!Number.isFinite(hours) || hours < 0 || hours > 999) {
+    throw new AppError("labourHours must be between 0 and 999", 400);
+  }
+  if (!Number.isFinite(rate) || rate < 0 || rate > 99999) {
+    throw new AppError("labourRatePerHour must be a non-negative number", 400);
+  }
+  if ((hours > 0 && rate <= 0) || (rate > 0 && hours <= 0)) {
+    throw new AppError("labourHours and labourRatePerHour must both be set for labour billing", 400);
+  }
+
+  const labourTotal = hours > 0 && rate > 0 ? round2(hours * rate) : 0;
+
+  const partsIn = Array.isArray(raw.parts) ? raw.parts : [];
+  if (partsIn.length > 50) throw new AppError("At most 50 parts lines are allowed", 400);
+
+  const lineItems = [];
+  if (callOut > 0) {
+    lineItems.push({
+      description: "Call-out charge",
+      quantity: 1,
+      unitAmount: callOut,
+      totalAmount: callOut,
+    });
+  }
+  if (labourTotal > 0) {
+    const cur = job?.currency || "GBP";
+    const sym = cur === "ZAR" ? "R" : "£";
+    lineItems.push({
+      description: `Labour (${hours} hrs @ ${sym}${rate}/hr)`,
+      quantity: hours,
+      unitAmount: rate,
+      totalAmount: labourTotal,
+    });
+  }
+
+  for (let i = 0; i < partsIn.length; i += 1) {
+    const p = partsIn[i];
+    const desc = `${p?.description ?? p?.name ?? ""}`.trim().slice(0, 240);
+    const amount = round2(p?.amount ?? p?.price ?? p?.totalAmount ?? 0);
+    if (!desc) throw new AppError(`parts[${i}].description is required`, 400);
+    if (!Number.isFinite(amount) || amount < 0) {
+      throw new AppError(`parts[${i}].amount must be a non-negative number`, 400);
+    }
+    if (amount > 0) {
+      lineItems.push({
+        description: desc,
+        quantity: 1,
+        unitAmount: amount,
+        totalAmount: amount,
+      });
+    }
+  }
+
+  if (!lineItems.length) {
+    throw new AppError("invoice must include at least one positive line (call-out, labour, or parts)", 400);
+  }
+
+  const subtotal = round2(lineItems.reduce((s, row) => s + Number(row.totalAmount || 0), 0));
+  if (!Number.isFinite(subtotal) || subtotal <= 0) {
+    throw new AppError("Computed invoice subtotal must be greater than zero", 400);
+  }
+
+  const clientTotal = payload.totalAmount ?? payload.invoiceTotal ?? raw.totalAmount;
+  if (clientTotal !== undefined && clientTotal !== null && `${clientTotal}`.trim() !== "") {
+    const expected = round2(Number(clientTotal));
+    if (!Number.isFinite(expected)) {
+      throw new AppError("totalAmount must be a number when provided", 400);
+    }
+    if (Math.abs(expected - subtotal) > 0.02) {
+      throw new AppError(
+        `totalAmount £${expected} does not match computed subtotal £${subtotal}`,
+        400
+      );
+    }
+  }
+
+  return { lineItems, subtotal };
+};
+
+const maskCardLabel = (method) => {
+  if (!method?.card?.last4) return null;
+  const brand = method.card.brand || "CARD";
+  const last4 = method.card.last4;
+  return `${brand} •••• ${last4}`;
+};
+
+const computeFleetPaymentBox = ({ job, defaultPaymentMethod }) => {
+  // UI meanings:
+  // - quoteAmount: base job amount (accepted or estimated)
+  // - platformFee: 12% of quote amount
+  // - totalPayable: quote + platform fee (ex VAT)
+  // - preAuthHeld: totalPayable * 1.2 (incl VAT) (matches earlier Stripe calculation)
+  const quoteAmount = Number(job.acceptedAmount ?? job.estimatedPayout ?? 0) || 0;
+  const platformFee = quoteAmount > 0 ? round2(quoteAmount * 0.12) : 0;
+  const totalPayable = quoteAmount > 0 ? round2(quoteAmount + platformFee) : 0;
+  const preAuthHeld = totalPayable > 0 ? round2(totalPayable * 1.2) : 0;
+
+  return {
+    quoteAmount: quoteAmount || null,
+    platformFee: quoteAmount ? platformFee : null,
+    totalPayable: quoteAmount ? totalPayable : null,
+    preAuthHeld: quoteAmount ? preAuthHeld : null,
+    cardLabel: defaultPaymentMethod ? maskCardLabel(defaultPaymentMethod) : null,
+    cardExpMonth: defaultPaymentMethod?.card?.expMonth ?? null,
+    cardExpYear: defaultPaymentMethod?.card?.expYear ?? null,
+    finalAmount: Number(job.finalAmount ?? job.acceptedAmount ?? 0) || null,
+    status:
+      job.status === JOB_STATUS.COMPLETED
+        ? "PAID"
+        : [JOB_STATUS.ASSIGNED, JOB_STATUS.EN_ROUTE, JOB_STATUS.ON_SITE, JOB_STATUS.IN_PROGRESS, JOB_STATUS.AWAITING_APPROVAL].includes(
+            job.status
+          )
+          ? "AUTHORIZED"
+          : "PENDING",
+    currency: job.currency || "GBP",
+  };
+};
+
 const mapStripePaymentIntentStatus = (status) => {
   switch (status) {
     case "succeeded":
@@ -218,6 +551,184 @@ const mapStripePaymentIntentStatus = (status) => {
   }
 };
 
+const deriveStatusTimes = async (jobId, jobDocOrLean) => {
+  const events = await JobEvent.find({
+    job: jobId,
+    toStatus: { $exists: true, $ne: null },
+  })
+    .sort({ createdAt: 1 })
+    .select("toStatus createdAt")
+    .lean();
+
+  const times = {};
+  for (const e of events) {
+    const key = e?.toStatus;
+    if (!key) continue;
+    if (!times[key]) times[key] = e.createdAt;
+  }
+
+  // Fallbacks from job fields (some are explicitly stored on Job)
+  const j = jobDocOrLean || {};
+  times[JOB_STATUS.POSTED] = times[JOB_STATUS.POSTED] || j.postedAt || j.createdAt || null;
+  times[JOB_STATUS.ASSIGNED] = times[JOB_STATUS.ASSIGNED] || j.assignedAt || null;
+  times[JOB_STATUS.COMPLETED] = times[JOB_STATUS.COMPLETED] || j.completedAt || null;
+  times[JOB_STATUS.CANCELLED] = times[JOB_STATUS.CANCELLED] || j.cancelledAt || null;
+
+  return {
+    postedAt: times[JOB_STATUS.POSTED] || null,
+    assignedAt: times[JOB_STATUS.ASSIGNED] || null,
+    enRouteAt: times[JOB_STATUS.EN_ROUTE] || null,
+    onSiteAt: times[JOB_STATUS.ON_SITE] || null,
+    inProgressAt: times[JOB_STATUS.IN_PROGRESS] || null,
+    awaitingApprovalAt: times[JOB_STATUS.AWAITING_APPROVAL] || null,
+    completedAt: times[JOB_STATUS.COMPLETED] || null,
+    cancelledAt: times[JOB_STATUS.CANCELLED] || null,
+  };
+};
+
+/** Normalized last mechanic GPS fix for job detail + map.origin (GeoJSON point). */
+const normalizeMechanicLocationSnapshot = (src) => {
+  if (!src?.point?.coordinates || !Array.isArray(src.point.coordinates) || src.point.coordinates.length !== 2) {
+    return null;
+  }
+  const [lng, lat] = src.point.coordinates.map(Number);
+  if (!Number.isFinite(lng) || !Number.isFinite(lat)) return null;
+  return {
+    point: { type: "Point", coordinates: [lng, lat] },
+    heading: src.heading ?? null,
+    speed: src.speed ?? null,
+    accuracy: src.accuracy ?? null,
+    updatedAt: src.updatedAt || src.pingedAt || null,
+  };
+};
+
+/**
+ * Resolve mechanic map position for GET /jobs/:id (detail):
+ * 1) job.tracking.latestMechanicLocation
+ * 2) latest JobLocationPing
+ * 3) assignee's mechanicProfile.lastKnownLocation (from profile / seed)
+ * 4) deterministic offset from job.location when a mechanic is assigned (map never empty for demos)
+ */
+const loadLatestMechanicLocationForJob = async (job) => {
+  const jobId = job._id;
+  const fromTracking = normalizeMechanicLocationSnapshot(job.tracking?.latestMechanicLocation);
+  if (fromTracking) return { snapshot: fromTracking, source: "JOB_TRACKING" };
+
+  const ping = await JobLocationPing.findOne({ job: jobId }).sort({ pingedAt: -1 }).lean();
+  if (ping) {
+    const snapshot = normalizeMechanicLocationSnapshot({
+      point: ping.point,
+      heading: ping.heading,
+      speed: ping.speed,
+      accuracy: ping.accuracy,
+      pingedAt: ping.pingedAt,
+    });
+    if (snapshot) return { snapshot, source: "LOCATION_PING" };
+  }
+
+  const mechId = job.assignedMechanic?._id || job.assignedMechanic;
+  if (mechId) {
+    const mech = await User.findById(toObjectIdString(mechId))
+      .select("mechanicProfile.lastKnownLocation")
+      .lean();
+    const lk = mech?.mechanicProfile?.lastKnownLocation;
+    if (lk?.coordinates?.length === 2) {
+      const snapshot = normalizeMechanicLocationSnapshot({
+        point: { type: "Point", coordinates: lk.coordinates },
+        updatedAt: lk.updatedAt,
+      });
+      if (snapshot) return { snapshot, source: "MECHANIC_PROFILE_LAST_KNOWN" };
+    }
+  }
+
+  const coords = job.location?.coordinates;
+  if (mechId && Array.isArray(coords) && coords.length === 2) {
+    const [lng, lat] = coords.map(Number);
+    if (Number.isFinite(lng) && Number.isFinite(lat)) {
+      const snapshot = normalizeMechanicLocationSnapshot({
+        point: { type: "Point", coordinates: [lng + 0.02, lat - 0.015] },
+        updatedAt: job.assignedAt || job.updatedAt || new Date(),
+      });
+      if (snapshot) return { snapshot, source: "FALLBACK_NEAR_JOB_SITE" };
+    }
+  }
+
+  return null;
+};
+
+const formatJobCompletedDisplay = (value) => {
+  if (!value) return null;
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  const s = new Intl.DateTimeFormat("en-GB", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(d);
+  return s.includes(",") ? s.replace(",", " -") : s;
+};
+
+const formatDurationBetween = (start, end) => {
+  if (!start || !end) return null;
+  const a = new Date(start).getTime();
+  const b = new Date(end).getTime();
+  if (!Number.isFinite(a) || !Number.isFinite(b) || b <= a) return null;
+  const totalMins = Math.round((b - a) / 60000);
+  const h = Math.floor(totalMins / 60);
+  const m = totalMins % 60;
+  const parts = [];
+  if (h > 0) parts.push(`${h} hr${h === 1 ? "" : "s"}`);
+  if (m > 0 || h === 0) parts.push(`${m} min`);
+  return parts.join(" ");
+};
+
+const vehicleLineFromJob = (job) => {
+  const v = job.vehicle || {};
+  const type = `${v.type || ""}`.trim();
+  const reg = `${v.registration || ""}`.trim();
+  if (type && reg) return `${type} - ${reg}`;
+  const mm = [v.make, v.model].filter(Boolean).join(" ").trim();
+  if (mm && reg) return `${mm} - ${reg}`;
+  return mm || reg || null;
+};
+
+const issueLineFromJob = (job) => {
+  const t = `${job.title || ""}`.trim();
+  if (t) return t;
+  const d = `${job.description || ""}`.trim();
+  if (!d) return null;
+  return d.length > 160 ? `${d.slice(0, 157)}...` : d;
+};
+
+const buildJobSummaryForDetail = (job, statusTimes = {}) => {
+  const fleetName = job.fleet?.fleetProfile?.companyName || job.fleet?.companyName || null;
+  const completedAt = job.completedAt || null;
+  const completedLabel = formatJobCompletedDisplay(completedAt);
+  const startForDuration = job.assignedAt || statusTimes.assignedAt || job.postedAt || job.createdAt;
+  let durationLabel = null;
+  if (job.status === JOB_STATUS.COMPLETED && startForDuration && job.completedAt) {
+    durationLabel = formatDurationBetween(startForDuration, job.completedAt);
+  } else if (job.status === JOB_STATUS.AWAITING_APPROVAL && startForDuration && statusTimes.awaitingApprovalAt) {
+    durationLabel = formatDurationBetween(startForDuration, statusTimes.awaitingApprovalAt);
+  }
+  const submittedForApprovalLabel = formatJobCompletedDisplay(statusTimes.awaitingApprovalAt);
+
+  return {
+    vehicleLine: vehicleLineFromJob(job),
+    fleetName,
+    issueLine: issueLineFromJob(job),
+    completedAt,
+    completedLabel,
+    submittedForApprovalAt: statusTimes.awaitingApprovalAt || null,
+    submittedForApprovalLabel:
+      job.status === JOB_STATUS.AWAITING_APPROVAL ? submittedForApprovalLabel : null,
+    durationLabel,
+  };
+};
+
 const serializeJobDetail = async (job, viewer) => {
   const base = serializeJobCard(job, viewer);
   const myQuote =
@@ -225,15 +736,38 @@ const serializeJobDetail = async (job, viewer) => {
       ? await Quote.findOne({ job: job._id, mechanic: viewer._id }).sort({ createdAt: -1 }).lean()
       : null;
 
+  const statusTimes = await deriveStatusTimes(job._id, job);
+  const mlResult = await loadLatestMechanicLocationForJob(job);
+  const mechanicLocation = mlResult ? { ...mlResult.snapshot, source: mlResult.source } : null;
+  const mergedTracking =
+    mlResult?.snapshot || job.tracking
+      ? {
+          ...(job.tracking || {}),
+          ...(mlResult?.snapshot ? { latestMechanicLocation: mlResult.snapshot } : {}),
+        }
+      : null;
+
+  const defaultPaymentMethod =
+    viewer.role === ROLES.FLEET
+      ? await PaymentMethod.findOne({
+          user: toObjectIdString(job.fleet),
+          isDefault: true,
+          isActive: true,
+        }).lean()
+      : null;
+
   return {
     ...base,
+    tracking: mergedTracking,
+    mechanicLocation,
     summary: {
       postedAgoLabel: formatRelativeAge(job.postedAt || job.createdAt),
       distanceMiles: base.distanceMiles ?? null,
       etaMinutes: job.tracking?.etaMinutes ?? null,
     },
+    statusTimeline: statusTimes,
     map: {
-      origin: job.tracking?.latestMechanicLocation?.point || null,
+      origin: mechanicLocation?.point || null,
       destination: job.location || null,
       etaMinutes: job.tracking?.etaMinutes ?? null,
     },
@@ -258,27 +792,9 @@ const serializeJobDetail = async (job, viewer) => {
       : null,
     paymentSummary:
       viewer.role === ROLES.FLEET
-        ? {
-            authorizedAmount:
-              Number(job.acceptedAmount ?? job.estimatedPayout ?? 0) || null,
-            finalAmount: Number(job.finalAmount ?? job.acceptedAmount ?? 0) || null,
-            platformFee:
-              Number(job.finalAmount ?? job.acceptedAmount ?? 0) > 0
-                ? Math.round(
-                    Number(job.finalAmount ?? job.acceptedAmount ?? 0) * 0.12 * 100
-                  ) / 100
-                : null,
-            status:
-              job.status === JOB_STATUS.COMPLETED
-                ? "PAID"
-                : [JOB_STATUS.ASSIGNED, JOB_STATUS.EN_ROUTE, JOB_STATUS.ON_SITE, JOB_STATUS.IN_PROGRESS, JOB_STATUS.AWAITING_APPROVAL].includes(
-                    job.status
-                  )
-                ? "AUTHORIZED"
-                : "PENDING",
-            currency: job.currency || "GBP",
-          }
+        ? computeFleetPaymentBox({ job, defaultPaymentMethod })
         : null,
+    jobSummary: buildJobSummaryForDetail(job, statusTimes),
   };
 };
 
@@ -376,6 +892,12 @@ const createJobEvent = async ({
 const ensureFleetOwner = (job, fleetUserId) => {
   if (toObjectIdString(job.fleet) !== toObjectIdString(fleetUserId)) {
     throw new AppError("Forbidden", 403);
+  }
+};
+
+const ensureCompanyAssignedJob = (job, companyUserId) => {
+  if (!job.assignedCompany || toObjectIdString(job.assignedCompany) !== toObjectIdString(companyUserId)) {
+    throw new AppError("Job is not assigned to your company", 403);
   }
 };
 
@@ -506,6 +1028,11 @@ const upsertFinancialRecordsForCompletedJob = async (job, paymentContext = {}) =
   const invoiceStatus = paymentContext.invoiceStatus || "PAID";
   const paymentStatus = paymentContext.paymentStatus || "SUCCEEDED";
 
+  const customLines =
+    Array.isArray(paymentContext.lineItems) && paymentContext.lineItems.length > 0
+      ? paymentContext.lineItems
+      : null;
+
   let invoice = await Invoice.findOne({ job: job._id });
   if (!invoice) {
     invoice = await Invoice.create({
@@ -532,7 +1059,7 @@ const upsertFinancialRecordsForCompletedJob = async (job, paymentContext = {}) =
         capturedAmount: invoiceStatus === "PAID" ? totalAmount : undefined,
         updatedAt: new Date(),
       },
-      lineItems: [
+      lineItems: customLines || [
         {
           description: job.completionSummary || job.description || "Repair service",
           quantity: 1,
@@ -548,7 +1075,8 @@ const upsertFinancialRecordsForCompletedJob = async (job, paymentContext = {}) =
       mechanicSnapshot: {
         displayName: job.assignedMechanic?.mechanicProfile?.displayName,
         businessName: job.assignedMechanic?.mechanicProfile?.businessName,
-        rating: job.assignedMechanic?.mechanicProfile?.rating?.average,
+        rating: readMechanicProfileRatingAverage(job.assignedMechanic),
+        profilePhotoUrl: job.assignedMechanic?.mechanicProfile?.profilePhotoUrl || undefined,
       },
     });
   } else {
@@ -576,7 +1104,9 @@ const upsertFinancialRecordsForCompletedJob = async (job, paymentContext = {}) =
       capturedAmount: invoiceStatus === "PAID" ? totalAmount : undefined,
       updatedAt: new Date(),
     };
-    if (!invoice.lineItems?.length) {
+    if (customLines) {
+      invoice.lineItems = customLines;
+    } else if (!invoice.lineItems?.length) {
       invoice.lineItems = [
         {
           description: job.completionSummary || job.description || "Repair service",
@@ -585,6 +1115,17 @@ const upsertFinancialRecordsForCompletedJob = async (job, paymentContext = {}) =
           totalAmount: subtotal,
         },
       ];
+    }
+    const mp = job.assignedMechanic?.mechanicProfile;
+    if (mp) {
+      const prev = invoice.mechanicSnapshot || {};
+      invoice.mechanicSnapshot = {
+        ...prev,
+        displayName: mp.displayName ?? prev.displayName,
+        businessName: mp.businessName ?? prev.businessName,
+        rating: readMechanicProfileRatingAverage(job.assignedMechanic) ?? prev.rating,
+        profilePhotoUrl: mp.profilePhotoUrl ?? prev.profilePhotoUrl,
+      };
     }
     await invoice.save();
   }
@@ -614,6 +1155,43 @@ const upsertFinancialRecordsForCompletedJob = async (job, paymentContext = {}) =
   return { invoice, earningTransaction };
 };
 
+const finalizeApprovedJobCompletion = async ({
+  job,
+  fromStatus,
+  actorUser,
+  paymentContext,
+  eventExtras = {},
+}) => {
+  const financials = await upsertFinancialRecordsForCompletedJob(job, paymentContext);
+  await createJobEvent({
+    jobId: job._id,
+    actorId: actorUser._id,
+    type: "JOB_COMPLETED",
+    fromStatus,
+    toStatus: JOB_STATUS.COMPLETED,
+    payload: {
+      invoiceId: financials.invoice?._id,
+      paymentProvider: paymentContext.provider,
+      paymentStatus: paymentContext.paymentStatus,
+      stripePaymentIntentId: paymentContext.stripePaymentIntentId,
+      ...eventExtras,
+    },
+  });
+
+  emitJobStatusChanged(job, {
+    previousStatus: fromStatus,
+    changedBy: toObjectIdString(actorUser._id),
+    invoiceId: financials.invoice?._id?.toString?.() || null,
+    paymentStatus: paymentContext.paymentStatus,
+  });
+
+  return {
+    job,
+    invoice: financials.invoice,
+    earningTransaction: financials.earningTransaction,
+  };
+};
+
 export const createJob = async (payload, fleetUser) => {
   if (!payload.title || !payload.description) {
     throw new AppError("title and description are required", 400);
@@ -624,6 +1202,7 @@ export const createJob = async (payload, fleetUser) => {
   }
 
   const scheduling = normalizeAvailabilityWindow(payload);
+  const { issueType, issueSubtype } = resolveIssueClassification(payload);
 
   const job = await Job.create({
     jobCode: await generateJobCode(),
@@ -634,12 +1213,23 @@ export const createJob = async (payload, fleetUser) => {
       type: payload.vehicleType,
       make: payload.vehicleMake,
       model: payload.vehicleModel,
+      trailerMakeModel:
+        `${payload.trailerMakeModel || payload.trailer || ""}`.trim() || undefined,
     },
-    issueType: payload.issueType,
+    issueType,
+    issueSubtype: issueSubtype || undefined,
+    tyreDetails: buildTyreDetailsFromPayload(payload),
     title: payload.title,
     description: payload.description,
     urgency: payload.urgency,
     location: ensureLocation(payload),
+    driver:
+      payload.driverName || payload.driverPhone
+        ? {
+            name: `${payload.driverName || ""}`.trim() || undefined,
+            phone: `${payload.driverPhone || ""}`.trim() || undefined,
+          }
+        : undefined,
     photos: payload.photos || [],
     status: JOB_STATUS.POSTED,
     postedAt: new Date(),
@@ -883,22 +1473,44 @@ export const listJobs = async (user, query) => {
   const skip = (page - 1) * limit;
   const filter = {};
 
+  // Express may pass duplicate keys as arrays; clients sometimes vary casing.
+  const listTab = (() => {
+    const t = query.tab;
+    if (Array.isArray(t)) return `${t[0] ?? ""}`.trim().toLowerCase();
+    return `${t ?? ""}`.trim().toLowerCase();
+  })();
+  const listStatusParam = (() => {
+    const s = query.status;
+    if (Array.isArray(s)) return `${s[0] ?? ""}`.trim().toUpperCase();
+    return `${s ?? ""}`.trim().toUpperCase();
+  })();
+
   if (user.role === ROLES.FLEET) {
     filter.fleet = user._id;
-    if (query.tab === "completed") {
+    if (listTab === "completed") {
       filter.status = JOB_STATUS.COMPLETED;
-    } else if (query.tab === "active" || query.tab === "tracking") {
-      filter.status = {
-        $in: [
-          JOB_STATUS.POSTED,
-          JOB_STATUS.QUOTING,
-          JOB_STATUS.ASSIGNED,
-          JOB_STATUS.EN_ROUTE,
-          JOB_STATUS.ON_SITE,
-          JOB_STATUS.IN_PROGRESS,
-          JOB_STATUS.AWAITING_APPROVAL,
-        ],
-      };
+    } else if (listTab === "active" || listTab === "tracking") {
+      const fleetActiveList = [
+        JOB_STATUS.POSTED,
+        JOB_STATUS.QUOTING,
+        JOB_STATUS.ASSIGNED,
+        JOB_STATUS.EN_ROUTE,
+        JOB_STATUS.ON_SITE,
+        JOB_STATUS.IN_PROGRESS,
+        JOB_STATUS.AWAITING_APPROVAL,
+      ];
+      const narrowed = listStatusParam;
+      if (narrowed) {
+        if (!jobStatusValues.includes(narrowed)) {
+          throw new AppError(`Invalid status: ${narrowed}`, 400);
+        }
+        if (!fleetActiveList.includes(narrowed)) {
+          throw new AppError(`status must be one of: ${fleetActiveList.join(", ")}`, 400);
+        }
+        filter.status = narrowed;
+      } else {
+        filter.status = { $in: fleetActiveList };
+      }
     }
   }
 
@@ -912,12 +1524,7 @@ export const listJobs = async (user, query) => {
         const radiusMiles = Number(query.radiusMiles || query.radius || 15);
         if (Number.isFinite(lat) && Number.isFinite(lng) && Number.isFinite(radiusMiles)) {
           nearPoint = { lat, lng };
-          filter.location = {
-            $near: {
-              $geometry: { type: "Point", coordinates: [lng, lat] },
-              $maxDistance: milesToMeters(radiusMiles),
-            },
-          };
+          filter.location = locationWithinRadiusFilter(lng, lat, radiusMiles);
         }
       }
       if (query.issueType) {
@@ -929,20 +1536,30 @@ export const listJobs = async (user, query) => {
           filter.estimatedPayout = { $gte: min };
         }
       }
-    } else if (query.tab === "completed") {
+    } else if (listTab === "completed") {
       filter.assignedMechanic = user._id;
       filter.status = JOB_STATUS.COMPLETED;
-    } else if (query.tab === "active") {
+    } else if (listTab === "active") {
       filter.assignedMechanic = user._id;
-      filter.status = {
-        $in: [
-          JOB_STATUS.ASSIGNED,
-          JOB_STATUS.EN_ROUTE,
-          JOB_STATUS.ON_SITE,
-          JOB_STATUS.IN_PROGRESS,
-          JOB_STATUS.AWAITING_APPROVAL,
-        ],
-      };
+      const mechActiveList = [
+        JOB_STATUS.ASSIGNED,
+        JOB_STATUS.EN_ROUTE,
+        JOB_STATUS.ON_SITE,
+        JOB_STATUS.IN_PROGRESS,
+        JOB_STATUS.AWAITING_APPROVAL,
+      ];
+      const narrowed = listStatusParam;
+      if (narrowed) {
+        if (!jobStatusValues.includes(narrowed)) {
+          throw new AppError(`Invalid status: ${narrowed}`, 400);
+        }
+        if (!mechActiveList.includes(narrowed)) {
+          throw new AppError(`status must be one of: ${mechActiveList.join(", ")}`, 400);
+        }
+        filter.status = narrowed;
+      } else {
+        filter.status = { $in: mechActiveList };
+      }
     } else {
       filter.assignedMechanic = user._id;
     }
@@ -950,46 +1567,33 @@ export const listJobs = async (user, query) => {
 
   if (user.role === ROLES.COMPANY) {
     if (`${query.feed}` === "true") {
-      filter.status = { $in: [JOB_STATUS.POSTED, JOB_STATUS.QUOTING] };
-      if (query.lat && query.lng) {
-        const lat = Number(query.lat);
-        const lng = Number(query.lng);
-        const radiusMiles = Number(
-          query.radiusMiles || query.radius || user.companyProfile?.serviceRadiusMiles || 25
-        );
-        if (Number.isFinite(lat) && Number.isFinite(lng) && Number.isFinite(radiusMiles)) {
-          nearPoint = { lat, lng };
-          filter.location = {
-            $near: {
-              $geometry: { type: "Point", coordinates: [lng, lat] },
-              $maxDistance: milesToMeters(radiusMiles),
-            },
-          };
-        }
-      }
-      if (query.issueType) {
-        filter.issueType = { $in: `${query.issueType}`.split(",") };
-      }
-      if (query.minPayout) {
-        const min = Number(query.minPayout);
-        if (Number.isFinite(min)) {
-          filter.estimatedPayout = { $gte: min };
-        }
-      }
-    } else if (query.tab === "completed") {
+      Object.assign(filter, buildCompanyFeedJobsFilter(user, query));
+      await applyCompanyFeedExcludeJobsWithWaitingQuote(user, filter);
+      nearPoint = resolveCompanyFeedNearPoint(user, query);
+    } else if (listTab === "completed") {
       filter.assignedCompany = user._id;
       filter.status = JOB_STATUS.COMPLETED;
-    } else if (query.tab === "active" || query.tab === "tracking") {
+    } else if (listTab === "active" || listTab === "tracking") {
       filter.assignedCompany = user._id;
-      filter.status = {
-        $in: [
-          JOB_STATUS.ASSIGNED,
-          JOB_STATUS.EN_ROUTE,
-          JOB_STATUS.ON_SITE,
-          JOB_STATUS.IN_PROGRESS,
-          JOB_STATUS.AWAITING_APPROVAL,
-        ],
-      };
+      const companyActiveList = [
+        JOB_STATUS.ASSIGNED,
+        JOB_STATUS.EN_ROUTE,
+        JOB_STATUS.ON_SITE,
+        JOB_STATUS.IN_PROGRESS,
+        JOB_STATUS.AWAITING_APPROVAL,
+      ];
+      const narrowed = listStatusParam;
+      if (narrowed) {
+        if (!jobStatusValues.includes(narrowed)) {
+          throw new AppError(`Invalid status: ${narrowed}`, 400);
+        }
+        if (!companyActiveList.includes(narrowed)) {
+          throw new AppError(`status must be one of: ${companyActiveList.join(", ")}`, 400);
+        }
+        filter.status = narrowed;
+      } else {
+        filter.status = { $in: companyActiveList };
+      }
     } else {
       filter.assignedCompany = user._id;
     }
@@ -999,28 +1603,41 @@ export const listJobs = async (user, query) => {
     .sort({ createdAt: -1 })
     .skip(skip)
     .limit(limit)
-    .populate("fleet", "email fleetProfile.companyName fleetProfile.contactName fleetProfile.phone")
+    .populate(
+      "fleet",
+      "email fleetProfile.companyName fleetProfile.contactName fleetProfile.phone fleetProfile.rating"
+    )
     .populate(
       "assignedCompany",
       "email role companyProfile.companyName companyProfile.contactName companyProfile.phone"
     )
-    .populate("assignedMechanic", "email role mechanicProfile.displayName mechanicProfile.phone mechanicProfile.rating")
+    .populate(
+      "assignedMechanic",
+      "email role mechanicProfile.displayName mechanicProfile.phone mechanicProfile.rating mechanicProfile.profilePhotoUrl mechanicProfile.availability"
+    )
     .lean();
-
-  if (nearPoint) {
-    queryBuilder.select({ distanceMeters: { $meta: "geoNearDistance" } });
-  }
 
   const [items, total] = await Promise.all([
     queryBuilder,
     Job.countDocuments(filter),
   ]);
 
-  const serializedItems = items.map((job) =>
-    serializeJobCard(job, user, {
-      distanceMiles: roundMiles(job.distanceMeters),
-    })
-  );
+  const serializedItems = items.map((job) => {
+    let distanceMeters = job.distanceMeters;
+    if (
+      nearPoint &&
+      Array.isArray(job.location?.coordinates) &&
+      job.location.coordinates.length === 2
+    ) {
+      const [jlng, jlat] = job.location.coordinates.map(Number);
+      if (Number.isFinite(jlng) && Number.isFinite(jlat)) {
+        distanceMeters = haversineMeters(nearPoint.lng, nearPoint.lat, jlng, jlat);
+      }
+    }
+    return serializeJobCard(job, user, {
+      distanceMiles: roundMiles(distanceMeters),
+    });
+  });
 
   const insightBase = {
     activeCount: serializedItems.filter(
@@ -1049,14 +1666,17 @@ export const listJobs = async (user, query) => {
 
 export const getJobByIdForUser = async (jobId, user) => {
   const job = await Job.findById(jobId)
-    .populate("fleet", "email role fleetProfile.companyName fleetProfile.contactName fleetProfile.phone fleetProfile.billingAddress")
+    .populate(
+      "fleet",
+      "email role fleetProfile.companyName fleetProfile.contactName fleetProfile.phone fleetProfile.billingAddress fleetProfile.rating"
+    )
     .populate(
       "assignedCompany",
       "email role companyProfile.companyName companyProfile.contactName companyProfile.phone"
     )
     .populate(
       "assignedMechanic",
-      "email role mechanicProfile.displayName mechanicProfile.phone mechanicProfile.rating"
+      "email role mechanicProfile.displayName mechanicProfile.phone mechanicProfile.rating mechanicProfile.profilePhotoUrl mechanicProfile.availability"
     );
 
   if (!job) throw new AppError("Job not found", 404);
@@ -1163,8 +1783,106 @@ export const startJobWork = async (jobId, mechanicUser) =>
     eventType: "WORK_STARTED",
   });
 
-export const completeJobWork = async (jobId, mechanicUser, payload) =>
-  transitionAssignedJob({
+const countCompletionPhotoPayload = (payload = {}) => {
+  if (Array.isArray(payload.photos) && payload.photos.length) return payload.photos.length;
+  if (payload.photo) return 1;
+  if (payload.dataUrl || payload.url) return 1;
+  return 0;
+};
+
+const pickCompletionPhotoPayload = (payload = {}) => {
+  if (Array.isArray(payload.photos) && payload.photos.length) return { photos: payload.photos };
+  if (payload.photo) return { photo: payload.photo };
+  if (payload.dataUrl || payload.url) {
+    return { dataUrl: payload.dataUrl, url: payload.url, filename: payload.filename };
+  }
+  return null;
+};
+
+const pickCompletionAttachmentItems = (payload = {}) => {
+  const fromNested =
+    payload.attachments && typeof payload.attachments === "object" && !Array.isArray(payload.attachments)
+      ? payload.attachments.items
+      : undefined;
+  if (Array.isArray(fromNested) && fromNested.length) return fromNested;
+  if (Array.isArray(payload.attachmentItems) && payload.attachmentItems.length) {
+    return payload.attachmentItems;
+  }
+  return null;
+};
+
+/**
+ * Single-call completion: optional completion photos, optional attachments, optional invoice
+ * breakdown (same shape as company approve invoice), then IN_PROGRESS → AWAITING_APPROVAL.
+ * Backward compatible: { workSummary, finalAmount } only still works.
+ * Notes: `repairNotes` / `repair_notes` are aliases for `workSummary` (repair notes / completion text).
+ */
+export const completeJobWork = async (jobId, mechanicUser, payload = {}) => {
+  const job = await Job.findById(jobId);
+  if (!job) throw new AppError("Job not found", 404);
+  ensureAssignedMechanic(job, mechanicUser._id);
+  if (job.status !== JOB_STATUS.IN_PROGRESS) {
+    throw new AppError(`Job must be ${JOB_STATUS.IN_PROGRESS}`, 400);
+  }
+
+  if (!payload.workSummary && (payload.repairNotes != null || payload.repair_notes != null)) {
+    const rn = `${payload.repairNotes ?? payload.repair_notes ?? ""}`.trim();
+    if (rn) payload.workSummary = rn;
+  }
+
+  if (Array.isArray(payload.photos)) {
+    payload.photos = payload.photos.map((p) => {
+      if (typeof p !== "string") return p;
+      const s = p.trim();
+      if (s.startsWith("data:")) return { dataUrl: s };
+      return { url: s };
+    });
+  }
+
+  const photoCount = countCompletionPhotoPayload(payload);
+  if (photoCount > 5) {
+    throw new AppError("At most 5 completion photos are allowed in one request", 400);
+  }
+  const photoPayload = pickCompletionPhotoPayload(payload);
+  if (photoPayload) {
+    await addJobPhotos(jobId, mechanicUser, photoPayload);
+  }
+
+  const attachmentItems = pickCompletionAttachmentItems(payload);
+  if (attachmentItems?.length) {
+    if (attachmentItems.length > 15) {
+      throw new AppError("At most 15 attachments are allowed in one request", 400);
+    }
+    await addJobAttachments(jobId, mechanicUser, { items: attachmentItems });
+  }
+
+  const inv = payload.invoice;
+  let invoiceBreakdown = null;
+  let resolvedFinal;
+
+  if (inv && typeof inv === "object" && !Array.isArray(inv)) {
+    const { lineItems, subtotal } = buildLineItemsFromCompanyInvoicePayload(
+      {
+        invoice: inv,
+        totalAmount: payload.finalAmount ?? payload.totalAmount ?? payload.invoiceTotal,
+      },
+      job
+    );
+    invoiceBreakdown = { lineItems, subtotal };
+    resolvedFinal = subtotal;
+  } else if (payload.finalAmount !== undefined && payload.finalAmount !== null && `${payload.finalAmount}`.trim() !== "") {
+    resolvedFinal = round2(Number(payload.finalAmount));
+    if (!Number.isFinite(resolvedFinal)) {
+      throw new AppError("finalAmount must be a number", 400);
+    }
+  } else {
+    resolvedFinal = job.finalAmount != null ? round2(Number(job.finalAmount)) : undefined;
+  }
+
+  const finalForJob =
+    resolvedFinal !== undefined && Number.isFinite(resolvedFinal) ? resolvedFinal : job.finalAmount;
+
+  const jobAfter = await transitionAssignedJob({
     jobId,
     user: mechanicUser,
     fromStatuses: [JOB_STATUS.IN_PROGRESS],
@@ -1172,14 +1890,56 @@ export const completeJobWork = async (jobId, mechanicUser, payload) =>
     eventType: "WORK_COMPLETED",
     note: payload.workSummary,
     payload: {
-      workSummary: payload.workSummary,
-      finalAmount: payload.finalAmount,
+      workSummary: payload.workSummary ?? null,
+      finalAmount: finalForJob ?? null,
+      ...(invoiceBreakdown
+        ? {
+            invoiceSubtotal: invoiceBreakdown.subtotal,
+            invoiceLineSummaries: invoiceBreakdown.lineItems.map((row) => ({
+              description: row.description,
+              totalAmount: row.totalAmount,
+            })),
+          }
+        : {}),
     },
-    extraMutation: (job) => {
-      job.finalAmount = payload.finalAmount ?? job.finalAmount;
-      job.completionSummary = payload.workSummary || job.completionSummary;
+    extraMutation: (j) => {
+      if (finalForJob !== undefined && finalForJob !== null && Number.isFinite(finalForJob)) {
+        j.finalAmount = finalForJob;
+      }
+      j.completionSummary = payload.workSummary || j.completionSummary;
     },
   });
+
+  const base =
+    typeof jobAfter?.toObject === "function"
+      ? jobAfter.toObject({ flattenMaps: true })
+      : jobAfter && typeof jobAfter === "object"
+        ? { ...jobAfter }
+        : jobAfter;
+
+  if (invoiceBreakdown && inv && typeof inv === "object" && !Array.isArray(inv)) {
+    base.completionInvoice = {
+      currency: jobAfter.currency || job.currency || "GBP",
+      subtotal: invoiceBreakdown.subtotal,
+      lineItems: invoiceBreakdown.lineItems.map((row) => ({
+        description: row.description,
+        quantity: row.quantity,
+        unitAmount: row.unitAmount,
+        totalAmount: row.totalAmount,
+      })),
+      submittedInputs: {
+        callOutCharge: inv.callOutCharge ?? inv.callOutFee ?? 0,
+        labourHours: Number(inv.labourHours ?? inv.labour?.hours ?? 0),
+        labourRatePerHour: Number(
+          inv.labourRatePerHour ?? inv.labour?.ratePerHour ?? inv.hourlyRate ?? 0
+        ),
+        parts: Array.isArray(inv.parts) ? inv.parts : [],
+      },
+    };
+  }
+
+  return base;
+};
 
 export const approveJobCompletion = async (jobId, fleetUser, payload) => {
   const job = await Job.findById(jobId)
@@ -1257,35 +2017,59 @@ export const approveJobCompletion = async (jobId, fleetUser, payload) => {
     }
   }
 
-  const financials = await upsertFinancialRecordsForCompletedJob(job, paymentContext);
-
-  await createJobEvent({
-    jobId: job._id,
-    actorId: fleetUser._id,
-    type: "JOB_COMPLETED",
-    fromStatus,
-    toStatus: JOB_STATUS.COMPLETED,
-    payload: {
-      paymentMethodId: payload.paymentMethodId,
-      invoiceId: financials.invoice?._id,
-      paymentProvider: paymentContext.provider,
-      paymentStatus: paymentContext.paymentStatus,
-      stripePaymentIntentId: paymentContext.stripePaymentIntentId,
-    },
-  });
-
-  emitJobStatusChanged(job, {
-    previousStatus: fromStatus,
-    changedBy: toObjectIdString(fleetUser._id),
-    invoiceId: financials.invoice?._id?.toString?.() || null,
-    paymentStatus: paymentContext.paymentStatus,
-  });
-
-  return {
+  return finalizeApprovedJobCompletion({
     job,
-    invoice: financials.invoice,
-    earningTransaction: financials.earningTransaction,
+    fromStatus,
+    actorUser: fleetUser,
+    paymentContext,
+    eventExtras: { paymentMethodId: payload.paymentMethodId },
+  });
+};
+
+/**
+ * Company dispatcher: approve mechanic-submitted completion (same outcome as fleet approve).
+ * Uses manual paid context; fleet card capture (Stripe) remains on PATCH /jobs/:id/complete/approve.
+ */
+export const approveJobCompletionAsCompany = async (jobId, companyUser, payload = {}) => {
+  const job = await Job.findById(jobId)
+    .populate("fleet", "fleetProfile")
+    .populate("assignedCompany", "companyProfile")
+    .populate("assignedMechanic", "mechanicProfile");
+  if (!job) throw new AppError("Job not found", 404);
+
+  ensureCompanyAssignedJob(job, companyUser._id);
+  if (job.status !== JOB_STATUS.AWAITING_APPROVAL) {
+    throw new AppError("Job is not awaiting approval", 400);
+  }
+
+  const fromStatus = job.status;
+  const breakdown = buildLineItemsFromCompanyInvoicePayload(payload, job);
+
+  if (breakdown) {
+    job.finalAmount = breakdown.subtotal;
+  } else if (payload.finalAmount !== undefined) {
+    job.finalAmount = round2(Number(payload.finalAmount));
+  }
+
+  job.status = JOB_STATUS.COMPLETED;
+  job.completedAt = new Date();
+  await job.save();
+
+  const paymentContext = {
+    provider: "MANUAL",
+    invoiceStatus: "PAID",
+    paymentStatus: "SUCCEEDED",
+    paidAt: new Date(),
+    ...(breakdown ? { lineItems: breakdown.lineItems } : {}),
   };
+
+  return finalizeApprovedJobCompletion({
+    job,
+    fromStatus,
+    actorUser: companyUser,
+    paymentContext,
+    eventExtras: { approvedByCompany: true },
+  });
 };
 
 export const cancelJob = async (jobId, fleetUser, payload = {}) => {

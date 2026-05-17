@@ -11,6 +11,8 @@ const vehicleSchema = new Schema(
     model: { type: String, trim: true },
     year: { type: Number, min: 1950, max: 2100 },
     vin: { type: String, trim: true },
+    /** Odometer reading in kilometres (fleet UI “current mileage”). */
+    currentMileageKm: { type: Number, min: 0 },
     isActive: { type: Boolean, default: true },
   },
   { timestamps: true }

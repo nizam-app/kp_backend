@@ -1,5 +1,6 @@
 import { sendResponse } from "../../utils/sendResponse.js";
 import {
+  getEarningsOverview,
   getEarningsSummary,
   getEarningsStatement,
   getPayoutInfo,
@@ -20,6 +21,14 @@ export const earningJobsController = async (req, res) => {
     message: "Earning jobs fetched",
     data: result.items,
     meta: result.meta,
+  });
+};
+
+export const earningOverviewController = async (req, res) => {
+  const data = await getEarningsOverview(req.user, req.query);
+  return sendResponse(res, {
+    message: "Earnings overview fetched",
+    data,
   });
 };
 

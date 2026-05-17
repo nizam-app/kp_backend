@@ -29,6 +29,10 @@ const fleetProfileSchema = new Schema(
     billingAddress: { type: String, trim: true },
     profileCompleted: { type: Boolean, default: false },
     stripeCustomerId: { type: String, trim: true },
+    rating: {
+      average: { type: Number, min: 0, max: 5, default: 0 },
+      count: { type: Number, min: 0, default: 0 },
+    },
   },
   { _id: false }
 );
@@ -75,7 +79,16 @@ const mechanicProfileSchema = new Schema(
     skills: {
       type: [String],
       default: [],
-      enum: ["TYRES", "BATTERY", "ENGINE", "BRAKES", "ELECTRICAL", "OTHER"],
+      enum: [
+        "TYRES",
+        "BATTERY",
+        "ENGINE",
+        "BRAKES",
+        "ELECTRICAL",
+        "OTHER",
+        "AIR_SYSTEMS",
+        "TRANSMISSION",
+      ],
     },
     availability: {
       type: String,
@@ -105,6 +118,13 @@ const mechanicProfileSchema = new Schema(
       jobsDone: { type: Number, min: 0, default: 0 },
       responseMinutesAvg: { type: Number, min: 0, default: 0 },
     },
+    /** Display-only bank / VAT for profile & sole-trader UIs (separate from Stripe payout methods). */
+    billingAddress: { type: String, trim: true },
+    bankDisplayName: { type: String, trim: true },
+    bankAccountMasked: { type: String, trim: true },
+    bankSortCode: { type: String, trim: true },
+    vatNumber: { type: String, trim: true },
+    vatRegistered: { type: Boolean, default: false },
     stripeConnectAccountId: { type: String, trim: true },
     stripeConnectOnboardingComplete: { type: Boolean, default: false },
     stripeConnectDetailsSubmitted: { type: Boolean, default: false },
@@ -125,10 +145,20 @@ const companyProfileSchema = new Schema(
     regNumber: { type: String, trim: true },
     vatNumber: { type: String, trim: true },
     billingAddress: { type: String, trim: true },
+    /** Display-only payout / bank lines for company profile UIs (not verified bank verification). */
+    bankDisplayName: { type: String, trim: true },
+    bankAccountMasked: { type: String, trim: true },
+    bankSortCode: { type: String, trim: true },
     baseLocationText: { type: String, trim: true },
     serviceRadiusMiles: { type: Number, min: 1, default: 25 },
     teamSize: { type: Number, min: 0, default: 0 },
     profileCompleted: { type: Boolean, default: false },
+    /** When set, GET /users/me `companySummary.profileMetrics` prefers these (demo / marketing). */
+    profileMetricsOverride: {
+      totalJobs: { type: Number, min: 0 },
+      avgRating: { type: Number, min: 0, max: 5 },
+      responseMinutesAvg: { type: Number, min: 0 },
+    },
     stripeCustomerId: { type: String, trim: true },
   },
   { _id: false }
@@ -162,6 +192,8 @@ const companyMembershipSchema = new Schema(
     invitedBy: { type: Schema.Types.ObjectId, ref: "User" },
     jobTitle: { type: String, trim: true },
     joinedAt: Date,
+    /** Card id for company Team UIs (e.g. M-001). Optional; otherwise assigned by tenure. */
+    employeeDisplayRef: { type: String, trim: true, maxlength: 16 },
     status: {
       type: String,
       enum: ["PENDING", "ACTIVE", "INACTIVE"],
@@ -204,6 +236,7 @@ const userSchema = new Schema(
         jobAcceptedDeclined: { type: Boolean, default: true },
         paymentReceived: { type: Boolean, default: true },
         systemAlerts: { type: Boolean, default: true },
+        appAlerts: { type: Boolean, default: true },
       },
     },
     termsAcceptance: {

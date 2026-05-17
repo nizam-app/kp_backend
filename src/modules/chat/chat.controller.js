@@ -4,6 +4,7 @@ import {
   listJobMessages,
   markJobMessagesRead,
   sendJobMessage,
+  uploadJobChatAttachment,
 } from "./chat.service.js";
 
 export const listChatThreadsController = async (req, res) => {
@@ -29,6 +30,15 @@ export const sendJobMessageController = async (req, res) => {
     statusCode: 201,
     message: "Message sent",
     data: message,
+  });
+};
+
+export const uploadJobChatAttachmentController = async (req, res) => {
+  const data = await uploadJobChatAttachment(req.params.jobId, req.user, req.file);
+  return sendResponse(res, {
+    statusCode: 201,
+    message: "Chat attachment uploaded",
+    data,
   });
 };
 

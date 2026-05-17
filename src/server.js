@@ -1,6 +1,7 @@
 import { createServer } from "http";
-import app from "./app.js";
+// Load `.env` before `app` so optional modules (e.g. Cloudinary) see process.env at import time.
 import { env } from "./config/env.js";
+import app from "./app.js";
 import { connectDB } from "./config/db.js";
 import { initRealtimeServer } from "./realtime/socket.js";
 
@@ -12,8 +13,8 @@ const start = async () => {
   const httpServer = createServer(app);
   initRealtimeServer(httpServer);
 
-  // Cloud hosts (Render, etc.) require listening on 0.0.0.0 and their injected PORT.
-  const host = env.NODE_ENV === "production" ? "0.0.0.0" : env.HOST;
+  // Prefer explicit HOST if set (even in production). Defaults to 0.0.0.0 for LAN access.
+  const host = `${env.HOST || ""}`.trim() || "0.0.0.0";
   server = httpServer.listen(env.PORT, host, () => {
     console.log(`Server running on ${host}:${env.PORT} (${env.NODE_ENV})`);
   });

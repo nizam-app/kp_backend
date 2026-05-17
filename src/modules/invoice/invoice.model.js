@@ -69,6 +69,7 @@ const invoiceSchema = new Schema(
       displayName: { type: String, trim: true },
       businessName: { type: String, trim: true },
       rating: { type: Number, min: 0, max: 5 },
+      profilePhotoUrl: { type: String, trim: true },
     },
   },
   { timestamps: true }

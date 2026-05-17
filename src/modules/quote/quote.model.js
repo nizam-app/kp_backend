@@ -36,9 +36,10 @@ const quoteSchema = new Schema(
       default: QUOTE_STATUS.WAITING,
       index: true,
     },
+    /** Optional time-box; `null` = valid until the job closes (see `expireWaitingQuotes`). */
     expiresAt: {
       type: Date,
-      default: () => new Date(Date.now() + 30 * 60 * 1000),
+      default: null,
       index: true,
     },
     acceptedAt: Date,

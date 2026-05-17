@@ -1,30 +1,36 @@
 import { v2 as cloudinary } from "cloudinary";
 
+const trim = (v) => `${v ?? ""}`.trim();
+
 /**
  * Cloudinary reads `CLOUDINARY_URL` automatically when set.
  * Otherwise set `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET`.
  */
 export const isCloudinaryConfigured = () =>
   Boolean(
-    process.env.CLOUDINARY_URL ||
-      (process.env.CLOUDINARY_CLOUD_NAME &&
-        process.env.CLOUDINARY_API_KEY &&
-        process.env.CLOUDINARY_API_SECRET)
+    trim(process.env.CLOUDINARY_URL) ||
+      (trim(process.env.CLOUDINARY_CLOUD_NAME) &&
+        trim(process.env.CLOUDINARY_API_KEY) &&
+        trim(process.env.CLOUDINARY_API_SECRET))
   );
 
 export const initCloudinary = () => {
-  if (process.env.CLOUDINARY_URL) {
+  const url = trim(process.env.CLOUDINARY_URL);
+  const cloudName = trim(process.env.CLOUDINARY_CLOUD_NAME);
+  const apiKey = trim(process.env.CLOUDINARY_API_KEY);
+  const apiSecret = trim(process.env.CLOUDINARY_API_SECRET);
+
+  if (url) {
+    process.env.CLOUDINARY_URL = url;
+    // Reload SDK config from process.env (fixes stale empty config if env loaded late).
+    cloudinary.config(true);
     return;
   }
-  if (
-    process.env.CLOUDINARY_CLOUD_NAME &&
-    process.env.CLOUDINARY_API_KEY &&
-    process.env.CLOUDINARY_API_SECRET
-  ) {
+  if (cloudName && apiKey && apiSecret) {
     cloudinary.config({
-      cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-      api_key: process.env.CLOUDINARY_API_KEY,
-      api_secret: process.env.CLOUDINARY_API_SECRET,
+      cloud_name: cloudName,
+      api_key: apiKey,
+      api_secret: apiSecret,
     });
   }
 };

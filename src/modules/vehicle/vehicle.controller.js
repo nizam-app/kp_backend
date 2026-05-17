@@ -2,6 +2,7 @@ import { sendResponse } from "../../utils/sendResponse.js";
 import {
   createVehicle,
   deleteVehicle,
+  getVehicleByIdForFleet,
   listVehicles,
   updateVehicle,
 } from "./vehicle.service.js";
@@ -20,6 +21,18 @@ export const listVehiclesController = async (req, res) => {
   return sendResponse(res, {
     message: "Vehicles fetched",
     data: vehicles,
+  });
+};
+
+export const getVehicleByIdController = async (req, res) => {
+  const result = await getVehicleByIdForFleet(req.user, req.params.vehicleId, req.query);
+  return sendResponse(res, {
+    message: "Vehicle fetched",
+    data: {
+      vehicle: result.vehicle,
+      recentJobs: result.recentJobs,
+    },
+    meta: result.meta,
   });
 };
 

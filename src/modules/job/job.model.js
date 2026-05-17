@@ -76,6 +76,26 @@ const availabilityWindowSchema = new Schema(
   { _id: false }
 );
 
+const driverSchema = new Schema(
+  {
+    name: { type: String, trim: true },
+    phone: { type: String, trim: true },
+  },
+  { _id: false }
+);
+
+/** Tyre job detail (optional; use when issueType is TYRES or UI shows tyre form). */
+export const TYRE_SIDE_VALUES = ["NEAR_SIDE", "OFF_SIDE", "BOTH"];
+
+const tyreDetailsSchema = new Schema(
+  {
+    size: { type: String, trim: true },
+    side: { type: String, enum: TYRE_SIDE_VALUES },
+    axlePosition: { type: String, trim: true },
+  },
+  { _id: false }
+);
+
 export const JOB_ATTACHMENT_CATEGORIES = [
   "BEFORE",
   "AFTER",
@@ -122,6 +142,9 @@ const jobSchema = new Schema(
       enum: issueTypeValues,
       default: ISSUE_TYPES.OTHER,
     },
+    /** Finer UI category than issueType, e.g. FLAT_DAMAGED_TYRE or free-text label slug. */
+    issueSubtype: { type: String, trim: true, maxlength: 120 },
+    tyreDetails: tyreDetailsSchema,
     title: { type: String, trim: true, required: true },
     description: { type: String, trim: true, required: true },
     urgency: {
@@ -137,6 +160,7 @@ const jobSchema = new Schema(
     scheduledFor: Date,
     availabilityWindow: availabilityWindowSchema,
     location: { type: locationSchema, required: true },
+    driver: driverSchema,
     photos: { type: [String], default: [] },
     /** Structured proof / documents (images + PDF + office docs) */
     attachments: { type: [jobAttachmentSchema], default: [] },

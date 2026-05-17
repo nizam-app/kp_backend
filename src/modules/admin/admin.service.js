@@ -13,6 +13,7 @@ import { Vehicle } from "../vehicle/vehicle.model.js";
 import { SupportTicket } from "../supportTicket/supportTicket.model.js";
 import { JobLocationPing } from "../jobLocationPing/jobLocationPing.model.js";
 import { Notification } from "../notification/notification.model.js";
+import { createNotification } from "../notification/notification.service.js";
 import { Dispute } from "../dispute/dispute.model.js";
 import { ServiceCatalog } from "../serviceCatalog/serviceCatalog.model.js";
 import { Promotion } from "../promotion/promotion.model.js";
@@ -1236,13 +1237,13 @@ export const sendAdminUserMessage = async (userId, payload = {}, adminUser) => {
     `${payload.title || ""}`.trim() ||
     `Message from ${getAdminActorLabel(adminUser)}`;
 
-  const notification = await Notification.create({
+  const notification = await createNotification({
     user: user._id,
     type: "ADMIN_DIRECT_MESSAGE",
     title,
     body,
     data: {
-      fromAdminId: adminUser?._id || null,
+      fromAdminId: adminUser?._id ? String(adminUser._id) : "",
       fromAdminLabel: getAdminActorLabel(adminUser),
     },
     isRead: false,
@@ -1450,6 +1451,7 @@ export const createAdminFleetVehicle = async (fleetId, payload = {}, adminUser) 
     model: payload.model,
     year: payload.year,
     vin: payload.vin,
+    currentMileageKm: payload.currentMileageKm,
     isActive: payload.isActive ?? true,
   });
 
@@ -1484,7 +1486,7 @@ export const updateAdminFleetVehicle = async (
     vehicle.registration = registration;
   }
 
-  for (const field of ["type", "make", "model", "year", "vin", "isActive"]) {
+  for (const field of ["type", "make", "model", "year", "vin", "currentMileageKm", "isActive"]) {
     if (payload[field] !== undefined) vehicle[field] = payload[field];
   }
 
@@ -2536,3 +2538,4 @@ export const updateUserStatus = async (userId, payload = {}) => {
     updatedAt: user.updatedAt,
   };
 };
+

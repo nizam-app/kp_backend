@@ -21,9 +21,20 @@ export const submitQuoteController = async (req, res) => {
 
 export const listJobQuotesController = async (req, res) => {
   const quotes = await listJobQuotes(req.params.jobId, req.user);
+  const hasNewShape =
+    !quotes.length ||
+    quotes.some(
+      (q) =>
+        Object.hasOwn(q, "distanceKm") &&
+        q.mechanic &&
+        Object.hasOwn(q.mechanic, "profilePhotoUrl")
+    );
   return sendResponse(res, {
     message: "Quotes fetched",
     data: quotes,
+    meta: {
+      quotesFormatV2: hasNewShape,
+    },
   });
 };
 

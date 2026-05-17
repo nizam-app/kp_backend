@@ -1,0 +1,5535 @@
+{
+  "info": {
+    "name": "TruckFix — kp_backend REST v1 (Fleet + Mechanic prototype mapping)",
+    "description": "Maps `kp_backend` `/api/v1` routes to the interactive prototype tabs in `FleetApp.tsx` / `MechanicApp.tsx`.\n\n**Seed data** (run `npm run seed:fake` in `kp_backend/`): fleet `fleet@truckfix.dev`, mechanic `mechanic@truckfix.dev`, password `Password123!`. Seeded jobCodes include `TF-8819` (posted + quotes), `TF-8821` (en route), `TF-8823` (awaiting approval).\n\n**Auth**: API returns `{ status, message, data }` — tokens live under `data.accessToken` / `data.refreshToken`.\n\n**Realtime**: job + chat events are Socket.IO (not represented as REST here).\n\n**Admin / Company** endpoints are included as a separate folder with template bodies (not tied to the Fleet/Mechanic prototype nav).\n\n**Variables**: Import `TruckFix.local.postman_environment.json` and **select that environment** in the Postman top-right picker (recommended).\nIf you leave **No environment**, use **collection variables** (collection → Variables): `baseUrl`, emails, password, and token/job ids after running the auth folder.\n\n**API origin** baked into each request URL: `http://192.168.10.251:6000` (see `DEFAULT_BASE_URL` in `postman/build-truckfix-collection.mjs`). Change it there and run `node postman/build-truckfix-collection.mjs` to regenerate.\n\n**Why the URL bar looked empty before**: requests used only `{{baseUrl}}` in `raw` without a selected environment; some Postman versions show a blank bar until variables resolve.\n\nLogin requests store tokens in **both** the active environment and **collection variables**.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://192.168.10.251:6000"
+    },
+    {
+      "key": "fleetEmail",
+      "value": "fleet@truckfix.dev"
+    },
+    {
+      "key": "mechanicEmail",
+      "value": "mechanic@truckfix.dev"
+    },
+    {
+      "key": "password",
+      "value": "Password123!"
+    },
+    {
+      "key": "fleetAccessToken",
+      "value": ""
+    },
+    {
+      "key": "fleetRefreshToken",
+      "value": ""
+    },
+    {
+      "key": "mechanicAccessToken",
+      "value": ""
+    },
+    {
+      "key": "mechanicRefreshToken",
+      "value": ""
+    },
+    {
+      "key": "jobCodePosted",
+      "value": "TF-8819"
+    },
+    {
+      "key": "jobCodeEnRoute",
+      "value": "TF-8821"
+    },
+    {
+      "key": "jobCodeAwaitingApproval",
+      "value": "TF-8823"
+    },
+    {
+      "key": "jobIdPosted",
+      "value": ""
+    },
+    {
+      "key": "jobIdEnRoute",
+      "value": ""
+    },
+    {
+      "key": "jobIdAwaitingApproval",
+      "value": ""
+    },
+    {
+      "key": "quoteIdWaiting145",
+      "value": ""
+    },
+    {
+      "key": "stripePmId",
+      "value": "pm_card_visa"
+    },
+    {
+      "key": "fleetStripePaymentMethodDbId",
+      "value": ""
+    }
+  ],
+  "auth": {
+    "type": "noauth"
+  },
+  "item": [
+    {
+      "name": "00 — Auth + seed context",
+      "item": [
+        {
+          "name": "POST /auth/login (Fleet seed)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "auth": {
+              "type": "noauth"
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{fleetEmail}}\",\n  \"password\": \"{{password}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "http://192.168.10.251:6000/api/v1/auth/login",
+              "protocol": "http",
+              "host": [
+                "192",
+                "168",
+                "10",
+                "251"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "login"
+              ],
+              "port": "6000"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "function setEnvAndCollection(key, val) {",
+                  "  if (val === undefined || val === null || val === '') return;",
+                  "  try { pm.environment.set(key, val); } catch (e) {}",
+                  "  try { pm.collectionVariables.set(key, val); } catch (e) {}",
+                  "}",
+                  "const j = pm.response.json();",
+                  "const d = j && j.data ? j.data : j;",
+                  "if (d && d.accessToken) setEnvAndCollection(\"fleetAccessToken\", d.accessToken);",
+                  "if (d && d.refreshToken) setEnvAndCollection(\"fleetRefreshToken\", d.refreshToken);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /auth/login (Mechanic seed — James)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "auth": {
+              "type": "noauth"
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{mechanicEmail}}\",\n  \"password\": \"{{password}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "http://192.168.10.251:6000/api/v1/auth/login",
+              "protocol": "http",
+              "host": [
+                "192",
+                "168",
+                "10",
+                "251"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "login"
+              ],
+              "port": "6000"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "function setEnvAndCollection(key, val) {",
+                  "  if (val === undefined || val === null || val === '') return;",
+                  "  try { pm.environment.set(key, val); } catch (e) {}",
+                  "  try { pm.collectionVariables.set(key, val); } catch (e) {}",
+                  "}",
+                  "const j = pm.response.json();",
+                  "const d = j && j.data ? j.data : j;",
+                  "if (d && d.accessToken) setEnvAndCollection(\"mechanicAccessToken\", d.accessToken);",
+                  "if (d && d.refreshToken) setEnvAndCollection(\"mechanicRefreshToken\", d.refreshToken);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /jobs (Fleet) — resolve job ObjectIds from seeded jobCodes",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{fleetAccessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Runs after Fleet login. Saves `jobIdPosted`, `jobIdEnRoute`, `jobIdAwaitingApproval` based on `jobCode*` env vars.",
+            "url": {
+              "raw": "http://192.168.10.251:6000/api/v1/jobs?page=1&limit=50",
+              "protocol": "http",
+              "host": [
+                "192",
+                "168",
+                "10",
+                "251"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "jobs"
+              ],
+              "port": "6000",
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "50"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "function setEnvAndCollection(key, val) {",
+                  "  if (val === undefined || val === null || val === '') return;",
+                  "  try { pm.environment.set(key, val); } catch (e) {}",
+                  "  try { pm.collectionVariables.set(key, val); } catch (e) {}",
+                  "}",
+                  "function getVar(key) {",
+                  "  var v = pm.environment.get(key);",
+                  "  if (v) return v;",
+                  "  try { v = pm.collectionVariables.get(key); } catch (e) {}",
+                  "  return v;",
+                  "}",
+                  "const j = pm.response.json();",
+                  "const jobs = (j && j.data) || [];",
+                  "function matchesCode(job, code){",
+                  "  const c = `${code || ''}`.trim();",
+                  "  if (!c) return false;",
+                  "  if (`${job.jobCode || ''}` === c) return true;",
+                  "  if (`${job.id || ''}` === c) return true;",
+                  "  if (job._id && (`${job._id}` === c)) return true;",
+                  "  return false;",
+                  "}",
+                  "function setId(code, envKey){",
+                  "  const hit = jobs.find(x => matchesCode(x, code));",
+                  "  if (hit && hit._id) setEnvAndCollection(envKey, hit._id);",
+                  "}",
+                  "setId(getVar(\"jobCodePosted\"), \"jobIdPosted\");",
+                  "setId(getVar(\"jobCodeEnRoute\"), \"jobIdEnRoute\");",
+                  "setId(getVar(\"jobCodeAwaitingApproval\"), \"jobIdAwaitingApproval\");"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /jobs/:jobId/quotes (Fleet) — resolve James £145 quote _id on TF-8819",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{fleetAccessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Saves `quoteIdWaiting145` for Accept/Decline demos.",
+            "url": {
+              "raw": "http://192.168.10.251:6000/api/v1/jobs/{{jobIdPosted}}/quotes",
+              "protocol": "http",
+              "host": [
+                "192",
+                "168",
+                "10",
+                "251"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "jobs",
+                "{{jobIdPosted}}",
+                "quotes"
+              ],
+              "port": "6000"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "function setEnvAndCollection(key, val) {",
+                  "  if (val === undefined || val === null || val === '') return;",
+                  "  try { pm.environment.set(key, val); } catch (e) {}",
+                  "  try { pm.collectionVariables.set(key, val); } catch (e) {}",
+                  "}",
+                  "const j = pm.response.json();",
+                  "const quotes = (j && j.data) || [];",
+                  "const hit = quotes.find(q => Number(q.amount) === 145 && `${q.status}`.toUpperCase() === 'WAITING');",
+                  "if (hit && hit._id) setEnvAndCollection('quoteIdWaiting145', hit._id);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /auth/refresh-token",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "auth": {
+              "type": "noauth"
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refreshToken\": \"{{fleetRefreshToken}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "http://192.168.10.251:6000/api/v1/auth/refresh-token",
+              "protocol": "http",
+              "host": [
+                "192",
+                "168",
+                "10",
+                "251"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "refresh-token"
+              ],
+              "port": "6000"
+            }
+          }
+        },
+        {
+          "name": "POST /auth/logout (Fleet)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{fleetAccessToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refreshToken\": \"{{fleetRefreshToken}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "http://192.168.10.251:6000/api/v1/auth/logout",
+              "protocol": "http",
+              "host": [
+                "192",
+                "168",
+                "10",
+                "251"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "logout"
+              ],
+              "port": "6000"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Fleet prototype — by screen/tab",
+      "item": [
+        {
+          "name": "fleet-dashboard — Dashboard",
+          "item": [
+            {
+              "name": "GET /fleet/dashboard",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/fleet/dashboard",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "fleet",
+                    "dashboard"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "GET /jobs?tab=active",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/jobs?tab=active&page=1&limit=20",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "jobs"
+                  ],
+                  "port": "6000",
+                  "query": [
+                    {
+                      "key": "tab",
+                      "value": "active"
+                    },
+                    {
+                      "key": "page",
+                      "value": "1"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "20"
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "name": "GET /jobs?tab=completed",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/jobs?tab=completed&page=1&limit=20",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "jobs"
+                  ],
+                  "port": "6000",
+                  "query": [
+                    {
+                      "key": "tab",
+                      "value": "completed"
+                    },
+                    {
+                      "key": "page",
+                      "value": "1"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "20"
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "name": "GET /notifications",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/notifications?page=1&limit=20",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "notifications"
+                  ],
+                  "port": "6000",
+                  "query": [
+                    {
+                      "key": "page",
+                      "value": "1"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "20"
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "name": "GET /chat/threads",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/chat/threads",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "chat",
+                    "threads"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "GET /invoices",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/invoices?page=1&limit=20",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "invoices"
+                  ],
+                  "port": "6000",
+                  "query": [
+                    {
+                      "key": "page",
+                      "value": "1"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "20"
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "fleet-post-job — Post Job",
+          "item": [
+            {
+              "name": "GET /users/me (check profile gate)",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/users/me",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "users",
+                    "me"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "GET /fleet/vehicles (pick vehicleId)",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/fleet/vehicles",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "fleet",
+                    "vehicles"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "POST /jobs (create — uses Birmingham-ish coords like seed TF-8819)",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"title\": \"Tyre damage — off-ramp\",\n  \"description\": \"Off-ramp debris damage — need roadside assessment.\",\n  \"driverName\": \"Alex Driver\",\n  \"driverPhone\": \"+27 82 000 0000\",\n  \"issueType\": \"TYRES\",\n  \"issueSubtype\": \"FLAT_DAMAGED_TYRE\",\n  \"tyreDetails\": {\n    \"size\": \"295/80 R22.5\",\n    \"side\": \"NEAR_SIDE\",\n    \"axlePosition\": \"Drive 1\"\n  },\n  \"urgency\": \"HIGH\",\n  \"mode\": \"EMERGENCY\",\n  \"vehicleId\": \"REPLACE_WITH_VEHICLE_OBJECT_ID\",\n  \"registration\": \"CA 456-789\",\n  \"vehicleType\": \"Tautliner\",\n  \"vehicleMake\": \"DAF\",\n  \"vehicleModel\": \"XF\",\n  \"estimatedPayout\": 120,\n  \"location\": {\n    \"coordinates\": [\n      -1.8904,\n      52.4862\n    ],\n    \"address\": \"M6 Motorway, Corley Services, Warwickshire\"\n  }\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/jobs",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "jobs"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "POST /jobs/:jobId/photos (remote URL passthrough)",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"photos\": [\n    {\n      \"url\": \"https://images.unsplash.com/photo-1580273916550-e323be2ae537?w=1200\"\n    }\n  ]\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/jobs/{{jobIdPosted}}/photos",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "jobs",
+                    "{{jobIdPosted}}",
+                    "photos"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "PATCH /jobs/:jobId/photos/remove",
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"photoUrl\": \"PASTE_URL_FROM_JOB.photos_ARRAY\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/jobs/{{jobIdPosted}}/photos/remove",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "jobs",
+                    "{{jobIdPosted}}",
+                    "photos",
+                    "remove"
+                  ],
+                  "port": "6000"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "fleet-tracking — Tracking",
+          "item": [
+            {
+              "name": "GET /jobs?tab=tracking",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/jobs?tab=tracking&page=1&limit=20",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "jobs"
+                  ],
+                  "port": "6000",
+                  "query": [
+                    {
+                      "key": "tab",
+                      "value": "tracking"
+                    },
+                    {
+                      "key": "page",
+                      "value": "1"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "20"
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "name": "GET /jobs/:jobId (TF-8821 en route)",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/jobs/{{jobIdEnRoute}}",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "jobs",
+                    "{{jobIdEnRoute}}"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "GET /jobs/:jobId/timeline",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/jobs/{{jobIdEnRoute}}/timeline",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "jobs",
+                    "{{jobIdEnRoute}}",
+                    "timeline"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "GET /jobs/:jobId/cancellation-preview (TF-8821)",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/jobs/{{jobIdEnRoute}}/cancellation-preview",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "jobs",
+                    "{{jobIdEnRoute}}",
+                    "cancellation-preview"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "PATCH /jobs/:jobId/cancel (destructive — optional)",
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"reason\": \"Posted job cancelled from Postman test\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/jobs/{{jobIdPosted}}/cancel",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "jobs",
+                    "{{jobIdPosted}}",
+                    "cancel"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "GET /chat/jobs/:jobId/messages",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/chat/jobs/{{jobIdEnRoute}}/messages",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "chat",
+                    "jobs",
+                    "{{jobIdEnRoute}}",
+                    "messages"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "POST /chat/jobs/:jobId/messages",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"text\": \"Fleet: how far out are you?\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/chat/jobs/{{jobIdEnRoute}}/messages",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "chat",
+                    "jobs",
+                    "{{jobIdEnRoute}}",
+                    "messages"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "PATCH /chat/jobs/:jobId/read",
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/chat/jobs/{{jobIdEnRoute}}/read",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "chat",
+                    "jobs",
+                    "{{jobIdEnRoute}}",
+                    "read"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "PATCH /notifications/:id/read",
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/notifications/REPLACE_NOTIFICATION_ID/read",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "notifications",
+                    "REPLACE_NOTIFICATION_ID",
+                    "read"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "POST /notifications/device-tokens",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"token\": \"fcm-or-apns-device-token-string\",\n  \"platform\": \"ANDROID\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/notifications/device-tokens",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "notifications",
+                    "device-tokens"
+                  ],
+                  "port": "6000"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "fleet-quote-received — New Quote",
+          "item": [
+            {
+              "name": "GET /jobs/:jobId/quotes (TF-8819)",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/jobs/{{jobIdPosted}}/quotes",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "jobs",
+                    "{{jobIdPosted}}",
+                    "quotes"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "PATCH /quotes/:quoteId/accept (James £145) [destructive]",
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/quotes/{{quoteIdWaiting145}}/accept",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "quotes",
+                    "{{quoteIdWaiting145}}",
+                    "accept"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "PATCH /quotes/:quoteId/decline (pick another quoteId) [destructive]",
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/quotes/REPLACE_QUOTE_ID/decline",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "quotes",
+                    "REPLACE_QUOTE_ID",
+                    "decline"
+                  ],
+                  "port": "6000"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "fleet-profile — Profile + admin sheets",
+          "item": [
+            {
+              "name": "GET /users/me",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/users/me",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "users",
+                    "me"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "PATCH /users/me/preferences",
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"notifications\": {\n    \"push\": true,\n    \"email\": true\n  }\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/users/me/preferences",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "users",
+                    "me",
+                    "preferences"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "PATCH /users/me/terms",
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"accepted\": true\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/users/me/terms",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "users",
+                    "me",
+                    "terms"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "GET /support/tickets",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/support/tickets",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "support",
+                    "tickets"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "POST /support/tickets",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"subject\": \"Billing question\",\n  \"category\": \"BILLING\",\n  \"message\": \"Need help understanding an invoice line.\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/support/tickets",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "support",
+                    "tickets"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "GET /fleet/reviews",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/fleet/reviews",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "fleet",
+                    "reviews"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "GET /fleet/disputes",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/fleet/disputes",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "fleet",
+                    "disputes"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "POST /fleet/reviews [needs completed job context in real flows]",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"jobId\": \"{{jobIdEnRoute}}\",\n  \"rating\": 5,\n  \"comment\": \"Great service (example body — may fail if job not completed)\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/fleet/reviews",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "fleet",
+                    "reviews"
+                  ],
+                  "port": "6000"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "fleet-edit-profile — Edit Profile",
+          "item": [
+            {
+              "name": "PATCH /users/me",
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"contactName\": \"John Khumalo\",\n  \"phone\": \"+44 7712 345 678\",\n  \"billingAddress\": \"123 Logistics Ave, JHB\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/users/me",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "users",
+                    "me"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "POST /media/profile-image (multipart)",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "multipart/form-data",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "In Postman set Body → form-data → key `file` (type File). This export can't embed binary; attach any small JPG/PNG.",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/media/profile-image",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "media",
+                    "profile-image"
+                  ],
+                  "port": "6000"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "fleet-profile → payment-methods sheet",
+          "item": [
+            {
+              "name": "GET /billing/stripe/config",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/billing/stripe/config",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "billing",
+                    "stripe",
+                    "config"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "POST /billing/stripe/setup-intent",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "Creates a Stripe SetupIntent for the Fleet user. Use the returned publishableKey/clientSecret in a frontend to create a real Stripe PaymentMethod (pm_...).",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/billing/stripe/setup-intent",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "billing",
+                    "stripe",
+                    "setup-intent"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "POST /billing/stripe/payment-methods/attach (Stripe pm_... → save DB paymentMethodId)",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "Attach a Stripe PaymentMethod (pm_...) to the Fleet's Stripe customer, then store it in MongoDB as a PaymentMethod record.\n\nSet `stripePmId` (collection/environment variable) to your Stripe PaymentMethod id.\nThis request saves the created PaymentMethod `_id` into `fleetStripePaymentMethodDbId` for later use in approve-completion.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"paymentMethodId\": \"{{stripePmId}}\",\n  \"isDefault\": true\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/billing/stripe/payment-methods/attach",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "billing",
+                    "stripe",
+                    "payment-methods",
+                    "attach"
+                  ],
+                  "port": "6000"
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "exec": [
+                      "function setEnvAndCollection(key, val) {",
+                      "  if (val === undefined || val === null || val === '') return;",
+                      "  try { pm.environment.set(key, val); } catch (e) {}",
+                      "  try { pm.collectionVariables.set(key, val); } catch (e) {}",
+                      "}",
+                      "const j = pm.response.json();",
+                      "const d = j && j.data ? j.data : j;",
+                      "if (d && d._id) setEnvAndCollection(\"fleetStripePaymentMethodDbId\", d._id);"
+                    ],
+                    "type": "text/javascript"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "GET /billing/payment-methods",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/billing/payment-methods",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "billing",
+                    "payment-methods"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "POST /billing/payment-methods (manual/test provider ids)",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"methodType\": \"CARD\",\n  \"provider\": \"MANUAL\",\n  \"providerMethodId\": \"pm_manual_fleet_demo_001\",\n  \"card\": {\n    \"brand\": \"visa\",\n    \"last4\": \"4242\",\n    \"expMonth\": 12,\n    \"expYear\": 2030\n  }\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/billing/payment-methods",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "billing",
+                    "payment-methods"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "PATCH /billing/payment-methods/:methodId/default",
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/billing/payment-methods/REPLACE_METHOD_ID/default",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "billing",
+                    "payment-methods",
+                    "REPLACE_METHOD_ID",
+                    "default"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "DELETE /billing/payment-methods/:methodId",
+              "request": {
+                "method": "DELETE",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/billing/payment-methods/REPLACE_METHOD_ID",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "billing",
+                    "payment-methods",
+                    "REPLACE_METHOD_ID"
+                  ],
+                  "port": "6000"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "fleet-profile → vehicles sheet",
+          "item": [
+            {
+              "name": "GET /fleet/vehicles",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/fleet/vehicles",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "fleet",
+                    "vehicles"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "POST /fleet/vehicles",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"registration\": \"TEST 001-AA\",\n  \"type\": \"Rigid Truck\",\n  \"make\": \"Scania\",\n  \"model\": \"R450\",\n  \"year\": 2022,\n  \"vin\": \"TESTVIN00000000001\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/fleet/vehicles",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "fleet",
+                    "vehicles"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "PATCH /fleet/vehicles/:vehicleId",
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"year\": 2023\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/fleet/vehicles/REPLACE_VEHICLE_ID",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "fleet",
+                    "vehicles",
+                    "REPLACE_VEHICLE_ID"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "DELETE /fleet/vehicles/:vehicleId [destructive]",
+              "request": {
+                "method": "DELETE",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/fleet/vehicles/REPLACE_VEHICLE_ID",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "fleet",
+                    "vehicles",
+                    "REPLACE_VEHICLE_ID"
+                  ],
+                  "port": "6000"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "fleet-tracking-detail — Tracking detail + invoice download",
+          "item": [
+            {
+              "name": "GET /jobs/:jobId (TF-8823 awaiting approval)",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/jobs/{{jobIdAwaitingApproval}}",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "jobs",
+                    "{{jobIdAwaitingApproval}}"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "GET /jobs/:jobId/timeline",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/jobs/{{jobIdAwaitingApproval}}/timeline",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "jobs",
+                    "{{jobIdAwaitingApproval}}",
+                    "timeline"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "PATCH /jobs/:jobId/complete/approve (Stripe) [destructive]",
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"paymentMethodId\": \"{{fleetStripePaymentMethodDbId}}\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/jobs/{{jobIdAwaitingApproval}}/complete/approve",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "jobs",
+                    "{{jobIdAwaitingApproval}}",
+                    "complete",
+                    "approve"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "GET /invoices",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/invoices?page=1&limit=20",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "invoices"
+                  ],
+                  "port": "6000",
+                  "query": [
+                    {
+                      "key": "page",
+                      "value": "1"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "20"
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "name": "GET /invoices/:invoiceId",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/invoices/REPLACE_INVOICE_ID",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "invoices",
+                    "REPLACE_INVOICE_ID"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "GET /invoices/:invoiceId/download",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{fleetAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/invoices/REPLACE_INVOICE_ID/download",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "invoices",
+                    "REPLACE_INVOICE_ID",
+                    "download"
+                  ],
+                  "port": "6000"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Mechanic prototype — by screen/tab",
+      "item": [
+        {
+          "name": "mechanic-feed — Job Feed",
+          "item": [
+            {
+              "name": "PATCH /users/me/availability (online/offline)",
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"availability\": \"ONLINE\",\n  \"lastKnownLocation\": {\n    \"coordinates\": [\n      -2.2426,\n      53.4808\n    ]\n  }\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/users/me/availability",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "users",
+                    "me",
+                    "availability"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "GET /jobs?feed=true (Manchester coords, 15mi — matches seed TF-8821 area)",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/jobs?feed=true&lat=53.4808&lng=-2.2426&radiusMiles=15&page=1&limit=20",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "jobs"
+                  ],
+                  "port": "6000",
+                  "query": [
+                    {
+                      "key": "feed",
+                      "value": "true"
+                    },
+                    {
+                      "key": "lat",
+                      "value": "53.4808"
+                    },
+                    {
+                      "key": "lng",
+                      "value": "-2.2426"
+                    },
+                    {
+                      "key": "radiusMiles",
+                      "value": "15"
+                    },
+                    {
+                      "key": "page",
+                      "value": "1"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "20"
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "name": "POST /jobs/:jobId/quotes (quote TF-8819) [may 409 if duplicate]",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"amount\": 139,\n  \"notes\": \"Postman test quote\",\n  \"etaMinutes\": 14,\n  \"availabilityType\": \"NOW\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/jobs/{{jobIdPosted}}/quotes",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "jobs",
+                    "{{jobIdPosted}}",
+                    "quotes"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "GET /feed-presets",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/feed-presets",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "feed-presets"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "POST /feed-presets",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"name\": \"Motorway bursts\",\n  \"radiusMiles\": 15,\n  \"issueTypes\": [\n    \"ENGINE\",\n    \"TYRES\"\n  ]\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/feed-presets",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "feed-presets"
+                  ],
+                  "port": "6000"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "mechanic-quote-detail — Quote Detail",
+          "item": [
+            {
+              "name": "GET /quotes/:quoteId",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/quotes/REPLACE_QUOTE_ID",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "quotes",
+                    "REPLACE_QUOTE_ID"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "PATCH /quotes/:quoteId/amend",
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"amount\": 141,\n  \"notes\": \"Adjusted estimate\",\n  \"etaMinutes\": 15\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/quotes/REPLACE_QUOTE_ID/amend",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "quotes",
+                    "REPLACE_QUOTE_ID",
+                    "amend"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "PATCH /quotes/:quoteId/withdraw",
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/quotes/REPLACE_QUOTE_ID/withdraw",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "quotes",
+                    "REPLACE_QUOTE_ID",
+                    "withdraw"
+                  ],
+                  "port": "6000"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "mechanic-my-quotes — My Quotes",
+          "item": [
+            {
+              "name": "GET /quotes/me",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/quotes/me?page=1&limit=20",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "quotes",
+                    "me"
+                  ],
+                  "port": "6000",
+                  "query": [
+                    {
+                      "key": "page",
+                      "value": "1"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "20"
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "mechanic-active-job — My Jobs",
+          "item": [
+            {
+              "name": "GET /jobs?tab=active",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/jobs?tab=active&page=1&limit=20",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "jobs"
+                  ],
+                  "port": "6000",
+                  "query": [
+                    {
+                      "key": "tab",
+                      "value": "active"
+                    },
+                    {
+                      "key": "page",
+                      "value": "1"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "20"
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "name": "GET /jobs (default mechanic assignments)",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/jobs?page=1&limit=20",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "jobs"
+                  ],
+                  "port": "6000",
+                  "query": [
+                    {
+                      "key": "page",
+                      "value": "1"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "20"
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "mechanic-job-tracker — Job Tracker",
+          "item": [
+            {
+              "name": "PATCH /jobs/:jobId/journey/start (TF-8821)",
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/jobs/{{jobIdEnRoute}}/journey/start",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "jobs",
+                    "{{jobIdEnRoute}}",
+                    "journey",
+                    "start"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "POST /jobs/:jobId/location-pings",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"lat\": 53.4808,\n  \"lng\": -2.2426,\n  \"etaMinutes\": 17,\n  \"heading\": 90,\n  \"speed\": 42\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/jobs/{{jobIdEnRoute}}/location-pings",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "jobs",
+                    "{{jobIdEnRoute}}",
+                    "location-pings"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "PATCH /jobs/:jobId/arrive",
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/jobs/{{jobIdEnRoute}}/arrive",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "jobs",
+                    "{{jobIdEnRoute}}",
+                    "arrive"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "PATCH /jobs/:jobId/work/start",
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/jobs/{{jobIdEnRoute}}/work/start",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "jobs",
+                    "{{jobIdEnRoute}}",
+                    "work",
+                    "start"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "PATCH /jobs/:jobId/work/complete (TF-8823)",
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"workSummary\": \"Brake system repair completed — test drive OK.\",\n  \"finalAmount\": 275\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/jobs/{{jobIdAwaitingApproval}}/work/complete",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "jobs",
+                    "{{jobIdAwaitingApproval}}",
+                    "work",
+                    "complete"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "POST /jobs/:jobId/attachments (manual items)",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"items\": [\n    {\n      \"category\": \"OTHER\",\n      \"fileType\": \"IMAGE\",\n      \"url\": \"https://images.unsplash.com/photo-1580273916550-e323be2ae537?w=1200\"\n    }\n  ]\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/jobs/{{jobIdEnRoute}}/attachments",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "jobs",
+                    "{{jobIdEnRoute}}",
+                    "attachments"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "DELETE /jobs/:jobId/attachments/:attachmentId",
+              "request": {
+                "method": "DELETE",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/jobs/{{jobIdEnRoute}}/attachments/REPLACE_ATTACHMENT_ID",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "jobs",
+                    "{{jobIdEnRoute}}",
+                    "attachments",
+                    "REPLACE_ATTACHMENT_ID"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "PATCH /jobs/:jobId/photos/remove",
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"photoUrl\": \"PASTE_URL_FROM_JOB.photos_ARRAY\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/jobs/{{jobIdEnRoute}}/photos/remove",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "jobs",
+                    "{{jobIdEnRoute}}",
+                    "photos",
+                    "remove"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "GET /chat/jobs/:jobId/messages",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/chat/jobs/{{jobIdEnRoute}}/messages",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "chat",
+                    "jobs",
+                    "{{jobIdEnRoute}}",
+                    "messages"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "POST /chat/jobs/:jobId/messages",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"text\": \"Mechanic: arriving shortly.\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/chat/jobs/{{jobIdEnRoute}}/messages",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "chat",
+                    "jobs",
+                    "{{jobIdEnRoute}}",
+                    "messages"
+                  ],
+                  "port": "6000"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "mechanic-profile — Profile",
+          "item": [
+            {
+              "name": "GET /users/me",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/users/me",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "users",
+                    "me"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "GET /billing/stripe/mechanic-payout-account",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/billing/stripe/mechanic-payout-account",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "billing",
+                    "stripe",
+                    "mechanic-payout-account"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "POST /billing/stripe/mechanic-payout-account/onboarding-link",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"refreshUrl\": \"{{baseUrl}}/onboarding/refresh\",\n  \"returnUrl\": \"{{baseUrl}}/onboarding/return\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/billing/stripe/mechanic-payout-account/onboarding-link",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "billing",
+                    "stripe",
+                    "mechanic-payout-account",
+                    "onboarding-link"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "POST /billing/stripe/mechanic-payout-account/dashboard-link",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/billing/stripe/mechanic-payout-account/dashboard-link",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "billing",
+                    "stripe",
+                    "mechanic-payout-account",
+                    "dashboard-link"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "GET /fleet/reviews/me",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/fleet/reviews/me",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "fleet",
+                    "reviews",
+                    "me"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "GET /fleet/disputes/me",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/fleet/disputes/me",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "fleet",
+                    "disputes",
+                    "me"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "GET /notifications",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/notifications?page=1&limit=20",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "notifications"
+                  ],
+                  "port": "6000",
+                  "query": [
+                    {
+                      "key": "page",
+                      "value": "1"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "20"
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "name": "GET /support/tickets",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/support/tickets",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "support",
+                    "tickets"
+                  ],
+                  "port": "6000"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "mechanic-edit-profile — Edit Profile",
+          "item": [
+            {
+              "name": "PATCH /users/me",
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"displayName\": \"James Mitchell\",\n  \"hourlyRate\": 76,\n  \"callOutFee\": 35,\n  \"serviceRadiusMiles\": 25,\n  \"basePostcode\": \"M1 1AE\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/users/me",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "users",
+                    "me"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "POST /media/profile-image (multipart)",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "multipart/form-data",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "Set Body → form-data → `file` in Postman.",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/media/profile-image",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "media",
+                    "profile-image"
+                  ],
+                  "port": "6000"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "mechanic-earnings — Earnings",
+          "item": [
+            {
+              "name": "GET /earnings/summary",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/earnings/summary",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "earnings",
+                    "summary"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "GET /earnings/payout-info",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/earnings/payout-info",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "earnings",
+                    "payout-info"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "GET /earnings/statement",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/earnings/statement",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "earnings",
+                    "statement"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "GET /earnings/jobs",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/earnings/jobs?page=1&limit=20",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "earnings",
+                    "jobs"
+                  ],
+                  "port": "6000",
+                  "query": [
+                    {
+                      "key": "page",
+                      "value": "1"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "20"
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "name": "GET /invoices (mechanic sees assigned invoices per backend rules)",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/invoices?page=1&limit=20",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "invoices"
+                  ],
+                  "port": "6000",
+                  "query": [
+                    {
+                      "key": "page",
+                      "value": "1"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "20"
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "mechanic-profile → payment-methods sheet",
+          "item": [
+            {
+              "name": "GET /billing/payment-methods",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/billing/payment-methods",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "billing",
+                    "payment-methods"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "POST /billing/payment-methods (manual/test)",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{mechanicAccessToken}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"methodType\": \"CARD\",\n  \"provider\": \"MANUAL\",\n  \"providerMethodId\": \"pm_manual_mech_demo_001\",\n  \"card\": {\n    \"brand\": \"visa\",\n    \"last4\": \"4242\",\n    \"expMonth\": 12,\n    \"expYear\": 2030\n  }\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/billing/payment-methods",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "billing",
+                    "payment-methods"
+                  ],
+                  "port": "6000"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "99 — Remaining /api/v1 surface (templates)",
+      "item": [
+        {
+          "name": "POST /billing/stripe/webhook (raw Stripe payload — not typical Postman)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "auth": {
+              "type": "noauth"
+            },
+            "description": "Requires Stripe signature + raw body; leave as documentation only.",
+            "url": {
+              "raw": "http://192.168.10.251:6000/api/v1/billing/stripe/webhook",
+              "protocol": "http",
+              "host": [
+                "192",
+                "168",
+                "10",
+                "251"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "billing",
+                "stripe",
+                "webhook"
+              ],
+              "port": "6000"
+            }
+          }
+        },
+        {
+          "name": "POST /auth/register (Fleet template)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "auth": {
+              "type": "noauth"
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"new-fleet@example.com\",\n  \"password\": \"Password123!\",\n  \"role\": \"FLEET\",\n  \"confirmPassword\": \"Password123!\",\n  \"companyName\": \"Example Logistics Ltd\",\n  \"contactName\": \"Jane Doe\",\n  \"phone\": \"+44 7700 900000\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "http://192.168.10.251:6000/api/v1/auth/register",
+              "protocol": "http",
+              "host": [
+                "192",
+                "168",
+                "10",
+                "251"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "register"
+              ],
+              "port": "6000"
+            }
+          }
+        },
+        {
+          "name": "POST /auth/register (Mechanic template)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "auth": {
+              "type": "noauth"
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"new-mech@example.com\",\n  \"password\": \"Password123!\",\n  \"role\": \"MECHANIC\",\n  \"confirmPassword\": \"Password123!\",\n  \"displayName\": \"New Mechanic\",\n  \"businessName\": \"Roadside Ltd\",\n  \"phone\": \"+44 7700 900001\",\n  \"baseLocationText\": \"Manchester\",\n  \"basePostcode\": \"M1 1AE\",\n  \"hourlyRate\": 70,\n  \"callOutFee\": 35,\n  \"serviceRadiusMiles\": 25\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "http://192.168.10.251:6000/api/v1/auth/register",
+              "protocol": "http",
+              "host": [
+                "192",
+                "168",
+                "10",
+                "251"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "register"
+              ],
+              "port": "6000"
+            }
+          }
+        },
+        {
+          "name": "Company router (/company/*)",
+          "item": [
+            {
+              "name": "GET /company/dashboard",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "REPLACE_COMPANY_TOKEN",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/company/dashboard",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "company",
+                    "dashboard"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "GET /company/feed?lat=53.4808&lng=-2.2426",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "REPLACE_COMPANY_TOKEN",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/company/feed?lat=53.4808&lng=-2.2426&radiusMiles=25&page=1&limit=20",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "company",
+                    "feed"
+                  ],
+                  "port": "6000",
+                  "query": [
+                    {
+                      "key": "lat",
+                      "value": "53.4808"
+                    },
+                    {
+                      "key": "lng",
+                      "value": "-2.2426"
+                    },
+                    {
+                      "key": "radiusMiles",
+                      "value": "25"
+                    },
+                    {
+                      "key": "page",
+                      "value": "1"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "20"
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "name": "GET /company/jobs",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "REPLACE_COMPANY_TOKEN",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/company/jobs?page=1&limit=20",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "company",
+                    "jobs"
+                  ],
+                  "port": "6000",
+                  "query": [
+                    {
+                      "key": "page",
+                      "value": "1"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "20"
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "name": "GET /company/jobs/:jobId",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "REPLACE_COMPANY_TOKEN",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/company/jobs/REPLACE_JOB_ID",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "company",
+                    "jobs",
+                    "REPLACE_JOB_ID"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "POST /company/jobs/:jobId/assign",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "REPLACE_COMPANY_TOKEN",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"mechanicId\": \"REPLACE_MECHANIC_USER_ID\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/company/jobs/REPLACE_JOB_ID/assign",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "company",
+                    "jobs",
+                    "REPLACE_JOB_ID",
+                    "assign"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "GET /company/team",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "REPLACE_COMPANY_TOKEN",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/company/team",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "company",
+                    "team"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "POST /company/team/invitations",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "REPLACE_COMPANY_TOKEN",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"email\": \"employee@example.com\",\n  \"role\": \"MECHANIC_EMPLOYEE\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/company/team/invitations",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "company",
+                    "team",
+                    "invitations"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "DELETE /company/team/invitations/:inviteId",
+              "request": {
+                "method": "DELETE",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "REPLACE_COMPANY_TOKEN",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/company/team/invitations/REPLACE_INVITE_ID",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "company",
+                    "team",
+                    "invitations",
+                    "REPLACE_INVITE_ID"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "GET /company/earnings/summary",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "REPLACE_COMPANY_TOKEN",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/company/earnings/summary",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "company",
+                    "earnings",
+                    "summary"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "GET /company/earnings/jobs",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "REPLACE_COMPANY_TOKEN",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/company/earnings/jobs?page=1&limit=20",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "company",
+                    "earnings",
+                    "jobs"
+                  ],
+                  "port": "6000",
+                  "query": [
+                    {
+                      "key": "page",
+                      "value": "1"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "20"
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "Admin router (/admin/*) — template stubs",
+          "item": [
+            {
+              "name": "GET /admin/dashboard",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "REPLACE_ADMIN_TOKEN",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/admin/dashboard",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "admin",
+                    "dashboard"
+                  ],
+                  "port": "6000"
+                }
+              }
+            },
+            {
+              "name": "GET /admin/users",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "REPLACE_ADMIN_TOKEN",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/admin/users?page=1&limit=20",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "admin",
+                    "users"
+                  ],
+                  "port": "6000",
+                  "query": [
+                    {
+                      "key": "page",
+                      "value": "1"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "20"
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "name": "POST /admin/users",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Accept",
+                    "value": "application/json",
+                    "type": "text"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "REPLACE_ADMIN_TOKEN",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "description": "",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"email\": \"admin-created@example.com\",\n  \"role\": \"FLEET\",\n  \"password\": \"Password123!\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "http://192.168.10.251:6000/api/v1/admin/users",
+                  "protocol": "http",
+                  "host": [
+                    "192",
+                    "168",
+                    "10",
+                    "251"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "admin",
+                    "users"
+                  ],
+                  "port": "6000"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

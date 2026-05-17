@@ -14,7 +14,8 @@ const chatMessageSchema = new Schema(
   {
     job: { type: Schema.Types.ObjectId, ref: "Job", required: true, index: true },
     sender: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
-    text: { type: String, required: true, trim: true },
+    /** May be empty when `attachments` carries the payload (image-only messages). */
+    text: { type: String, default: "", trim: true },
     attachments: {
       type: [String],
       default: [],

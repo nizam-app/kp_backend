@@ -3,6 +3,8 @@ import AppError from "../../utils/AppError.js";
 import { cloudinary, isCloudinaryConfigured, initCloudinary } from "../../config/cloudinary.js";
 
 const PROFILE_FOLDER = "truckfix/profiles";
+const JOB_PHOTOS_FOLDER = "truckfix/jobs/photos";
+const JOB_CHAT_FOLDER = "truckfix/jobs/chat";
 
 const ensureConfig = () => {
   initCloudinary();
@@ -28,6 +30,90 @@ export const uploadProfileImageBuffer = async (buffer, mimetype) => {
     const stream = cloudinary.uploader.upload_stream(
       {
         folder: PROFILE_FOLDER,
+        resource_type: "image",
+        allowed_formats: ["jpg", "png", "webp", "gif", "heic"],
+        use_filename: false,
+        unique_filename: true,
+      },
+      (err, result) => {
+        if (err) {
+          reject(new AppError(err.message || "Cloudinary upload failed", 502));
+          return;
+        }
+        if (!result?.secure_url) {
+          reject(new AppError("No URL returned from Cloudinary", 502));
+          return;
+        }
+        resolve({
+          url: result.secure_url,
+          publicId: result.public_id,
+          width: result.width,
+          height: result.height,
+          format: result.format,
+          mimetype: mimetype || null,
+        });
+      }
+    );
+    Readable.from(buffer).pipe(stream);
+  });
+};
+
+/**
+ * Upload a job chat image to Cloudinary (same rules as job photos).
+ * @returns {Promise<{ url: string, publicId: string, width: number, height: number, format?: string, mimetype?: string | null }>}
+ */
+export const uploadChatAttachmentBuffer = async (buffer, mimetype) => {
+  ensureConfig();
+  if (!Buffer.isBuffer(buffer) || !buffer.length) {
+    throw new AppError("Empty file", 400);
+  }
+
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      {
+        folder: JOB_CHAT_FOLDER,
+        resource_type: "image",
+        allowed_formats: ["jpg", "png", "webp", "gif", "heic"],
+        use_filename: false,
+        unique_filename: true,
+      },
+      (err, result) => {
+        if (err) {
+          reject(new AppError(err.message || "Cloudinary upload failed", 502));
+          return;
+        }
+        if (!result?.secure_url) {
+          reject(new AppError("No URL returned from Cloudinary", 502));
+          return;
+        }
+        resolve({
+          url: result.secure_url,
+          publicId: result.public_id,
+          width: result.width,
+          height: result.height,
+          format: result.format,
+          mimetype: mimetype || null,
+        });
+      }
+    );
+    Readable.from(buffer).pipe(stream);
+  });
+};
+
+/**
+ * Upload a job photo buffer to Cloudinary.
+ * @returns {Promise<{ url: string, publicId: string, width: number, height: number, format?: string, mimetype?: string | null }>}
+ */
+export const uploadJobPhotoBuffer = async (buffer, mimetype) => {
+  ensureConfig();
+  if (!Buffer.isBuffer(buffer) || !buffer.length) {
+    throw new AppError("Empty file", 400);
+  }
+
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      {
+        folder: JOB_PHOTOS_FOLDER,
         resource_type: "image",
         allowed_formats: ["jpg", "png", "webp", "gif", "heic"],
         use_filename: false,

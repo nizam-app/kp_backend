@@ -4,6 +4,7 @@ import path from "path";
 import routes from "./routes/index.js";
 import { notFound } from "./middlewares/notFound.js";
 import { globalError } from "./middlewares/globalError.js";
+import { isCloudinaryConfigured } from "./config/cloudinary.js";
 
 const app = express();
 const uploadsDir = path.resolve(process.cwd(), "uploads");
@@ -25,7 +26,12 @@ app.get("/", (_req, res) =>
   })
 );
 
-app.get("/health", (req, res) => res.json({ ok: true }));
+app.get("/health", (req, res) =>
+  res.json({
+    ok: true,
+    cloudinaryConfigured: isCloudinaryConfigured(),
+  })
+);
 
 app.use("/api/v1", routes);
 

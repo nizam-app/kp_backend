@@ -3,6 +3,7 @@ import { Job } from "../job/job.model.js";
 import { Invoice } from "../invoice/invoice.model.js";
 import { JOB_STATUS } from "../../constants/domain.js";
 import { getProfileCompletionSummary } from "../user/user.service.js";
+import { readMechanicProfileRatingAverage } from "../../utils/mechanicRating.js";
 
 const parsePage = (value) => {
   const n = Number(value);
@@ -56,7 +57,8 @@ const serializeDashboardJob = (job, invoice = null) => ({
         _id: job.assignedMechanic._id || job.assignedMechanic,
         displayName: job.assignedMechanic.mechanicProfile?.displayName || null,
         phone: job.assignedMechanic.mechanicProfile?.phone || null,
-        rating: job.assignedMechanic.mechanicProfile?.rating?.average ?? null,
+        profilePhotoUrl: job.assignedMechanic.mechanicProfile?.profilePhotoUrl || null,
+        rating: readMechanicProfileRatingAverage(job.assignedMechanic),
       }
     : null,
   actions: {
@@ -135,7 +137,7 @@ export const getFleetDashboard = async (fleetUser, query) => {
       .limit(10)
       .populate(
         "assignedMechanic",
-        "email role mechanicProfile.displayName mechanicProfile.phone mechanicProfile.rating"
+        "email role mechanicProfile.displayName mechanicProfile.phone mechanicProfile.rating mechanicProfile.profilePhotoUrl"
       )
       .lean(),
     Job.find({ fleet: fleetUser._id, status: JOB_STATUS.COMPLETED })
@@ -144,7 +146,7 @@ export const getFleetDashboard = async (fleetUser, query) => {
       .limit(limit)
       .populate(
         "assignedMechanic",
-        "email role mechanicProfile.displayName mechanicProfile.phone mechanicProfile.rating"
+        "email role mechanicProfile.displayName mechanicProfile.phone mechanicProfile.rating mechanicProfile.profilePhotoUrl"
       )
       .lean(),
     Job.countDocuments({ fleet: fleetUser._id, status: JOB_STATUS.COMPLETED }),
