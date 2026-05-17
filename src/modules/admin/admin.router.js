@@ -2,6 +2,7 @@ import { Router } from "express";
 import { authorize, protect, requireActive } from "../../middlewares/auth.js";
 import { catchAsync } from "../../utils/catchAsync.js";
 import { ROLES } from "../../constants/domain.js";
+import { handleProfileImageMulterError } from "../../config/profileImageUpload.js";
 import {
   adminDashboardController,adminAuditLogsController,adminDisputesController,adminFinancialController,adminFleetController,adminLiveTrackingController,
   adminNotificationsController,adminPromotionsController,adminReportsController,adminReviewsController,adminServiceCatalogController,
@@ -57,6 +58,11 @@ router.get("/reports", catchAsync(adminReportsController));
 router.get("/reports/export", catchAsync(exportAdminReportsController));
 router.get("/audit-log", catchAsync(adminAuditLogsController));
 router.get("/settings", catchAsync(adminSettingsController));
+router.post(
+  "/settings/profile-photo",
+  handleProfileImageMulterError,
+  catchAsync(uploadAdminProfilePhotoController)
+);
 router.patch("/settings", catchAsync(updateAdminSettingsController));
 router.get("/support", catchAsync(adminSupportTicketsController));
 router.patch("/support/:ticketId", catchAsync(updateAdminSupportTicketController));

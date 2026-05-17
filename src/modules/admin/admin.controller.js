@@ -1,4 +1,5 @@
 import { sendResponse } from "../../utils/sendResponse.js";
+import { uploadProfileImageBuffer } from "../media/media.service.js";
 import {
   createAdminFleetCompany,
   createAdminFleetVehicle,
@@ -582,6 +583,27 @@ export const updateAdminSettingsController = async (req, res) => {
   const result = await updateAdminSettings(req.user, req.body);
   return sendResponse(res, {
     message: "Admin settings updated",
+    data: result,
+  });
+};
+
+/** POST multipart field `file` — uploads to Cloudinary and saves admin profile photo URL. */
+export const uploadAdminProfilePhotoController = async (req, res) => {
+  const file = req.file;
+  if (!file) {
+    return res.status(400).json({
+      status: "error",
+      message: 'Missing file. Use multipart/form-data with field "file".',
+    });
+  }
+
+  const uploaded = await uploadProfileImageBuffer(file.buffer, file.mimetype);
+  const result = await updateAdminSettings(req.user, {
+    profile: { profilePhotoUrl: uploaded.url },
+  });
+
+  return sendResponse(res, {
+    message: "Profile photo updated",
     data: result,
   });
 };
