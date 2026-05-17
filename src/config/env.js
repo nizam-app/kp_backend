@@ -9,7 +9,10 @@ const envPath = path.resolve(process.cwd(), ".env");
 if (fs.existsSync(envPath)) {
   const parsed = dotenv.parse(fs.readFileSync(envPath));
   Object.entries(parsed).forEach(([key, value]) => {
-    process.env[key] = value;
+    // On Render/hosting, platform env wins — do not overwrite injected secrets.
+    if (process.env[key] === undefined) {
+      process.env[key] = value;
+    }
   });
 }
 
@@ -21,7 +24,7 @@ const required = (key) => {
 export const env = {
   NODE_ENV: process.env.NODE_ENV || "development",
   HOST: process.env.HOST || "0.0.0.0",
-  PORT: process.env.PORT || 7000,
+  PORT: Number(process.env.PORT) || 7000,
   MONGODB_URL: required("MONGODB_URL"),
   JWT_SECRET: required("JWT_SECRET"),
   JWT_EXPIRES_IN: process.env.JWT_EXPIRES_IN || "7d",

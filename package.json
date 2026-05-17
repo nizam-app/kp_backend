@@ -28,7 +28,9 @@
     "mongodb": "^7.1.0",
     "mongoose": "^9.1.5",
     "multer": "^2.1.1",
-    "nodemon": "^3.1.14",
     "socket.io": "^4.8.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
   }
 }

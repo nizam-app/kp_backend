@@ -18,9 +18,16 @@ import {
   markAdminNotificationReadController,markAllAdminNotificationsReadController,removeAdminNotificationController,
   exportAdminFinancialController,exportAdminReportsController,
   updateAdminPromotionController,updateAdminReviewController,updateAdminServiceCatalogController,updateAdminDisputeController,
-  updateAdminFleetController,updateAdminFleetVehicleController,updateAdminServiceRequestController,updateAdminSettingsController,updateAdminSupportTicketController,
-  updateAdminUserController,updateUserStatusController,
-  adminReviewByIdController,deleteAdminReviewController,
+  updateAdminFleetController,
+  updateAdminFleetVehicleController,
+  updateAdminServiceRequestController,
+  updateAdminSettingsController,
+  updateAdminSupportTicketController,
+  updateAdminUserController,
+  updateUserStatusController,
+  adminReviewByIdController,
+  deleteAdminReviewController,
+  uploadAdminProfilePhotoController,
 } from "./admin.controller.js";
 
 const router = Router();
