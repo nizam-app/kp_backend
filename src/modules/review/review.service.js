@@ -217,6 +217,7 @@ export const createMechanicReviewOfFleet = async (mechanicUser, jobId, payload =
       reviewId: review._id.toString(),
       rating,
       reviewKind: REVIEW_KIND.MECHANIC_RATES_FLEET,
+      screen: "JOB_DETAIL",
     },
   });
 
@@ -295,6 +296,7 @@ export const createFleetReview = async (fleetUser, payload = {}) => {
       jobId: job._id.toString(),
       reviewId: review._id.toString(),
       rating,
+      screen: "JOB_DETAIL",
     },
   });
 

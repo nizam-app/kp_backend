@@ -13,7 +13,12 @@ import {
   ROLES,
   USER_STATUS,
 } from "../../constants/domain.js";
-
+import {
+  GENERIC_PASSWORD_RESET_MESSAGE,
+  isEmailConfigured,
+  sendPasswordResetEmail,
+} from "../email/email.service.js";
+import { env } from "../../config/env.js";
 const sanitizeUser = (userDoc) => userDoc.toObject();
 const hashToken = (token) =>
   crypto.createHash("sha256").update(token).digest("hex");
@@ -255,32 +260,92 @@ export const loginUser = async ({ email, password } = {}) => {
   return { user: sanitizeUser(user), accessToken, refreshToken, nextStep };
 };
 
+/** Send password reset link via Resend (email only). */
 export const forgotPassword = async ({ email } = {}) => {
   if (!email) throw new AppError("email is required", 400);
+
+  if (!isEmailConfigured()) {
+    throw new AppError(
+      "Email is not configured. Set RESEND_API_KEY and EMAIL_FROM on the server.",
+      503
+    );
+  }
 
   const user = await User.findOne({ email: email.toLowerCase() }).select(
     "+passwordResetToken +passwordResetExpires"
   );
 
   if (!user) {
-    return {
-      message:
-        "If this email exists, a reset link/token has been generated.",
-    };
+    return { message: GENERIC_PASSWORD_RESET_MESSAGE };
   }
 
   const resetToken = user.createPasswordResetToken();
   await user.save({ validateBeforeSave: false });
 
-  return {
-    message: "Reset token generated. Send this via email provider in production.",
-    resetToken,
-  };
+  try {
+    await sendPasswordResetEmail({ to: user.email, resetToken });
+  } catch (err) {
+    user.passwordResetToken = undefined;
+    user.passwordResetExpires = undefined;
+    await user.save({ validateBeforeSave: false });
+    console.error("[email] forgot-password send failed:", err?.message || err);
+    throw new AppError(
+      "Unable to send password reset email. Check Resend API key and sender address.",
+      503
+    );
+  }
+
+  const result = { message: GENERIC_PASSWORD_RESET_MESSAGE };
+  if (env.NODE_ENV !== "production") {
+    result.resetToken = resetToken;
+  }
+  return result;
 };
 
-export const resetPassword = async ({ token, newPassword } = {}) => {
+/** Change password when user knows current password (no email). */
+export const changePassword = async ({
+  email,
+  currentPassword,
+  newPassword,
+  confirmPassword,
+} = {}) => {
+  if (!email) throw new AppError("email is required", 400);
+  if (!currentPassword) throw new AppError("currentPassword is required", 400);
+  if (!newPassword) throw new AppError("newPassword is required", 400);
+  if (confirmPassword !== undefined && newPassword !== confirmPassword) {
+    throw new AppError("newPassword and confirmPassword do not match", 400);
+  }
+  if (`${newPassword}`.length < 8) {
+    throw new AppError("newPassword must be at least 8 characters", 400);
+  }
+  if (currentPassword === newPassword) {
+    throw new AppError("newPassword must be different from currentPassword", 400);
+  }
+
+  const user = await User.findOne({ email: email.toLowerCase() }).select("+password");
+  if (!user) throw new AppError("No account found for this email", 404);
+
+  const matches = await user.comparePassword(currentPassword);
+  if (!matches) throw new AppError("Current password is incorrect", 401);
+
+  user.password = newPassword;
+  user.passwordResetToken = undefined;
+  user.passwordResetExpires = undefined;
+  user.refreshTokenHash = undefined;
+  await user.save();
+
+  return { message: "Password updated successfully" };
+};
+
+export const resetPassword = async ({ token, newPassword, confirmPassword } = {}) => {
   if (!token || !newPassword) {
     throw new AppError("token and newPassword are required", 400);
+  }
+  if (confirmPassword !== undefined && newPassword !== confirmPassword) {
+    throw new AppError("newPassword and confirmPassword do not match", 400);
+  }
+  if (`${newPassword}`.length < 8) {
+    throw new AppError("newPassword must be at least 8 characters", 400);
   }
 
   const hashedToken = crypto.createHash("sha256").update(token).digest("hex");

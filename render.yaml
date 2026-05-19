@@ -28,3 +28,9 @@ services:
         sync: false
       - key: APP_PUBLIC_URL
         sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: EMAIL_FROM
+        sync: false
+      - key: PASSWORD_RESET_URL
+        sync: false

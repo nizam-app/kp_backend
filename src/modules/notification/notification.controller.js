@@ -1,5 +1,6 @@
 import { sendResponse } from "../../utils/sendResponse.js";
 import {
+  getNotificationById,
   listDeviceTokens,
   listNotifications,
   markNotificationRead,
@@ -12,6 +13,14 @@ export const listNotificationsController = async (req, res) => {
     message: "Notifications fetched",
     data: result.items,
     meta: result.meta,
+  });
+};
+
+export const getNotificationController = async (req, res) => {
+  const notification = await getNotificationById(req.user, req.params.id);
+  return sendResponse(res, {
+    message: "Notification fetched",
+    data: notification,
   });
 };
 

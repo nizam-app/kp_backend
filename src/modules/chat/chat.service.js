@@ -329,6 +329,8 @@ export const sendJobMessage = async (jobId, user, payload = {}) => {
           jobId: toId(job._id),
           jobCode: job.jobCode,
           senderId: toId(user._id),
+          messageId: toId(message._id),
+          screen: "JOB_CHAT",
         },
       })
     )

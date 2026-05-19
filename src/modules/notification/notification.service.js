@@ -6,6 +6,7 @@ import {
   emitNotificationRead,
 } from "../../realtime/socket.js";
 import { sendPushForPersistedNotification } from "./pushFcm.service.js";
+import { buildNotificationNavigation } from "./notificationNavigation.util.js";
 
 const parsePage = (value) => {
   const n = Number(value);
@@ -18,16 +19,21 @@ const parseLimit = (value) => {
   return Math.min(Math.floor(n), 100);
 };
 
-const serializeNotification = (notification) => ({
-  _id: notification._id,
-  type: notification.type,
-  title: notification.title,
-  body: notification.body,
-  data: notification.data || null,
-  isRead: notification.isRead,
-  readAt: notification.readAt || null,
-  createdAt: notification.createdAt,
-});
+const serializeNotification = (notification) => {
+  const data = notification.data || null;
+  const navigation = buildNotificationNavigation(notification.type, data);
+  return {
+    _id: notification._id,
+    type: notification.type,
+    title: notification.title,
+    body: notification.body,
+    data,
+    navigation,
+    isRead: notification.isRead,
+    readAt: notification.readAt || null,
+    createdAt: notification.createdAt,
+  };
+};
 
 const serializeDeviceToken = (token) => ({
   _id: token._id,
@@ -77,6 +83,15 @@ export const listNotifications = async (user, query = {}) => {
       unreadCount,
     },
   };
+};
+
+export const getNotificationById = async (user, notificationId) => {
+  const notification = await Notification.findOne({
+    _id: notificationId,
+    user: user._id,
+  }).lean();
+  if (!notification) throw new AppError("Notification not found", 404);
+  return serializeNotification(notification);
 };
 
 export const markNotificationRead = async (user, notificationId) => {

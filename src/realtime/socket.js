@@ -3,6 +3,7 @@ import { verifyAccessToken } from "../utils/token.js";
 import { User } from "../modules/user/user.model.js";
 import { Job } from "../modules/job/job.model.js";
 import { ROLES, USER_STATUS } from "../constants/domain.js";
+import { buildNotificationNavigation } from "../modules/notification/notificationNavigation.util.js";
 
 let ioInstance = null;
 
@@ -42,16 +43,20 @@ const canAccessJob = async (jobId, user) => {
   );
 };
 
-const serializeNotificationRealtime = (notification) => ({
-  _id: notification._id,
-  type: notification.type,
-  title: notification.title,
-  body: notification.body,
-  data: notification.data || null,
-  isRead: notification.isRead,
-  readAt: notification.readAt || null,
-  createdAt: notification.createdAt,
-});
+const serializeNotificationRealtime = (notification) => {
+  const data = notification.data || null;
+  return {
+    _id: notification._id,
+    type: notification.type,
+    title: notification.title,
+    body: notification.body,
+    data,
+    navigation: buildNotificationNavigation(notification.type, data),
+    isRead: notification.isRead,
+    readAt: notification.readAt || null,
+    createdAt: notification.createdAt,
+  };
+};
 
 export const initRealtimeServer = (httpServer) => {
   ioInstance = new Server(httpServer, {

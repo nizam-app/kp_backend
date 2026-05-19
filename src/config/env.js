@@ -47,4 +47,12 @@ export const env = {
    */
   FIREBASE_SERVICE_ACCOUNT_PATH: (process.env.FIREBASE_SERVICE_ACCOUNT_PATH || "").trim(),
   FIREBASE_SERVICE_ACCOUNT_JSON: (process.env.FIREBASE_SERVICE_ACCOUNT_JSON || "").trim(),
+  /** Resend — transactional email (forgot password, invites). */
+  RESEND_API_KEY: (process.env.RESEND_API_KEY || "").trim(),
+  EMAIL_FROM: (process.env.EMAIL_FROM || "").trim(),
+  /**
+   * Optional full URL for reset page (no trailing slash on base path before query).
+   * Falls back to APP_PUBLIC_URL + /reset-password?token=...
+   */
+  PASSWORD_RESET_URL: (process.env.PASSWORD_RESET_URL || "").trim(),
 };

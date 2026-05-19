@@ -3,6 +3,7 @@ import { sendResponse } from "../../utils/sendResponse.js";
 import { uploadProfileImageBuffer } from "../media/media.service.js";
 import { ROLES } from "../../constants/domain.js";
 import {
+  changePassword,
   forgotPassword,
   loginUser,
   logoutUser,
@@ -103,9 +104,20 @@ export const login = async (req, res) => {
 
 export const forgotPasswordController = async (req, res) => {
   const result = await forgotPassword(req.body);
+  const data =
+    result.resetToken && process.env.NODE_ENV !== "production"
+      ? { resetToken: result.resetToken }
+      : undefined;
   return sendResponse(res, {
     message: result.message,
-    data: result.resetToken ? { resetToken: result.resetToken } : null,
+    ...(data ? { data } : {}),
+  });
+};
+
+export const changePasswordController = async (req, res) => {
+  const result = await changePassword(req.body);
+  return sendResponse(res, {
+    message: result.message,
   });
 };
 

@@ -5,6 +5,10 @@ import { env } from "../../config/env.js";
 import { ROLES } from "../../constants/domain.js";
 import { User } from "../user/user.model.js";
 import { DeviceToken } from "./deviceToken.model.js";
+import {
+  buildNotificationNavigation,
+  flattenNavigationForPush,
+} from "./notificationNavigation.util.js";
 
 /** Maps in-app notification `type` to `user.preferences.notifications` key (mechanic / fleet / company). */
 const NOTIFICATION_TYPE_TO_PREFERENCE_KEY = {
@@ -116,9 +120,14 @@ export async function sendPushForPersistedNotification(notification) {
 
   if (!tokenDocs.length) return;
 
+  const nav = buildNotificationNavigation(
+    notification.type,
+    notification.data
+  );
   const baseData = {
     notificationId: notification._id.toString(),
     type: notification.type,
+    ...flattenNavigationForPush(nav),
     ...(typeof notification.data === "object" && notification.data
       ? notification.data
       : {}),

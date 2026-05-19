@@ -3,6 +3,7 @@ import multer from "multer";
 import { catchAsync } from "../../utils/catchAsync.js";
 import { protect } from "../../middlewares/auth.js";
 import {
+  changePasswordController,
   forgotPasswordController,
   login,
   logoutController,
@@ -51,6 +52,7 @@ const router = Router();
 router.post("/register", parseRegisterMultipart, catchAsync(register));
 router.post("/login", catchAsync(login));
 router.post("/forgot-password", catchAsync(forgotPasswordController));
+router.post("/change-password", catchAsync(changePasswordController));
 router.post("/reset-password", catchAsync(resetPasswordController));
 router.post("/refresh-token", catchAsync(refreshTokenController));
 router.post("/logout", catchAsync(protect), catchAsync(logoutController));

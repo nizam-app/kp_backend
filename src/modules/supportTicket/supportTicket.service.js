@@ -80,6 +80,7 @@ export const createSupportTicket = async (user, payload = {}) => {
     data: {
       ticketId: ticket._id.toString(),
       category: ticket.category,
+      screen: "SUPPORT_TICKET",
     },
   });
 
@@ -161,6 +162,7 @@ export const updateSupportTicket = async (user, ticketId, payload = {}) => {
       data: {
         ticketId: ticket._id.toString(),
         status: ticket.status,
+        screen: "SUPPORT_TICKET",
       },
     });
   }
@@ -243,6 +245,7 @@ export const addSupportTicketReply = async (user, ticketId, payload = {}) => {
       data: {
         ticketId: ticket._id.toString(),
         status: ticket.status,
+        screen: "SUPPORT_TICKET",
       },
     });
   }
