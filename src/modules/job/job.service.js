@@ -27,7 +27,10 @@ import { Invoice } from "../invoice/invoice.model.js";
 import { EarningTransaction } from "../earning/earningTransaction.model.js";
 import { PaymentMethod } from "../billing/paymentMethod.model.js";
 import { User } from "../user/user.model.js";
-import { createStripePaymentIntent } from "../billing/stripe.service.js";
+import {
+  createStripePaymentIntent,
+  getStripePublicConfig,
+} from "../billing/stripe.service.js";
 import { getProfileCompletionSummary } from "../user/user.service.js";
 import { readMechanicProfileRatingAverage } from "../../utils/mechanicRating.js";
 import {
@@ -549,6 +552,139 @@ const mapStripePaymentIntentStatus = (status) => {
     default:
       return { invoiceStatus: "ISSUED", paymentStatus: "PENDING", paid: false };
   }
+};
+
+const resolvePayerStripeCustomerId = (payerUser, paymentMethod) => {
+  if (paymentMethod?.providerCustomerId) return paymentMethod.providerCustomerId;
+  if (payerUser.role === ROLES.FLEET) {
+    return payerUser.fleetProfile?.stripeCustomerId || null;
+  }
+  if (payerUser.role === ROLES.COMPANY) {
+    return payerUser.companyProfile?.stripeCustomerId || null;
+  }
+  return null;
+};
+
+const computeJobApprovalChargeTotal = (job) =>
+  Math.round(
+    ((Number(job.finalAmount ?? job.acceptedAmount ?? job.estimatedPayout ?? 0) || 0) *
+      1.2) *
+      100
+  ) / 100;
+
+/** Fleet: optional Stripe. Company: Stripe required when configured. */
+const buildJobApprovalPaymentContext = async ({
+  job,
+  payerUser,
+  paymentMethodId,
+  metadata = {},
+}) => {
+  const defaultContext = {
+    provider: "MANUAL",
+    invoiceStatus: "PAID",
+    paymentStatus: "SUCCEEDED",
+    paidAt: new Date(),
+  };
+
+  const methodId = `${paymentMethodId || ""}`.trim();
+  if (!methodId) return defaultContext;
+
+  const paymentMethod = await PaymentMethod.findOne({
+    _id: methodId,
+    user: payerUser._id,
+    isActive: true,
+  }).lean();
+
+  if (!paymentMethod) {
+    throw new AppError("Payment method not found", 404);
+  }
+
+  if (paymentMethod.provider !== "STRIPE") {
+    throw new AppError("A Stripe card payment method is required for online payment", 400);
+  }
+
+  if (!getStripePublicConfig().enabled) {
+    throw new AppError("Stripe is not configured on the server", 503);
+  }
+
+  const totalAmount = computeJobApprovalChargeTotal(job);
+  const subtotal =
+    Number(job.finalAmount ?? job.acceptedAmount ?? job.estimatedPayout ?? 0) || 0;
+  const platformFee = Math.round(subtotal * 0.12 * 100) / 100;
+  const mechanicNetAmount = Math.max(Math.round((subtotal - platformFee) * 100) / 100, 0);
+  const mechanicProfile = job.assignedMechanic?.mechanicProfile;
+  const mechanicConnectAccountId =
+    mechanicProfile?.stripeConnectChargesEnabled &&
+    mechanicProfile?.stripeConnectAccountId
+      ? mechanicProfile.stripeConnectAccountId
+      : null;
+
+  const paymentIntent = await createStripePaymentIntent({
+    amount: totalAmount,
+    currency: job.currency || "GBP",
+    customerId: resolvePayerStripeCustomerId(payerUser, paymentMethod),
+    paymentMethodId: paymentMethod.providerMethodId,
+    mechanicConnectAccountId,
+    mechanicNetAmount: mechanicConnectAccountId ? mechanicNetAmount : null,
+    metadata: {
+      jobId: job._id.toString(),
+      fleetId: toObjectIdString(job.fleet),
+      mechanicId: toObjectIdString(job.assignedMechanic),
+      payerUserId: payerUser._id.toString(),
+      payerRole: payerUser.role,
+      ...metadata,
+    },
+  });
+
+  const mapped = mapStripePaymentIntentStatus(paymentIntent.status);
+  return {
+    provider: "STRIPE",
+    invoiceStatus: mapped.invoiceStatus,
+    paymentStatus: mapped.paymentStatus,
+    stripeCustomerId: resolvePayerStripeCustomerId(payerUser, paymentMethod),
+    stripePaymentMethodId: paymentMethod.providerMethodId,
+    stripePaymentIntentId: paymentIntent.id,
+    stripeClientSecret: paymentIntent.client_secret || null,
+    lastError: paymentIntent.last_payment_error?.message || null,
+    paidAt: mapped.paid ? new Date() : undefined,
+  };
+};
+
+const assertStripePaymentSucceeded = (paymentContext, { required = false } = {}) => {
+  if (paymentContext.provider !== "STRIPE") {
+    if (required) {
+      throw new AppError(
+        "Online card payment is required. Add a card under Billing and pass paymentMethodId.",
+        400
+      );
+    }
+    return;
+  }
+  if (paymentContext.paymentStatus === "SUCCEEDED") return;
+
+  if (paymentContext.paymentStatus === "REQUIRES_ACTION") {
+    throw new AppError(
+      "Card payment requires authentication (3D Secure). Complete verification, then POST /billing/stripe/payment-intents/:id/sync.",
+      402
+    );
+  }
+
+  throw new AppError(
+    paymentContext.lastError ||
+      `Card payment did not complete (status: ${paymentContext.paymentStatus || "unknown"})`,
+    402
+  );
+};
+
+const markJobCompletedAfterApproval = async (job, payload = {}, breakdown = null) => {
+  if (breakdown) {
+    job.finalAmount = breakdown.subtotal;
+  } else if (payload.finalAmount !== undefined) {
+    job.finalAmount = round2(Number(payload.finalAmount));
+  }
+  job.status = JOB_STATUS.COMPLETED;
+  job.completedAt = new Date();
+  await job.save();
 };
 
 const deriveStatusTimes = async (jobId, jobDocOrLean) => {
@@ -1954,68 +2090,21 @@ export const approveJobCompletion = async (jobId, fleetUser, payload) => {
   }
 
   const fromStatus = job.status;
-  job.status = JOB_STATUS.COMPLETED;
-  job.completedAt = new Date();
   if (payload.finalAmount !== undefined) {
     job.finalAmount = Number(payload.finalAmount);
   }
-  await job.save();
 
-  let paymentContext = {
-    provider: "MANUAL",
-    invoiceStatus: "PAID",
-    paymentStatus: "SUCCEEDED",
-    paidAt: new Date(),
-  };
+  const paymentContext = await buildJobApprovalPaymentContext({
+    job,
+    payerUser: fleetUser,
+    paymentMethodId: payload.paymentMethodId,
+  });
 
-  const paymentMethodId = `${payload.paymentMethodId || ""}`.trim();
-  if (paymentMethodId) {
-    const paymentMethod = await PaymentMethod.findOne({
-      _id: paymentMethodId,
-      user: fleetUser._id,
-      isActive: true,
-    }).lean();
+  assertStripePaymentSucceeded(paymentContext, {
+    required: Boolean(`${payload.paymentMethodId || ""}`.trim()),
+  });
 
-    if (!paymentMethod) {
-      throw new AppError("Payment method not found", 404);
-    }
-
-    if (paymentMethod.provider === "STRIPE") {
-      const totalAmount =
-        Math.round(
-          ((Number(job.finalAmount ?? job.acceptedAmount ?? job.estimatedPayout ?? 0) || 0) *
-            1.2) *
-            100
-        ) / 100;
-
-      const paymentIntent = await createStripePaymentIntent({
-        amount: totalAmount,
-        currency: job.currency || "GBP",
-        customerId:
-          paymentMethod.providerCustomerId || fleetUser.fleetProfile?.stripeCustomerId,
-        paymentMethodId: paymentMethod.providerMethodId,
-        metadata: {
-          jobId: job._id.toString(),
-          fleetId: fleetUser._id.toString(),
-          mechanicId: toObjectIdString(job.assignedMechanic),
-        },
-      });
-
-      const mapped = mapStripePaymentIntentStatus(paymentIntent.status);
-      paymentContext = {
-        provider: "STRIPE",
-        invoiceStatus: mapped.invoiceStatus,
-        paymentStatus: mapped.paymentStatus,
-        stripeCustomerId:
-          paymentMethod.providerCustomerId || fleetUser.fleetProfile?.stripeCustomerId,
-        stripePaymentMethodId: paymentMethod.providerMethodId,
-        stripePaymentIntentId: paymentIntent.id,
-        stripeClientSecret: paymentIntent.client_secret || null,
-        lastError: paymentIntent.last_payment_error?.message || null,
-        paidAt: mapped.paid ? new Date() : undefined,
-      };
-    }
-  }
+  await markJobCompletedAfterApproval(job, payload);
 
   return finalizeApprovedJobCompletion({
     job,
@@ -2027,8 +2116,7 @@ export const approveJobCompletion = async (jobId, fleetUser, payload) => {
 };
 
 /**
- * Company dispatcher: approve mechanic-submitted completion (same outcome as fleet approve).
- * Uses manual paid context; fleet card capture (Stripe) remains on PATCH /jobs/:id/complete/approve.
+ * Company dispatcher: approve completion and pay online via Stripe (required).
  */
 export const approveJobCompletionAsCompany = async (jobId, companyUser, payload = {}) => {
   const job = await Job.findById(jobId)
@@ -2042,6 +2130,14 @@ export const approveJobCompletionAsCompany = async (jobId, companyUser, payload 
     throw new AppError("Job is not awaiting approval", 400);
   }
 
+  const paymentMethodId = `${payload.paymentMethodId || ""}`.trim();
+  if (!paymentMethodId) {
+    throw new AppError(
+      "paymentMethodId is required — company approval must be paid online with a saved Stripe card",
+      400
+    );
+  }
+
   const fromStatus = job.status;
   const breakdown = buildLineItemsFromCompanyInvoicePayload(payload, job);
 
@@ -2051,24 +2147,26 @@ export const approveJobCompletionAsCompany = async (jobId, companyUser, payload 
     job.finalAmount = round2(Number(payload.finalAmount));
   }
 
-  job.status = JOB_STATUS.COMPLETED;
-  job.completedAt = new Date();
-  await job.save();
+  const paymentContext = await buildJobApprovalPaymentContext({
+    job,
+    payerUser: companyUser,
+    paymentMethodId,
+    metadata: { companyId: companyUser._id.toString(), approvedByCompany: "true" },
+  });
 
-  const paymentContext = {
-    provider: "MANUAL",
-    invoiceStatus: "PAID",
-    paymentStatus: "SUCCEEDED",
-    paidAt: new Date(),
-    ...(breakdown ? { lineItems: breakdown.lineItems } : {}),
-  };
+  assertStripePaymentSucceeded(paymentContext, { required: true });
+
+  await markJobCompletedAfterApproval(job, payload, breakdown);
 
   return finalizeApprovedJobCompletion({
     job,
     fromStatus,
     actorUser: companyUser,
-    paymentContext,
-    eventExtras: { approvedByCompany: true },
+    paymentContext: {
+      ...paymentContext,
+      ...(breakdown ? { lineItems: breakdown.lineItems } : {}),
+    },
+    eventExtras: { approvedByCompany: true, paymentMethodId },
   });
 };
 

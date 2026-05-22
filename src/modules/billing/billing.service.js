@@ -12,7 +12,13 @@ import {
   retrieveStripePaymentMethod,
   syncMechanicStripeConnectAccount,
 } from "./stripe.service.js";
-import { processStripeWebhookEvent } from "./stripeWebhook.service.js";
+import { Invoice } from "../invoice/invoice.model.js";
+import { Job } from "../job/job.model.js";
+import {
+  applyPaymentIntentToInvoice,
+  processStripeWebhookEvent,
+} from "./stripeWebhook.service.js";
+import { retrieveStripePaymentIntent } from "./stripe.service.js";
 
 const methodTypeValues = ["CARD", "BANK_ACCOUNT"];
 
@@ -145,19 +151,37 @@ export const createPaymentMethod = async (user, payload = {}) => {
       ? normalizeCardPayload(payload)
       : normalizeBankPayload(payload);
 
-  const alreadyExists = await PaymentMethod.findOne({
-    provider,
-    providerMethodId,
-  });
-  if (alreadyExists) {
-    throw new AppError("Payment method already exists", 409);
-  }
-
   const hasAnyActiveMethod = await PaymentMethod.exists({
     user: user._id,
     isActive: true,
   });
   const isDefault = payload.isDefault === true || !hasAnyActiveMethod;
+
+  const alreadyExists = await PaymentMethod.findOne({
+    provider,
+    providerMethodId,
+  });
+  if (alreadyExists) {
+    if (`${alreadyExists.user}` !== `${user._id}`) {
+      throw new AppError("Payment method already exists", 409);
+    }
+    if (isDefault) {
+      await PaymentMethod.updateMany(
+        { user: user._id, isActive: true },
+        { $set: { isDefault: false } }
+      );
+    }
+    alreadyExists.isActive = true;
+    alreadyExists.isDefault = isDefault || alreadyExists.isDefault;
+    if (payload.providerCustomerId) {
+      alreadyExists.providerCustomerId = payload.providerCustomerId;
+    }
+    if (payload.setupIntentId) alreadyExists.setupIntentId = payload.setupIntentId;
+    if (payload.billingAddress) alreadyExists.billingAddress = payload.billingAddress;
+    Object.assign(alreadyExists, normalizedPayload);
+    await alreadyExists.save({ validateBeforeSave: false });
+    return toPaymentMethodResponse(alreadyExists);
+  }
 
   if (isDefault) {
     await PaymentMethod.updateMany(
@@ -307,8 +331,8 @@ export const createMechanicStripeDashboardLink = async (user) => {
 };
 
 export const attachStripeCardPaymentMethod = async (user, payload = {}) => {
-  if (user.role !== "FLEET") {
-    throw new AppError("Only fleet users can attach Stripe card methods", 400);
+  if (user.role !== "FLEET" && user.role !== "COMPANY") {
+    throw new AppError("Only fleet and company users can attach Stripe card methods", 400);
   }
 
   const paymentMethodId = `${payload.paymentMethodId || payload.providerMethodId || ""}`.trim();
@@ -331,7 +355,7 @@ export const attachStripeCardPaymentMethod = async (user, payload = {}) => {
     providerCustomerId: customerId,
     setupIntentId: `${payload.setupIntentId || ""}`.trim() || undefined,
     billingAddress:
-      `${payload.billingAddress || user.fleetProfile?.billingAddress || ""}`.trim() ||
+      `${payload.billingAddress || user.fleetProfile?.billingAddress || user.companyProfile?.billingAddress || ""}`.trim() ||
       undefined,
     isDefault: payload.isDefault !== false,
     card: {
@@ -375,6 +399,50 @@ export const removePaymentMethod = async (user, methodId) => {
   }
 
   return { message: "Payment method removed" };
+};
+
+export const syncStripePaymentIntentForUser = async (user, paymentIntentId) => {
+  const piId = `${paymentIntentId || ""}`.trim();
+  if (!piId) throw new AppError("paymentIntentId is required", 400);
+
+  const paymentIntent = await retrieveStripePaymentIntent(piId);
+  const jobId = paymentIntent?.metadata?.jobId;
+
+  if (jobId) {
+    const job = await Job.findById(jobId).lean();
+    if (!job) throw new AppError("Job not found for this payment", 404);
+
+    const isFleetOwner =
+      user.role === "FLEET" && `${job.fleet}` === `${user._id}`;
+    const isCompanyOnJob =
+      user.role === "COMPANY" && `${job.assignedCompany}` === `${user._id}`;
+
+    if (!isFleetOwner && !isCompanyOnJob) {
+      throw new AppError("You do not have access to this payment", 403);
+    }
+  } else {
+    const invoice = await Invoice.findOne({
+      "payment.stripePaymentIntentId": piId,
+    }).lean();
+    if (!invoice) throw new AppError("Payment not found", 404);
+    const allowed =
+      `${invoice.fleet}` === `${user._id}` ||
+      (user.role === "COMPANY" &&
+        (await Job.exists({ _id: invoice.job, assignedCompany: user._id })));
+    if (!allowed) throw new AppError("You do not have access to this payment", 403);
+  }
+
+  const result = await applyPaymentIntentToInvoice(paymentIntent);
+
+  return {
+    paymentIntentId: piId,
+    status: paymentIntent.status,
+    clientSecret: paymentIntent.client_secret || null,
+    lastError: paymentIntent.last_payment_error?.message || null,
+    invoiceStatus: result.invoiceStatus,
+    paymentStatus: result.paymentStatus,
+    result,
+  };
 };
 
 export const handleStripeWebhook = async (rawBody, signatureHeader) => {

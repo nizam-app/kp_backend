@@ -100,7 +100,7 @@ const findInvoiceForPaymentIntent = async (paymentIntent) => {
   return invoice;
 };
 
-const applyPaymentIntentToInvoice = async (paymentIntent) => {
+export const applyPaymentIntentToInvoice = async (paymentIntent) => {
   const invoice = await findInvoiceForPaymentIntent(paymentIntent);
   if (!invoice) {
     return { ok: true, ignored: true, reason: "invoice_not_found" };

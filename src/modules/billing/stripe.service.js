@@ -58,10 +58,11 @@ const stripeRequest = async (path, { method = "GET", body } = {}) => {
   return json;
 };
 
-const getStripeCustomerId = (user) =>
-  user.role === "FLEET"
-    ? user.fleetProfile?.stripeCustomerId || null
-    : null;
+const getStripeCustomerId = (user) => {
+  if (user.role === "FLEET") return user.fleetProfile?.stripeCustomerId || null;
+  if (user.role === "COMPANY") return user.companyProfile?.stripeCustomerId || null;
+  return null;
+};
 
 const getStripeConnectAccountId = (user) =>
   user.role === "MECHANIC"
@@ -69,22 +70,29 @@ const getStripeConnectAccountId = (user) =>
     : null;
 
 export const ensureStripeCustomerForUser = async (user) => {
-  if (user.role !== "FLEET") {
-    throw new AppError("Stripe customer setup is only available for fleet users", 400);
+  if (user.role !== "FLEET" && user.role !== "COMPANY") {
+    throw new AppError(
+      "Stripe customer setup is only available for fleet and company users",
+      400
+    );
   }
 
   const existingCustomerId = getStripeCustomerId(user);
   if (existingCustomerId) return existingCustomerId;
 
+  const profile = user.role === "COMPANY" ? user.companyProfile : user.fleetProfile;
+  const customerField =
+    user.role === "COMPANY" ? "companyProfile.stripeCustomerId" : "fleetProfile.stripeCustomerId";
+
   const customer = await stripeRequest("/customers", {
     method: "POST",
     body: {
       email: user.email,
-      name: user.fleetProfile?.companyName || user.fleetProfile?.contactName || user.email,
-      phone: user.fleetProfile?.phone || undefined,
-      address: user.fleetProfile?.billingAddress
+      name: profile?.companyName || profile?.contactName || user.email,
+      phone: profile?.phone || undefined,
+      address: profile?.billingAddress
         ? {
-            line1: user.fleetProfile.billingAddress,
+            line1: profile.billingAddress,
           }
         : undefined,
       metadata: {
@@ -94,10 +102,7 @@ export const ensureStripeCustomerForUser = async (user) => {
     },
   });
 
-  await User.updateOne(
-    { _id: user._id },
-    { $set: { "fleetProfile.stripeCustomerId": customer.id } }
-  );
+  await User.updateOne({ _id: user._id }, { $set: { [customerField]: customer.id } });
 
   return customer.id;
 };
@@ -152,23 +157,39 @@ export const createStripePaymentIntent = async ({
   customerId,
   paymentMethodId,
   metadata = {},
+  mechanicConnectAccountId = null,
+  mechanicNetAmount = null,
 }) => {
   const amountInMinor = Math.round(Number(amount || 0) * 100);
   if (!Number.isFinite(amountInMinor) || amountInMinor <= 0) {
     throw new AppError("Stripe payment amount must be greater than zero", 400);
   }
 
+  const body = {
+    amount: amountInMinor,
+    currency: `${currency}`.toLowerCase(),
+    customer: customerId,
+    payment_method: paymentMethodId,
+    confirm: true,
+    off_session: true,
+    metadata,
+  };
+
+  const connectId = `${mechanicConnectAccountId || ""}`.trim();
+  const netMinor = Math.round(Number(mechanicNetAmount || 0) * 100);
+  if (connectId && Number.isFinite(netMinor) && netMinor > 0 && netMinor < amountInMinor) {
+    body.transfer_data = { destination: connectId };
+    body.application_fee_amount = amountInMinor - netMinor;
+    body.metadata = {
+      ...metadata,
+      mechanicConnectAccountId: connectId,
+      mechanicNetAmount: `${mechanicNetAmount}`,
+    };
+  }
+
   return stripeRequest("/payment_intents", {
     method: "POST",
-    body: {
-      amount: amountInMinor,
-      currency: `${currency}`.toLowerCase(),
-      customer: customerId,
-      payment_method: paymentMethodId,
-      confirm: true,
-      off_session: true,
-      metadata,
-    },
+    body,
   });
 };
 

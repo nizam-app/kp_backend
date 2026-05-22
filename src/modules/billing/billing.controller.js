@@ -11,6 +11,7 @@ import {
   listPaymentMethods,
   removePaymentMethod,
   setDefaultPaymentMethod,
+  syncStripePaymentIntentForUser,
 } from "./billing.service.js";
 
 export const listPaymentMethodsController = async (req, res) => {
@@ -67,6 +68,17 @@ export const mechanicStripeDashboardLinkController = async (req, res) => {
   return sendResponse(res, {
     message: "Mechanic Stripe dashboard link created",
     data: result,
+  });
+};
+
+export const syncStripePaymentIntentController = async (req, res) => {
+  const data = await syncStripePaymentIntentForUser(
+    req.user,
+    req.params.paymentIntentId
+  );
+  return sendResponse(res, {
+    message: "Stripe payment intent synced",
+    data,
   });
 };
 

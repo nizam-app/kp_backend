@@ -7,7 +7,7 @@ const paymentMethodSchema = new Schema(
     user: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
     ownerType: {
       type: String,
-      enum: ["FLEET", "MECHANIC"],
+      enum: ["FLEET", "MECHANIC", "COMPANY"],
       required: true,
       index: true,
     },
