@@ -1,0 +1,1786 @@
+{
+  "info": {
+    "name": "TruckFix — Stripe + Push (full test)",
+    "description": "Complete Postman pack for Stripe billing/payments and push notifications.\n\n**Import:** `TruckFix.Stripe-Push.postman_environment.json` and select it.\n\n**Run folder `00 — Setup` first** (logins + resolve job IDs).\n\n**Stripe attach:** `paymentMethodId` in body = Stripe `pm_...` (from SetupIntent / Stripe Dashboard / npm run test:stripe).\n\n**Job approve:** `paymentMethodId` = Mongo `_id` from attach response (`fleetPaymentMethodDbId`).\n\n**Push:** Register a real FCM token from your phone for real pushes; placeholder token only tests the API.\n\nLocal default: http://127.0.0.1:5000\nProduction: https://kp-backend-1.onrender.com",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://127.0.0.1:5000"
+    },
+    {
+      "key": "password",
+      "value": "Password123!"
+    },
+    {
+      "key": "fleetEmail",
+      "value": "fleet@truckfix.dev"
+    },
+    {
+      "key": "companyEmail",
+      "value": "company@truckfix.dev"
+    },
+    {
+      "key": "mechanicEmail",
+      "value": "mechanic@truckfix.dev"
+    },
+    {
+      "key": "jobCodeAwaitingApproval",
+      "value": "TF-8823"
+    },
+    {
+      "key": "jobCodePosted",
+      "value": "TF-8819"
+    },
+    {
+      "key": "stripePmId",
+      "value": ""
+    },
+    {
+      "key": "setupIntentId",
+      "value": ""
+    },
+    {
+      "key": "fleetPaymentMethodDbId",
+      "value": ""
+    },
+    {
+      "key": "companyPaymentMethodDbId",
+      "value": ""
+    },
+    {
+      "key": "paymentIntentId",
+      "value": ""
+    },
+    {
+      "key": "fcmDeviceToken",
+      "value": "fcm_test_postman_placeholder_replace_with_real_device_token"
+    },
+    {
+      "key": "notificationId",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "00 — Setup (run first)",
+      "item": [
+        {
+          "name": "GET /health",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "description": "Root health check (not under /api/v1).",
+            "url": "http://127.0.0.1:5000/health"
+          }
+        },
+        {
+          "name": "POST /auth/login (Fleet)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "description": "Sets fleetAccessToken. Seed: fleet@truckfix.dev / Password123!",
+            "url": {
+              "raw": "http://127.0.0.1:5000/api/v1/auth/login",
+              "protocol": "http",
+              "host": [
+                "127",
+                "0",
+                "0",
+                "1"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "login"
+              ],
+              "port": "5000"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{fleetEmail}}\",\n  \"password\": \"{{password}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "function setVar(key, val) {",
+                  "  if (val === undefined || val === null || val === '') return;",
+                  "  try { pm.environment.set(key, val); } catch (e) {}",
+                  "  try { pm.collectionVariables.set(key, val); } catch (e) {}",
+                  "}",
+                  "const j = pm.response.json();",
+                  "const d = j && j.data ? j.data : j;",
+                  "if (d && d.accessToken) setVar('fleetAccessToken', d.accessToken);",
+                  "if (d && d.refreshToken) setVar('fleetRefreshToken', d.refreshToken);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /auth/login (Company)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "description": "Sets companyAccessToken. Seed: company@truckfix.dev / Password123!",
+            "url": {
+              "raw": "http://127.0.0.1:5000/api/v1/auth/login",
+              "protocol": "http",
+              "host": [
+                "127",
+                "0",
+                "0",
+                "1"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "login"
+              ],
+              "port": "5000"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{companyEmail}}\",\n  \"password\": \"{{password}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "function setVar(key, val) {",
+                  "  if (val === undefined || val === null || val === '') return;",
+                  "  try { pm.environment.set(key, val); } catch (e) {}",
+                  "  try { pm.collectionVariables.set(key, val); } catch (e) {}",
+                  "}",
+                  "const j = pm.response.json();",
+                  "const d = j && j.data ? j.data : j;",
+                  "if (d && d.accessToken) setVar('companyAccessToken', d.accessToken);",
+                  "if (d && d.refreshToken) setVar('companyRefreshToken', d.refreshToken);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /auth/login (Mechanic)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "description": "",
+            "url": {
+              "raw": "http://127.0.0.1:5000/api/v1/auth/login",
+              "protocol": "http",
+              "host": [
+                "127",
+                "0",
+                "0",
+                "1"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "auth",
+                "login"
+              ],
+              "port": "5000"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{mechanicEmail}}\",\n  \"password\": \"{{password}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "function setVar(key, val) {",
+                  "  if (val === undefined || val === null || val === '') return;",
+                  "  try { pm.environment.set(key, val); } catch (e) {}",
+                  "  try { pm.collectionVariables.set(key, val); } catch (e) {}",
+                  "}",
+                  "const j = pm.response.json();",
+                  "const d = j && j.data ? j.data : j;",
+                  "if (d && d.accessToken) setVar('mechanicAccessToken', d.accessToken);",
+                  "if (d && d.refreshToken) setVar('mechanicRefreshToken', d.refreshToken);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /jobs (Fleet) — resolve jobIdAwaitingApproval",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "description": "Fills jobIdAwaitingApproval from jobCode TF-8823 or any AWAITING_APPROVAL job.",
+            "url": {
+              "raw": "http://127.0.0.1:5000/api/v1/jobs?page=1&limit=50",
+              "protocol": "http",
+              "host": [
+                "127",
+                "0",
+                "0",
+                "1"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "jobs"
+              ],
+              "port": "5000",
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "50"
+                }
+              ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{fleetAccessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "function setVar(key, val) {",
+                  "  if (val === undefined || val === null || val === '') return;",
+                  "  try { pm.environment.set(key, val); } catch (e) {}",
+                  "  try { pm.collectionVariables.set(key, val); } catch (e) {}",
+                  "}",
+                  "function getVar(k){ try{return pm.environment.get(k)||pm.collectionVariables.get(k);}catch(e){return '';}}",
+                  "const jobs = (pm.response.json().data || []);",
+                  "function byCode(code){ return jobs.find(j => j.jobCode === code || j.id === code); }",
+                  "const codes = { jobIdAwaitingApproval: getVar('jobCodeAwaitingApproval'), jobIdPosted: getVar('jobCodePosted'), jobIdEnRoute: getVar('jobCodeEnRoute') };",
+                  "Object.entries(codes).forEach(([varName, code]) => { const j = byCode(code); if (j && j._id) setVar(varName, j._id); });",
+                  "const anyAwaiting = jobs.find(j => j.status === 'AWAITING_APPROVAL');",
+                  "if (anyAwaiting && anyAwaiting._id) setVar('jobIdAwaitingApproval', anyAwaiting._id);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /company/jobs — resolve company awaiting job",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "description": "",
+            "url": {
+              "raw": "http://127.0.0.1:5000/api/v1/company/jobs?page=1&limit=50",
+              "protocol": "http",
+              "host": [
+                "127",
+                "0",
+                "0",
+                "1"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "company",
+                "jobs"
+              ],
+              "port": "5000",
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "50"
+                }
+              ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{companyAccessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "function setVar(key, val) {",
+                  "  if (val === undefined || val === null || val === '') return;",
+                  "  try { pm.environment.set(key, val); } catch (e) {}",
+                  "  try { pm.collectionVariables.set(key, val); } catch (e) {}",
+                  "}",
+                  "const jobs = pm.response.json().data || [];",
+                  "const j = jobs.find(x => x.status === 'AWAITING_APPROVAL');",
+                  "if (j && j._id) setVar('jobIdAwaitingApprovalCompany', j._id);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "01 — Stripe (Fleet payer)",
+      "item": [
+        {
+          "name": "GET /billing/stripe/config",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "description": "Returns publishableKey + enabled. Expect enabled:true if STRIPE_* env set.",
+            "url": {
+              "raw": "http://127.0.0.1:5000/api/v1/billing/stripe/config",
+              "protocol": "http",
+              "host": [
+                "127",
+                "0",
+                "0",
+                "1"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "billing",
+                "stripe",
+                "config"
+              ],
+              "port": "5000"
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{fleetAccessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Stripe enabled', () => {",
+                  "  const d = pm.response.json().data;",
+                  "  pm.expect(d.enabled).to.eql(true);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /billing/stripe/setup-intent",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "description": "Creates Stripe customer + SetupIntent. Use clientSecret in mobile Stripe SDK to get pm_...",
+            "url": {
+              "raw": "http://127.0.0.1:5000/api/v1/billing/stripe/setup-intent",
+              "protocol": "http",
+              "host": [
+                "127",
+                "0",
+                "0",
+                "1"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "billing",
+                "stripe",
+                "setup-intent"
+              ],
+              "port": "5000"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{fleetAccessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "function setVar(key, val) {",
+                  "  if (val === undefined || val === null || val === '') return;",
+                  "  try { pm.environment.set(key, val); } catch (e) {}",
+                  "  try { pm.collectionVariables.set(key, val); } catch (e) {}",
+                  "}",
+                  "const d = pm.response.json().data;",
+                  "if (d.setupIntentId) setVar('setupIntentId', d.setupIntentId);",
+                  "if (d.customerId) setVar('stripeCustomerId', d.customerId);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /billing/stripe/payment-methods/attach",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "description": "REQUIRED: Set collection var stripePmId to a REAL Stripe pm_... from your account.\nGet one: npm run test:stripe (prints pm_) OR Stripe Dashboard test card.\nNOT the Mongo id — that goes on job approve only.\nIdempotent: same pm_ returns existing card (200/201).",
+            "url": {
+              "raw": "http://127.0.0.1:5000/api/v1/billing/stripe/payment-methods/attach",
+              "protocol": "http",
+              "host": [
+                "127",
+                "0",
+                "0",
+                "1"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "billing",
+                "stripe",
+                "payment-methods",
+                "attach"
+              ],
+              "port": "5000"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"paymentMethodId\": \"{{stripePmId}}\",\n  \"isDefault\": true,\n  \"setupIntentId\": \"{{setupIntentId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{fleetAccessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "function setVar(key, val) {",
+                  "  if (val === undefined || val === null || val === '') return;",
+                  "  try { pm.environment.set(key, val); } catch (e) {}",
+                  "  try { pm.collectionVariables.set(key, val); } catch (e) {}",
+                  "}",
+                  "const d = pm.response.json().data;",
+                  "if (d && d._id) setVar('fleetPaymentMethodDbId', d._id);",
+                  "if (d && d.providerMethodId) setVar('stripePmId', d.providerMethodId);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /billing/payment-methods",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "description": "",
+            "url": {
+              "raw": "http://127.0.0.1:5000/api/v1/billing/payment-methods",
+              "protocol": "http",
+              "host": [
+                "127",
+                "0",
+                "0",
+                "1"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "billing",
+                "payment-methods"
+              ],
+              "port": "5000"
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{fleetAccessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": []
+        },
+        {
+          "name": "PATCH /billing/payment-methods/:methodId/default",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "description": "",
+            "url": {
+              "raw": "http://127.0.0.1:5000/api/v1/billing/payment-methods/{{fleetPaymentMethodDbId}}/default",
+              "protocol": "http",
+              "host": [
+                "127",
+                "0",
+                "0",
+                "1"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "billing",
+                "payment-methods",
+                "{{fleetPaymentMethodDbId}}",
+                "default"
+              ],
+              "port": "5000"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{fleetAccessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": []
+        },
+        {
+          "name": "PATCH /jobs/:jobId/complete/approve (Stripe charge)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "description": "Uses Mongo payment method _id. Job must be AWAITING_APPROVAL.\nRe-seed if no jobs: npm run seed:fake",
+            "url": {
+              "raw": "http://127.0.0.1:5000/api/v1/jobs/{{jobIdAwaitingApproval}}/complete/approve",
+              "protocol": "http",
+              "host": [
+                "127",
+                "0",
+                "0",
+                "1"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "jobs",
+                "{{jobIdAwaitingApproval}}",
+                "complete",
+                "approve"
+              ],
+              "port": "5000"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"paymentMethodId\": \"{{fleetPaymentMethodDbId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{fleetAccessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "function setVar(key, val) {",
+                  "  if (val === undefined || val === null || val === '') return;",
+                  "  try { pm.environment.set(key, val); } catch (e) {}",
+                  "  try { pm.collectionVariables.set(key, val); } catch (e) {}",
+                  "}",
+                  "const inv = pm.response.json().data && pm.response.json().data.invoice;",
+                  "if (inv && inv.payment && inv.payment.stripePaymentIntentId) {",
+                  "  setVar('paymentIntentId', inv.payment.stripePaymentIntentId);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "PATCH /jobs/:jobId/complete/approve (manual, no Stripe)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "description": "Optional: omit paymentMethodId — marks paid without Stripe. Use a different awaiting job.",
+            "url": {
+              "raw": "http://127.0.0.1:5000/api/v1/jobs/{{jobIdAwaitingApproval}}/complete/approve",
+              "protocol": "http",
+              "host": [
+                "127",
+                "0",
+                "0",
+                "1"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "jobs",
+                "{{jobIdAwaitingApproval}}",
+                "complete",
+                "approve"
+              ],
+              "port": "5000"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"finalAmount\": 145\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{fleetAccessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": []
+        },
+        {
+          "name": "POST /billing/stripe/payment-intents/:id/sync",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "description": "After 3DS or async payment — refreshes invoice status from Stripe.",
+            "url": {
+              "raw": "http://127.0.0.1:5000/api/v1/billing/stripe/payment-intents/{{paymentIntentId}}/sync",
+              "protocol": "http",
+              "host": [
+                "127",
+                "0",
+                "0",
+                "1"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "billing",
+                "stripe",
+                "payment-intents",
+                "{{paymentIntentId}}",
+                "sync"
+              ],
+              "port": "5000"
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{fleetAccessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": []
+        },
+        {
+          "name": "DELETE /billing/payment-methods/:methodId",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "description": "Soft-delete in DB only. Optional cleanup.",
+            "url": {
+              "raw": "http://127.0.0.1:5000/api/v1/billing/payment-methods/{{fleetPaymentMethodDbId}}",
+              "protocol": "http",
+              "host": [
+                "127",
+                "0",
+                "0",
+                "1"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "billing",
+                "payment-methods",
+                "{{fleetPaymentMethodDbId}}"
+              ],
+              "port": "5000"
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{fleetAccessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": []
+        }
+      ]
+    },
+    {
+      "name": "02 — Stripe (Company payer)",
+      "item": [
+        {
+          "name": "GET /billing/stripe/config",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "description": "",
+            "url": {
+              "raw": "http://127.0.0.1:5000/api/v1/billing/stripe/config",
+              "protocol": "http",
+              "host": [
+                "127",
+                "0",
+                "0",
+                "1"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "billing",
+                "stripe",
+                "config"
+              ],
+              "port": "5000"
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{companyAccessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": []
+        },
+        {
+          "name": "POST /billing/stripe/setup-intent",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "description": "",
+            "url": {
+              "raw": "http://127.0.0.1:5000/api/v1/billing/stripe/setup-intent",
+              "protocol": "http",
+              "host": [
+                "127",
+                "0",
+                "0",
+                "1"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "billing",
+                "stripe",
+                "setup-intent"
+              ],
+              "port": "5000"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{companyAccessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "function setVar(key, val) {",
+                  "  if (val === undefined || val === null || val === '') return;",
+                  "  try { pm.environment.set(key, val); } catch (e) {}",
+                  "  try { pm.collectionVariables.set(key, val); } catch (e) {}",
+                  "}",
+                  "const d = pm.response.json().data;",
+                  "if (d.setupIntentId) setVar('companySetupIntentId', d.setupIntentId);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /billing/stripe/payment-methods/attach",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "description": "Set companyStripePmId to real pm_... before running.",
+            "url": {
+              "raw": "http://127.0.0.1:5000/api/v1/billing/stripe/payment-methods/attach",
+              "protocol": "http",
+              "host": [
+                "127",
+                "0",
+                "0",
+                "1"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "billing",
+                "stripe",
+                "payment-methods",
+                "attach"
+              ],
+              "port": "5000"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"paymentMethodId\": \"{{companyStripePmId}}\",\n  \"isDefault\": true,\n  \"setupIntentId\": \"{{companySetupIntentId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{companyAccessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "function setVar(key, val) {",
+                  "  if (val === undefined || val === null || val === '') return;",
+                  "  try { pm.environment.set(key, val); } catch (e) {}",
+                  "  try { pm.collectionVariables.set(key, val); } catch (e) {}",
+                  "}",
+                  "const d = pm.response.json().data;",
+                  "if (d && d._id) setVar('companyPaymentMethodDbId', d._id);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /billing/payment-methods",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "description": "",
+            "url": {
+              "raw": "http://127.0.0.1:5000/api/v1/billing/payment-methods",
+              "protocol": "http",
+              "host": [
+                "127",
+                "0",
+                "0",
+                "1"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "billing",
+                "payment-methods"
+              ],
+              "port": "5000"
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{companyAccessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": []
+        },
+        {
+          "name": "PATCH /company/jobs/:jobId/complete/approve (Stripe required)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "description": "Company MUST pass paymentMethodId (Mongo _id). payment fails → job stays AWAITING_APPROVAL.",
+            "url": {
+              "raw": "http://127.0.0.1:5000/api/v1/company/jobs/{{jobIdAwaitingApprovalCompany}}/complete/approve",
+              "protocol": "http",
+              "host": [
+                "127",
+                "0",
+                "0",
+                "1"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "company",
+                "jobs",
+                "{{jobIdAwaitingApprovalCompany}}",
+                "complete",
+                "approve"
+              ],
+              "port": "5000"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"paymentMethodId\": \"{{companyPaymentMethodDbId}}\",\n  \"invoice\": {\n    \"callOutCharge\": 50,\n    \"labourHours\": 2,\n    \"labourRatePerHour\": 45,\n    \"parts\": [\n      {\n        \"description\": \"Oil filter\",\n        \"amount\": 25\n      }\n    ]\n  },\n  \"totalAmount\": 165\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{companyAccessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "function setVar(key, val) {",
+                  "  if (val === undefined || val === null || val === '') return;",
+                  "  try { pm.environment.set(key, val); } catch (e) {}",
+                  "  try { pm.collectionVariables.set(key, val); } catch (e) {}",
+                  "}",
+                  "const pi = pm.response.json().data?.invoice?.payment?.stripePaymentIntentId;",
+                  "if (pi) setVar('companyPaymentIntentId', pi);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "03 — Stripe (Mechanic Connect)",
+      "item": [
+        {
+          "name": "GET /billing/stripe/mechanic-payout-account",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "description": "",
+            "url": {
+              "raw": "http://127.0.0.1:5000/api/v1/billing/stripe/mechanic-payout-account",
+              "protocol": "http",
+              "host": [
+                "127",
+                "0",
+                "0",
+                "1"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "billing",
+                "stripe",
+                "mechanic-payout-account"
+              ],
+              "port": "5000"
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{mechanicAccessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": []
+        },
+        {
+          "name": "POST /billing/stripe/mechanic-payout-account/onboarding-link",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "description": "Open data.url in browser to complete Stripe Connect KYC.",
+            "url": {
+              "raw": "http://127.0.0.1:5000/api/v1/billing/stripe/mechanic-payout-account/onboarding-link",
+              "protocol": "http",
+              "host": [
+                "127",
+                "0",
+                "0",
+                "1"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "billing",
+                "stripe",
+                "mechanic-payout-account",
+                "onboarding-link"
+              ],
+              "port": "5000"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"returnUrl\": \"https://adminpanelwebsite-eosin.vercel.app/stripe/return\",\n  \"refreshUrl\": \"https://adminpanelwebsite-eosin.vercel.app/stripe/refresh\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{mechanicAccessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": []
+        },
+        {
+          "name": "POST /billing/stripe/mechanic-payout-account/dashboard-link",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "description": "400 until onboarding details_submitted.",
+            "url": {
+              "raw": "http://127.0.0.1:5000/api/v1/billing/stripe/mechanic-payout-account/dashboard-link",
+              "protocol": "http",
+              "host": [
+                "127",
+                "0",
+                "0",
+                "1"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "billing",
+                "stripe",
+                "mechanic-payout-account",
+                "dashboard-link"
+              ],
+              "port": "5000"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{mechanicAccessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": []
+        }
+      ]
+    },
+    {
+      "name": "04 — Push notifications",
+      "item": [
+        {
+          "name": "POST /notifications/device-tokens (register FCM)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "description": "Replace fcmDeviceToken with a REAL token from Firebase/Flutter on a device for real push.\nPlaceholder only registers in DB — FCM will not deliver to fake tokens.",
+            "url": {
+              "raw": "http://127.0.0.1:5000/api/v1/notifications/device-tokens",
+              "protocol": "http",
+              "host": [
+                "127",
+                "0",
+                "0",
+                "1"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "notifications",
+                "device-tokens"
+              ],
+              "port": "5000"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"{{fcmDeviceToken}}\",\n  \"platform\": \"android\",\n  \"appVersion\": \"1.0.0\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{fleetAccessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": []
+        },
+        {
+          "name": "GET /notifications/device-tokens",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "description": "",
+            "url": {
+              "raw": "http://127.0.0.1:5000/api/v1/notifications/device-tokens",
+              "protocol": "http",
+              "host": [
+                "127",
+                "0",
+                "0",
+                "1"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "notifications",
+                "device-tokens"
+              ],
+              "port": "5000"
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{fleetAccessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": []
+        },
+        {
+          "name": "GET /notifications",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "description": "",
+            "url": {
+              "raw": "http://127.0.0.1:5000/api/v1/notifications?page=1&limit=20",
+              "protocol": "http",
+              "host": [
+                "127",
+                "0",
+                "0",
+                "1"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "notifications"
+              ],
+              "port": "5000",
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "20"
+                }
+              ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{fleetAccessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "function setVar(key, val) {",
+                  "  if (val === undefined || val === null || val === '') return;",
+                  "  try { pm.environment.set(key, val); } catch (e) {}",
+                  "  try { pm.collectionVariables.set(key, val); } catch (e) {}",
+                  "}",
+                  "const items = pm.response.json().data || [];",
+                  "if (items[0] && items[0]._id) setVar('notificationId', items[0]._id);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /notifications/:id",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "description": "Includes navigation.screen, jobId, etc. for tap handling.",
+            "url": {
+              "raw": "http://127.0.0.1:5000/api/v1/notifications/{{notificationId}}",
+              "protocol": "http",
+              "host": [
+                "127",
+                "0",
+                "0",
+                "1"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "notifications",
+                "{{notificationId}}"
+              ],
+              "port": "5000"
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{fleetAccessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": []
+        },
+        {
+          "name": "PATCH /notifications/:id/read",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "description": "",
+            "url": {
+              "raw": "http://127.0.0.1:5000/api/v1/notifications/{{notificationId}}/read",
+              "protocol": "http",
+              "host": [
+                "127",
+                "0",
+                "0",
+                "1"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "notifications",
+                "{{notificationId}}",
+                "read"
+              ],
+              "port": "5000"
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{fleetAccessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": []
+        },
+        {
+          "name": "GET /users/me (includes preferences)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "description": "Check data.preferences.pushEnabled and notifications.*",
+            "url": {
+              "raw": "http://127.0.0.1:5000/api/v1/users/me",
+              "protocol": "http",
+              "host": [
+                "127",
+                "0",
+                "0",
+                "1"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "users",
+                "me"
+              ],
+              "port": "5000"
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{fleetAccessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": []
+        },
+        {
+          "name": "PATCH /users/me/preferences (enable push)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "description": "",
+            "url": {
+              "raw": "http://127.0.0.1:5000/api/v1/users/me/preferences",
+              "protocol": "http",
+              "host": [
+                "127",
+                "0",
+                "0",
+                "1"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "users",
+                "me",
+                "preferences"
+              ],
+              "port": "5000"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"pushEnabled\": true,\n  \"notifications\": {\n    \"appAlerts\": true,\n    \"systemAlerts\": true\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{fleetAccessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": []
+        }
+      ]
+    },
+    {
+      "name": "05 — Trigger push (send chat → notification)",
+      "item": [
+        {
+          "name": "POST /chat/jobs/:jobId/messages (Mechanic → Fleet push)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "description": "Fleet user must have registered device token + pushEnabled.\njobIdPosted resolved in setup (TF-8819) or set manually.",
+            "url": {
+              "raw": "http://127.0.0.1:5000/api/v1/chat/jobs/{{jobIdPosted}}/messages",
+              "protocol": "http",
+              "host": [
+                "127",
+                "0",
+                "0",
+                "1"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "chat",
+                "jobs",
+                "{{jobIdPosted}}",
+                "messages"
+              ],
+              "port": "5000"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"text\": \"Postman test — this should create CHAT_MESSAGE notification + FCM push to fleet.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{mechanicAccessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": []
+        },
+        {
+          "name": "POST /chat/jobs/:jobId/messages (Fleet → Mechanic push)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "description": "",
+            "url": {
+              "raw": "http://127.0.0.1:5000/api/v1/chat/jobs/{{jobIdPosted}}/messages",
+              "protocol": "http",
+              "host": [
+                "127",
+                "0",
+                "0",
+                "1"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "chat",
+                "jobs",
+                "{{jobIdPosted}}",
+                "messages"
+              ],
+              "port": "5000"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"text\": \"Reply from fleet — push to mechanic if token registered.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{fleetAccessToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": []
+        }
+      ]
+    }
+  ]
+}

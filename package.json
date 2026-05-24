@@ -11,6 +11,7 @@
     "test:stripe:company": "node scripts/testStripeApis.mjs --role=company",
     "test:stripe:mechanic": "node scripts/testStripeApis.mjs --role=mechanic",
     "test:stripe:all": "node scripts/testStripeApis.mjs --all",
+    "postman:stripe-push": "node postman/build-stripe-push-collection.mjs",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
