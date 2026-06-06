@@ -17,6 +17,7 @@ import { companyEarningsBreakdown } from "../../utils/companyEarningsMath.js";
 import { readMechanicProfileRatingAverage, resolveMechanicRatingForInvoiceContext } from "../../utils/mechanicRating.js";
 import { listOwnerQuotesPaginated, countOwnerQuotesByStatus } from "../quote/quote.service.js";
 import { env } from "../../config/env.js";
+import { notifyMechanicAssigned } from "../notification/jobQuoteNotification.service.js";
 
 const ACTIVE_JOB_STATUSES = [
   JOB_STATUS.ASSIGNED,
@@ -1281,6 +1282,8 @@ export const assignMechanicToCompanyJob = async (jobId, employeeId, companyUser)
 
   const displayRefMap = await loadTeamMemberDisplayRefMap(companyUser);
   const mechanicRef = displayRefMap.get(`${employee._id}`) || null;
+
+  await notifyMechanicAssigned(job, employee._id, { reassigned: Boolean(previousMechanic) });
 
   return {
     _id: job._id,

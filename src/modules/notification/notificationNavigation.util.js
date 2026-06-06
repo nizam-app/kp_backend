@@ -27,14 +27,41 @@ export const buildNotificationNavigation = (type, data = {}) => {
         params: { ticketId },
       };
     }
-    case "REVIEW_CREATED": {
+    case "REVIEW_CREATED":
+    case "JOB_ASSIGNED":
+    case "JOB_MECHANIC_REASSIGNED":
+    case "JOB_STATUS_EN_ROUTE":
+    case "JOB_STATUS_ON_SITE":
+    case "JOB_STATUS_IN_PROGRESS":
+    case "JOB_AWAITING_APPROVAL":
+    case "JOB_COMPLETED":
+    case "JOB_CANCELLED":
+    case "QUOTE_ACCEPTED": {
       const jobId = d.jobId != null ? `${d.jobId}` : "";
       if (!jobId) return null;
       return {
         screen: "JOB_DETAIL",
         params: {
           jobId,
+          ...(d.jobCode ? { jobCode: `${d.jobCode}` } : {}),
+          ...(d.jobStatus ? { jobStatus: `${d.jobStatus}` } : {}),
           ...(d.reviewId ? { reviewId: `${d.reviewId}` } : {}),
+        },
+      };
+    }
+    case "QUOTE_RECEIVED":
+    case "QUOTE_DECLINED":
+    case "QUOTE_UPDATED":
+    case "QUOTE_WITHDRAWN":
+    case "QUOTE_NOT_SELECTED": {
+      const jobId = d.jobId != null ? `${d.jobId}` : "";
+      if (!jobId) return null;
+      return {
+        screen: "JOB_QUOTES",
+        params: {
+          jobId,
+          ...(d.jobCode ? { jobCode: `${d.jobCode}` } : {}),
+          ...(d.quoteId ? { quoteId: `${d.quoteId}` } : {}),
         },
       };
     }

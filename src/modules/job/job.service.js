@@ -34,6 +34,11 @@ import {
 import { getProfileCompletionSummary } from "../user/user.service.js";
 import { readMechanicProfileRatingAverage } from "../../utils/mechanicRating.js";
 import {
+  notifyJobCancelled,
+  notifyJobCompleted,
+  notifyJobStatusChanged,
+} from "../notification/jobQuoteNotification.service.js";
+import {
   emitJobEvent,
   emitJobLocationPing,
   emitJobPosted,
@@ -1321,6 +1326,10 @@ const finalizeApprovedJobCompletion = async ({
     paymentStatus: paymentContext.paymentStatus,
   });
 
+  await notifyJobCompleted(job, {
+    approvedByCompany: Boolean(eventExtras.approvedByCompany),
+  });
+
   return {
     job,
     invoice: financials.invoice,
@@ -1889,6 +1898,8 @@ const transitionAssignedJob = async ({
     changedBy: toObjectIdString(user._id),
   });
 
+  await notifyJobStatusChanged(job, toStatus);
+
   return job;
 };
 
@@ -2210,6 +2221,8 @@ export const cancelJob = async (jobId, fleetUser, payload = {}) => {
     changedBy: toObjectIdString(fleetUser._id),
     cancellation,
   });
+
+  await notifyJobCancelled(job, payload.reason);
 
   return {
     job,

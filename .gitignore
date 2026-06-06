@@ -17,3 +17,8 @@ secrets/*
 /public/*   
 !/public/index.html
 .vercel
+
+# Local Postman collections and env files (keep on disk, do not push to GitHub)
+postman/
+
+

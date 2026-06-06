@@ -6,6 +6,14 @@ import { Job } from "../job/job.model.js";
 import { JobEvent } from "../jobEvent/jobEvent.model.js";
 import { User } from "../user/user.model.js";
 import { readMechanicProfileRatingAverage } from "../../utils/mechanicRating.js";
+import {
+  notifyQuoteAccepted,
+  notifyQuoteAmended,
+  notifyQuoteDeclined,
+  notifyQuoteSubmitted,
+  notifyQuotesNotSelected,
+  notifyQuoteWithdrawn,
+} from "../notification/jobQuoteNotification.service.js";
 
 const now = () => new Date();
 const sessionOptions = (session) => (session ? { session } : {});
@@ -469,6 +477,8 @@ export const submitQuote = async (jobId, payload, mechanicUser) => {
   const populated = await baseQuotePopulate(Quote.findById(quote._id)).lean();
   await mergeQuoteActorsProfileExtrasFromDb([populated]);
 
+  await notifyQuoteSubmitted(job, quote, mechanicUser);
+
   return serializeQuote(populated);
 };
 
@@ -578,6 +588,16 @@ export const acceptQuote = async (quoteId, fleetUser) => {
 
     const job = await Job.findById(quote.job, null, sessionOptions(session));
 
+    const otherWaitingQuotes = await Quote.find(
+      {
+        job: quote.job,
+        _id: { $ne: quote._id },
+        status: QUOTE_STATUS.WAITING,
+      },
+      null,
+      sessionOptions(session)
+    ).lean();
+
     await Quote.updateMany(
       {
         job: quote.job,
@@ -610,6 +630,9 @@ export const acceptQuote = async (quoteId, fleetUser) => {
     const populated = await baseQuotePopulate(Quote.findById(acceptedQuote._id)).lean();
     await mergeQuoteActorsProfileExtrasFromDb([populated]);
 
+    await notifyQuoteAccepted(job, quote);
+    await notifyQuotesNotSelected(job, otherWaitingQuotes);
+
     return { quote: serializeQuote(populated), job };
   });
 };
@@ -630,6 +653,8 @@ export const declineQuote = async (quoteId, fleetUser) => {
   quote.declinedAt = now();
   await quote.save();
 
+  const job = await Job.findById(quote.job).lean();
+
   await JobEvent.create({
     job: quote.job,
     actor: fleetUser._id,
@@ -639,6 +664,8 @@ export const declineQuote = async (quoteId, fleetUser) => {
 
   const populated = await baseQuotePopulate(Quote.findById(quote._id)).lean();
   await mergeQuoteActorsProfileExtrasFromDb([populated]);
+
+  if (job) await notifyQuoteDeclined(job, quote);
 
   return serializeQuote(populated);
 };
@@ -708,6 +735,9 @@ export const amendQuote = async (quoteId, payload, mechanicUser) => {
 
   const populated = await baseQuotePopulate(Quote.findById(quote._id)).lean();
 
+  const job = await Job.findById(quote.job).lean();
+  if (job) await notifyQuoteAmended(job, quote);
+
   return serializeQuote(populated);
 };
 
@@ -747,6 +777,9 @@ export const withdrawQuote = async (quoteId, mechanicUser) => {
 
   const populated = await baseQuotePopulate(Quote.findById(quote._id)).lean();
   await mergeQuoteActorsProfileExtrasFromDb([populated]);
+
+  const job = await Job.findById(quote.job).lean();
+  if (job) await notifyQuoteWithdrawn(job, quote);
 
   return serializeQuote(populated);
 };
