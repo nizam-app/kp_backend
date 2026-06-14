@@ -667,17 +667,25 @@ const assertStripePaymentSucceeded = (paymentContext, { required = false } = {})
   }
   if (paymentContext.paymentStatus === "SUCCEEDED") return;
 
+  const paymentErrorData = {
+    stripePaymentIntentId: paymentContext.stripePaymentIntentId || null,
+    clientSecret: paymentContext.stripeClientSecret || null,
+    paymentStatus: paymentContext.paymentStatus || null,
+  };
+
   if (paymentContext.paymentStatus === "REQUIRES_ACTION") {
     throw new AppError(
       "Card payment requires authentication (3D Secure). Complete verification, then POST /billing/stripe/payment-intents/:id/sync.",
-      402
+      402,
+      paymentErrorData
     );
   }
 
   throw new AppError(
     paymentContext.lastError ||
       `Card payment did not complete (status: ${paymentContext.paymentStatus || "unknown"})`,
-    402
+    402,
+    paymentErrorData
   );
 };
 
@@ -1343,7 +1351,10 @@ export const createJob = async (payload, fleetUser) => {
   }
   const { profileCompletion } = await getProfileCompletionSummary(fleetUser);
   if (!profileCompletion?.isComplete) {
-    throw new AppError("Complete your profile before posting a job", 400);
+    throw new AppError("Complete your profile before posting a job", 400, {
+      code: "PROFILE_INCOMPLETE",
+      profileCompletion,
+    });
   }
 
   const scheduling = normalizeAvailabilityWindow(payload);

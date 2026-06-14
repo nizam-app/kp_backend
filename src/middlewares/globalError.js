@@ -25,9 +25,12 @@ export const globalError = (err, req, res, next) => {
   if (err.name === "JsonWebTokenError") err = new AppError("Invalid token", 401);
   if (err.name === "TokenExpiredError") err = new AppError("Token expired", 401);
 
-  // Production-friendly response
-  res.status(err.statusCode || statusCode).json({
+  const payload = {
     status: err.status || status,
     message: err.message || "Something went wrong",
-  });
+  };
+  if (err.data && typeof err.data === "object") {
+    payload.data = err.data;
+  }
+  res.status(err.statusCode || statusCode).json(payload);
 };
