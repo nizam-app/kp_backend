@@ -208,6 +208,7 @@ const serializeServiceRequest = (job) => {
       tone: serviceRequestToneFromBucket(bucket),
       raw: job.status,
     },
+    fleetId: job.fleet?._id || job.fleet || null,
     assignedTo: job.assignedMechanic
       ? {
           _id: job.assignedMechanic._id || job.assignedMechanic,
@@ -549,6 +550,35 @@ export const listAdminServiceRequests = async (query = {}) => {
       { "vehicle.make": searchRegex },
       { "vehicle.model": searchRegex },
     ];
+  }
+
+  if (query.fleetId) {
+    filter.fleet = `${query.fleetId}`.trim();
+  }
+
+  if (query.mechanicId) {
+    filter.assignedMechanic = `${query.mechanicId}`.trim();
+  }
+
+  const invoiceEligible =
+    query.invoiceEligible === true ||
+    `${query.invoiceEligible || ""}`.trim().toLowerCase() === "true";
+  if (invoiceEligible) {
+    filter.assignedMechanic = filter.assignedMechanic || { $exists: true, $ne: null };
+    filter.status = {
+      $in: [
+        JOB_STATUS.AWAITING_APPROVAL,
+        JOB_STATUS.COMPLETED,
+        JOB_STATUS.IN_PROGRESS,
+        JOB_STATUS.ON_SITE,
+        JOB_STATUS.EN_ROUTE,
+        JOB_STATUS.ASSIGNED,
+      ],
+    };
+    const invoicedJobIds = await Invoice.distinct("job");
+    if (invoicedJobIds.length) {
+      filter._id = { ...(filter._id || {}), $nin: invoicedJobIds };
+    }
   }
 
   const [items, total, allStatusAgg] = await Promise.all([
@@ -1577,9 +1607,55 @@ export const getAdminFinancialOverview = async (query = {}) => {
   };
 };
 
+const toIdString = (value) => {
+  if (!value) return "";
+  if (typeof value === "string") return value.trim();
+  if (value._id) return `${value._id}`.trim();
+  return `${value}`.trim();
+};
+
 export const createAdminFinancialInvoice = async (payload = {}, adminUser) => {
   if (!payload.fleetId || !payload.mechanicId) {
     throw new AppError("fleetId and mechanicId are required", 400);
+  }
+
+  const jobId = `${payload.jobId || ""}`.trim();
+  if (!jobId) {
+    throw new AppError("jobId is required — link the invoice to a service request", 400);
+  }
+
+  const job = await Job.findById(jobId)
+    .populate("fleet", "email fleetProfile.companyName fleetProfile.vatNumber fleetProfile.billingAddress")
+    .populate(
+      "assignedMechanic",
+      "email mechanicProfile.displayName mechanicProfile.businessName mechanicProfile.rating"
+    )
+    .lean();
+  if (!job) {
+    throw new AppError("Service request not found", 404);
+  }
+
+  const fleetId = toIdString(payload.fleetId);
+  const mechanicId = toIdString(payload.mechanicId);
+  const jobFleetId = toIdString(job.fleet);
+  const jobMechanicId = toIdString(job.assignedMechanic);
+
+  if (jobFleetId !== fleetId) {
+    throw new AppError("Selected service request does not belong to the chosen fleet company", 400);
+  }
+  if (!jobMechanicId) {
+    throw new AppError("Assign a mechanic to this service request before creating an invoice", 400);
+  }
+  if (jobMechanicId !== mechanicId) {
+    throw new AppError("Selected service request is not assigned to the chosen technician", 400);
+  }
+
+  const existingInvoice = await Invoice.findOne({ job: job._id }).select("_id invoiceNo").lean();
+  if (existingInvoice) {
+    throw new AppError(
+      `Invoice already exists for this service request: ${existingInvoice.invoiceNo}`,
+      409
+    );
   }
 
   const subtotal = Number(payload.subtotal ?? payload.totalAmount);
@@ -1596,9 +1672,9 @@ export const createAdminFinancialInvoice = async (payload = {}, adminUser) => {
 
   const invoice = await Invoice.create({
     invoiceNo: await generateAdminInvoiceNo(),
-    job: payload.jobId,
-    fleet: payload.fleetId,
-    mechanic: payload.mechanicId,
+    job: job._id,
+    fleet: fleetId,
+    mechanic: mechanicId,
     subtotal,
     vatAmount,
     totalAmount,
@@ -1623,14 +1699,22 @@ export const createAdminFinancialInvoice = async (payload = {}, adminUser) => {
             },
           ],
     billedToSnapshot: {
-      companyName: payload.companyName,
-      vatNumber: payload.vatNumber,
-      address: payload.billingAddress,
+      companyName:
+        payload.companyName || job.fleet?.fleetProfile?.companyName || undefined,
+      vatNumber: payload.vatNumber || job.fleet?.fleetProfile?.vatNumber || undefined,
+      address: payload.billingAddress || job.fleet?.fleetProfile?.billingAddress || undefined,
     },
     mechanicSnapshot: {
-      displayName: payload.mechanicName,
-      businessName: payload.mechanicBusinessName,
-      rating: payload.mechanicRating,
+      displayName:
+        payload.mechanicName || job.assignedMechanic?.mechanicProfile?.displayName || undefined,
+      businessName:
+        payload.mechanicBusinessName ||
+        job.assignedMechanic?.mechanicProfile?.businessName ||
+        undefined,
+      rating:
+        payload.mechanicRating ||
+        job.assignedMechanic?.mechanicProfile?.rating?.average ||
+        undefined,
     },
   });
 
