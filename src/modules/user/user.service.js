@@ -229,7 +229,7 @@ const finiteNumOrNull = (v) => (Number.isFinite(v) ? v : null);
 const buildFleetCompletion = (user, defaultPaymentMethod) => {
   const fleetProfile = user.fleetProfile || {};
   const companyDetailsComplete = Boolean(
-    fleetProfile.companyName && fleetProfile.regNumber && fleetProfile.vatNumber
+    fleetProfile.companyName && fleetProfile.regNumber
   );
   const contactPersonComplete = Boolean(
     fleetProfile.contactName &&
@@ -293,7 +293,7 @@ const buildCompanyCompletion = (user, defaultPaymentMethod) => {
   const businessIdentityComplete = Boolean(
     companyProfile.companyName &&
       companyProfile.regNumber &&
-      companyProfile.vatNumber
+      (!companyProfile.vatRegistered || companyProfile.vatNumber)
   );
   const contactPersonComplete = Boolean(
     companyProfile.contactName &&
@@ -388,8 +388,7 @@ const buildMechanicCompletion = (user, defaultPaymentMethod) => {
   );
   const payoutComplete = Boolean(defaultPaymentMethod || profileBankComplete);
   const vatNumTrimmed = `${mechanicProfile.vatNumber || ""}`.trim();
-  const vatRegisteredEffective =
-    Boolean(mechanicProfile.vatRegistered) || Boolean(vatNumTrimmed);
+  const vatRegisteredEffective = mechanicProfile.vatRegistered === true;
 
   const items = [
     {
@@ -709,7 +708,7 @@ const buildProfileResponse = async (user) => {
     const mp = { ...(response.mechanicProfile || {}) };
     const vatNum = `${mp.vatNumber || ""}`.trim();
     mp.vatNumber = vatNum || null;
-    mp.vatRegistered = Boolean(mp.vatRegistered) || Boolean(vatNum);
+    mp.vatRegistered = mp.vatRegistered === true;
     response.mechanicProfile = mp;
     const { start: weekStart, end: weekEndExclusive } = getMechanicCalendarWeekBounds();
     const jobsThisWeek = await countMechanicJobsCompletedThisCalendarWeek(base._id);
@@ -749,6 +748,7 @@ const buildProfileResponse = async (user) => {
       phone: base.companyProfile?.phone || null,
       regNumber: base.companyProfile?.regNumber || null,
       vatNumber: base.companyProfile?.vatNumber || null,
+      vatRegistered: base.companyProfile?.vatRegistered === true,
       billingAddress: base.companyProfile?.billingAddress || null,
       baseLocationText: base.companyProfile?.baseLocationText || null,
       serviceRadiusMiles: base.companyProfile?.serviceRadiusMiles ?? null,
@@ -967,6 +967,7 @@ export const updateOwnProfile = async (user, payload) => {
       "phone",
       "regNumber",
       "vatNumber",
+      "vatRegistered",
       "billingAddress",
       "baseLocationText",
       "serviceRadiusMiles",
@@ -978,10 +979,11 @@ export const updateOwnProfile = async (user, payload) => {
       "bankSortCode",
     ]);
 
+    const normalizedPatch = coerceVatRegisteredInPatch(patch);
     const nextProfile = {
       ...(user.companyProfile || {}),
-      ...patch,
-      serviceRadiusMiles: patch.coverageRadius ?? patch.serviceRadiusMiles ?? user.companyProfile?.serviceRadiusMiles,
+      ...normalizedPatch,
+      serviceRadiusMiles: normalizedPatch.coverageRadius ?? normalizedPatch.serviceRadiusMiles ?? user.companyProfile?.serviceRadiusMiles,
     };
     delete nextProfile.coverageRadius;
 

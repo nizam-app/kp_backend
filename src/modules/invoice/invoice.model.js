@@ -20,6 +20,8 @@ const invoiceSchema = new Schema(
     mechanic: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
     subtotal: { type: Number, required: true, min: 0 },
     vatAmount: { type: Number, default: 0, min: 0 },
+    vatRate: { type: Number, default: 0, min: 0 },
+    vatApplied: { type: Boolean, default: false },
     totalAmount: { type: Number, required: true, min: 0 },
     currency: { type: String, trim: true, default: "GBP" },
     status: {
@@ -70,6 +72,13 @@ const invoiceSchema = new Schema(
       businessName: { type: String, trim: true },
       rating: { type: Number, min: 0, max: 5 },
       profilePhotoUrl: { type: String, trim: true },
+    },
+    supplierSnapshot: {
+      supplierType: { type: String, enum: ["MECHANIC", "COMPANY"] },
+      supplierId: { type: Schema.Types.ObjectId, ref: "User" },
+      name: { type: String, trim: true },
+      vatRegistered: { type: Boolean, default: false },
+      vatNumber: { type: String, trim: true },
     },
   },
   { timestamps: true }

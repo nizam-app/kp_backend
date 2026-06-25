@@ -258,6 +258,13 @@ const serializeInvoiceForEarnings = (invoice, currencyFallback) => {
     pdfUrl: invoice.pdfUrl || null,
     subtotal: invoice.subtotal != null ? roundMoney(invoice.subtotal) : null,
     vatAmount: invoice.vatAmount != null ? roundMoney(invoice.vatAmount) : null,
+    vatRate:
+      Number(invoice.vatRate) > 0
+        ? Number(invoice.vatRate)
+        : Number(invoice.subtotal) > 0 && Number(invoice.vatAmount) > 0
+          ? Number(invoice.vatAmount) / Number(invoice.subtotal)
+          : 0,
+    vatApplied: invoice.vatApplied === true || Number(invoice.vatAmount) > 0,
     totalAmount: invoice.totalAmount != null ? roundMoney(invoice.totalAmount) : null,
     currency: cur,
     status: invoice.status || null,
@@ -284,6 +291,7 @@ const serializeInvoiceForEarnings = (invoice, currencyFallback) => {
     })),
     billedToSnapshot: invoice.billedToSnapshot || null,
     mechanicSnapshot: invoice.mechanicSnapshot || null,
+    supplierSnapshot: invoice.supplierSnapshot || null,
     createdAt: invoice.createdAt || null,
     updatedAt: invoice.updatedAt || null,
     downloadPath: idStr ? `/api/v1/invoices/${idStr}/download` : null,
@@ -324,7 +332,7 @@ export const listEarningJobs = async (user, query = {}) => {
     job: { $in: jobIds },
   })
     .select(
-      "_id job invoiceNo pdfUrl lineItems subtotal vatAmount totalAmount currency issuedAt paidAt status payment billedToSnapshot mechanicSnapshot createdAt updatedAt"
+      "_id job invoiceNo pdfUrl lineItems subtotal vatAmount vatRate vatApplied totalAmount currency issuedAt paidAt status payment billedToSnapshot mechanicSnapshot supplierSnapshot createdAt updatedAt"
     )
     .lean();
 
@@ -510,7 +518,7 @@ export const getEarningsStatement = async (user, query = {}) => {
   const stmtJobIds = txs.map((t) => t.job?._id || t.job).filter(Boolean);
   const stmtInvoices = await Invoice.find({ mechanic: user._id, job: { $in: stmtJobIds } })
     .select(
-      "_id job invoiceNo pdfUrl lineItems subtotal vatAmount totalAmount currency issuedAt paidAt status payment billedToSnapshot mechanicSnapshot createdAt updatedAt"
+      "_id job invoiceNo pdfUrl lineItems subtotal vatAmount vatRate vatApplied totalAmount currency issuedAt paidAt status payment billedToSnapshot mechanicSnapshot supplierSnapshot createdAt updatedAt"
     )
     .lean();
   const stmtInvoiceByJobId = new Map(stmtInvoices.map((inv) => [inv.job.toString(), inv]));

@@ -135,6 +135,12 @@
 - Protected
 - fleet editable:
   - `companyName`, `regNumber`, `vatNumber`, `fleetSize`
+
+VAT on new job invoices is controlled by the assigned supplier's explicit
+`vatRegistered` profile flag. If false, `vatAmount` and `vatRate` are `0`.
+For company-assigned jobs the company profile is the supplier; otherwise the
+assigned mechanic profile is the supplier. A stored VAT number does not enable
+VAT by itself.
   - `contactName`, `contactRole`, `phone`, `email`
   - `billingAddress`
 - mechanic editable:

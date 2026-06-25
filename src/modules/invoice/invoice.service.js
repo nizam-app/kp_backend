@@ -30,6 +30,16 @@ const parseLimit = (value) => {
   return Math.min(Math.floor(n), 100);
 };
 
+const invoiceVatApplied = (invoice) =>
+  invoice.vatApplied === true || Number(invoice.vatAmount) > 0;
+
+const invoiceVatRate = (invoice) => {
+  if (Number(invoice.vatRate) > 0) return Number(invoice.vatRate);
+  const subtotal = Number(invoice.subtotal);
+  const vatAmount = Number(invoice.vatAmount);
+  return subtotal > 0 && vatAmount > 0 ? vatAmount / subtotal : 0;
+};
+
 const buildFallbackLineItems = (invoice) => {
   if (Array.isArray(invoice.lineItems) && invoice.lineItems.length > 0) {
     return invoice.lineItems;
@@ -59,9 +69,12 @@ const toInvoiceSummary = (invoice) => ({
   totalAmount: invoice.totalAmount,
   subtotal: invoice.subtotal,
   vatAmount: invoice.vatAmount,
+  vatRate: invoiceVatRate(invoice),
+  vatApplied: invoiceVatApplied(invoice),
   currency: invoice.currency,
   status: invoice.status,
   payment: invoice.payment || null,
+  supplier: invoice.supplierSnapshot || null,
   pdfUrl: invoice.pdfUrl || null,
   paidLabel: invoice.paidAt
     ? new Date(invoice.paidAt).toLocaleDateString("en-GB", {
@@ -107,6 +120,7 @@ const toInvoiceDetail = (invoice) => {
       invoice.mechanic?.mechanicProfile?.profilePhotoUrl ||
       null,
   },
+  supplier: invoice.supplierSnapshot || null,
   job: {
     _id: invoice.job?._id || invoice.job,
     jobCode: invoice.job?.jobCode || null,
@@ -142,6 +156,8 @@ const toInvoiceDetail = (invoice) => {
   totals: {
     subtotal: invoice.subtotal,
     vatAmount: invoice.vatAmount,
+    vatRate: invoiceVatRate(invoice),
+    vatApplied: invoiceVatApplied(invoice),
     totalAmount: invoice.totalAmount,
     currency: invoice.currency,
   },

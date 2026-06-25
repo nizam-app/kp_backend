@@ -144,6 +144,7 @@ const companyProfileSchema = new Schema(
     phone: { type: String, trim: true },
     regNumber: { type: String, trim: true },
     vatNumber: { type: String, trim: true },
+    vatRegistered: { type: Boolean, default: false },
     billingAddress: { type: String, trim: true },
     /** Display-only payout / bank lines for company profile UIs (not verified bank verification). */
     bankDisplayName: { type: String, trim: true },

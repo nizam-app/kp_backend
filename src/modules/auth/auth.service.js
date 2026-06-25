@@ -22,6 +22,8 @@ import { env } from "../../config/env.js";
 const sanitizeUser = (userDoc) => userDoc.toObject();
 const hashToken = (token) =>
   crypto.createHash("sha256").update(token).digest("hex");
+const parseOptionalBoolean = (value) =>
+  value === true || `${value || ""}`.trim().toLowerCase() === "true";
 
 const assertRoleAllowed = (role) => {
   if (![ROLES.FLEET, ROLES.MECHANIC, ROLES.COMPANY, ROLES.MECHANIC_EMPLOYEE].includes(role)) {
@@ -130,6 +132,7 @@ const applyRoleProfile = (role, payload) => {
         phone: payload.phone,
         regNumber: payload.regNumber,
         vatNumber: payload.vatNumber,
+        vatRegistered: parseOptionalBoolean(payload.vatRegistered),
         billingAddress: payload.billingAddress,
         baseLocationText: payload.baseLocationText,
         serviceRadiusMiles: payload.coverageRadius ?? payload.serviceRadiusMiles,
@@ -155,6 +158,8 @@ const applyRoleProfile = (role, payload) => {
       serviceRadiusMiles: payload.coverageRadius ?? payload.serviceRadiusMiles,
       profilePhotoUrl: payload.profilePhotoUrl,
       skills: payload.skills,
+      vatNumber: payload.vatNumber,
+      vatRegistered: parseOptionalBoolean(payload.vatRegistered),
       verification: {
         status: MECHANIC_VERIFICATION_STATUS.SUBMITTED,
         submittedAt: new Date(),

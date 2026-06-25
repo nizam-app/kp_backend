@@ -22,6 +22,7 @@ import { AuditLog } from "../auditLog/auditLog.model.js";
 import { JobEvent } from "../jobEvent/jobEvent.model.js";
 import { ChatMessage } from "../chat/chat.model.js";
 import { sendJobMessage } from "../chat/chat.service.js";
+import { calculateJobVat } from "../../utils/vat.js";
 
 const serviceRequestBucketFromJobStatus = (status) => {
   if ([JOB_STATUS.COMPLETED].includes(status)) return "COMPLETED";
@@ -784,9 +785,10 @@ export const sendAdminServiceRequestMessage = async (jobId, payload = {}, adminU
 export const createAdminServiceRequestInvoice = async (jobId, payload = {}, adminUser) => {
   const job = await Job.findById(jobId)
     .populate("fleet", "email fleetProfile.companyName fleetProfile.contactName")
+    .populate("assignedCompany", "email companyProfile")
     .populate(
       "assignedMechanic",
-      "email mechanicProfile.displayName mechanicProfile.businessName mechanicProfile.rating"
+      "email mechanicProfile"
     );
 
   if (!job) throw new AppError("Service request not found", 404);
@@ -1110,6 +1112,10 @@ export const createAdminUserOrCompany = async (payload = {}, adminUser) => {
       hourlyRate: payload.hourlyRate,
       emergencyRate: payload.emergencyRate,
       callOutFee: payload.callOutFee,
+      vatNumber: payload.vatNumber,
+      vatRegistered:
+        payload.vatRegistered === true ||
+        `${payload.vatRegistered || ""}`.trim().toLowerCase() === "true",
       serviceRadiusMiles: payload.serviceRadiusMiles,
       skills: payload.skills || [],
       verification: {
@@ -1198,6 +1204,12 @@ export const updateAdminUser = async (userId, payload = {}, adminUser) => {
           hourlyRate: payload.hourlyRate,
           emergencyRate: payload.emergencyRate,
           callOutFee: payload.callOutFee,
+          vatNumber: payload.vatNumber,
+          vatRegistered:
+            payload.vatRegistered === undefined
+              ? undefined
+              : payload.vatRegistered === true ||
+                `${payload.vatRegistered || ""}`.trim().toLowerCase() === "true",
           serviceRadiusMiles: payload.serviceRadiusMiles,
           skills: payload.skills,
         }).filter(([, value]) => value !== undefined)
@@ -1626,9 +1638,10 @@ export const createAdminFinancialInvoice = async (payload = {}, adminUser) => {
 
   const job = await Job.findById(jobId)
     .populate("fleet", "email fleetProfile.companyName fleetProfile.vatNumber fleetProfile.billingAddress")
+    .populate("assignedCompany", "email companyProfile")
     .populate(
       "assignedMechanic",
-      "email mechanicProfile.displayName mechanicProfile.businessName mechanicProfile.rating"
+      "email mechanicProfile"
     )
     .lean();
   if (!job) {
@@ -1663,12 +1676,29 @@ export const createAdminFinancialInvoice = async (payload = {}, adminUser) => {
     throw new AppError("subtotal or totalAmount must be greater than zero", 400);
   }
 
-  const vatAmount = Number.isFinite(Number(payload.vatAmount))
-    ? Number(payload.vatAmount)
-    : Math.round(subtotal * 0.2 * 100) / 100;
-  const totalAmount = Number.isFinite(Number(payload.totalAmount))
-    ? Number(payload.totalAmount)
-    : Math.round((subtotal + vatAmount) * 100) / 100;
+  const vat = calculateJobVat(job, subtotal);
+  const optionalNumber = (value) =>
+    value === undefined || value === null || `${value}`.trim() === ""
+      ? Number.NaN
+      : Number(value);
+  const requestedVat = optionalNumber(payload.vatAmount);
+  if (!vat.vatRegistered && Number.isFinite(requestedVat) && requestedVat !== 0) {
+    throw new AppError("VAT cannot be charged because the assigned supplier is not VAT registered", 400);
+  }
+  if (
+    vat.vatRegistered &&
+    Number.isFinite(requestedVat) &&
+    Math.abs(requestedVat - vat.vatAmount) > 0.01
+  ) {
+    throw new AppError("vatAmount does not match the supplier VAT rate", 400);
+  }
+  const vatAmount = vat.vatAmount;
+  const expectedTotal = Math.round((subtotal + vatAmount) * 100) / 100;
+  const requestedTotal = optionalNumber(payload.totalAmount);
+  if (Number.isFinite(requestedTotal) && Math.abs(requestedTotal - expectedTotal) > 0.01) {
+    throw new AppError("totalAmount must equal subtotal plus VAT", 400);
+  }
+  const totalAmount = Number.isFinite(requestedTotal) ? requestedTotal : expectedTotal;
 
   const invoice = await Invoice.create({
     invoiceNo: await generateAdminInvoiceNo(),
@@ -1677,6 +1707,8 @@ export const createAdminFinancialInvoice = async (payload = {}, adminUser) => {
     mechanic: mechanicId,
     subtotal,
     vatAmount,
+    vatRate: vat.vatRate,
+    vatApplied: vat.vatRegistered,
     totalAmount,
     currency: payload.currency || "GBP",
     status: `${payload.status || "ISSUED"}`.trim().toUpperCase(),
@@ -1715,6 +1747,13 @@ export const createAdminFinancialInvoice = async (payload = {}, adminUser) => {
         payload.mechanicRating ||
         job.assignedMechanic?.mechanicProfile?.rating?.average ||
         undefined,
+    },
+    supplierSnapshot: {
+      supplierType: vat.supplierType || undefined,
+      supplierId: vat.supplierId || undefined,
+      name: vat.supplierName || undefined,
+      vatRegistered: vat.vatRegistered,
+      vatNumber: vat.vatNumber || undefined,
     },
   });
 
@@ -2622,4 +2661,3 @@ export const updateUserStatus = async (userId, payload = {}) => {
     updatedAt: user.updatedAt,
   };
 };
-

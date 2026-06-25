@@ -33,6 +33,7 @@ import {
 } from "../billing/stripe.service.js";
 import { getProfileCompletionSummary } from "../user/user.service.js";
 import { readMechanicProfileRatingAverage } from "../../utils/mechanicRating.js";
+import { calculateJobVat } from "../../utils/vat.js";
 import {
   notifyJobCancelled,
   notifyJobCompleted,
@@ -507,17 +508,21 @@ const computeFleetPaymentBox = ({ job, defaultPaymentMethod }) => {
   // - quoteAmount: base job amount (accepted or estimated)
   // - platformFee: 12% of quote amount
   // - totalPayable: quote + platform fee (ex VAT)
-  // - preAuthHeld: totalPayable * 1.2 (incl VAT) (matches earlier Stripe calculation)
+  // - preAuthHeld: actual repair charge including VAT when the supplier is registered
   const quoteAmount = Number(job.acceptedAmount ?? job.estimatedPayout ?? 0) || 0;
   const platformFee = quoteAmount > 0 ? round2(quoteAmount * 0.12) : 0;
   const totalPayable = quoteAmount > 0 ? round2(quoteAmount + platformFee) : 0;
-  const preAuthHeld = totalPayable > 0 ? round2(totalPayable * 1.2) : 0;
+  const vat = calculateJobVat(job, quoteAmount);
+  const preAuthHeld = vat.totalAmount;
 
   return {
     quoteAmount: quoteAmount || null,
     platformFee: quoteAmount ? platformFee : null,
     totalPayable: quoteAmount ? totalPayable : null,
     preAuthHeld: quoteAmount ? preAuthHeld : null,
+    vatApplied: vat.vatRegistered,
+    vatRate: vat.vatRate,
+    vatAmount: quoteAmount ? vat.vatAmount : null,
     cardLabel: defaultPaymentMethod ? maskCardLabel(defaultPaymentMethod) : null,
     cardExpMonth: defaultPaymentMethod?.card?.expMonth ?? null,
     cardExpYear: defaultPaymentMethod?.card?.expYear ?? null,
@@ -571,11 +576,10 @@ const resolvePayerStripeCustomerId = (payerUser, paymentMethod) => {
 };
 
 const computeJobApprovalChargeTotal = (job) =>
-  Math.round(
-    ((Number(job.finalAmount ?? job.acceptedAmount ?? job.estimatedPayout ?? 0) || 0) *
-      1.2) *
-      100
-  ) / 100;
+  calculateJobVat(
+    job,
+    Number(job.finalAmount ?? job.acceptedAmount ?? job.estimatedPayout ?? 0) || 0
+  ).totalAmount;
 
 /** Fleet: optional Stripe. Company: Stripe required when configured. */
 const buildJobApprovalPaymentContext = async ({
@@ -615,8 +619,12 @@ const buildJobApprovalPaymentContext = async ({
   const totalAmount = computeJobApprovalChargeTotal(job);
   const subtotal =
     Number(job.finalAmount ?? job.acceptedAmount ?? job.estimatedPayout ?? 0) || 0;
+  const vat = calculateJobVat(job, subtotal);
   const platformFee = Math.round(subtotal * 0.12 * 100) / 100;
-  const mechanicNetAmount = Math.max(Math.round((subtotal - platformFee) * 100) / 100, 0);
+  const mechanicNetAmount = Math.max(
+    Math.round((vat.totalAmount - platformFee) * 100) / 100,
+    0
+  );
   const mechanicProfile = job.assignedMechanic?.mechanicProfile;
   const mechanicConnectAccountId =
     mechanicProfile?.stripeConnectChargesEnabled &&
@@ -637,6 +645,9 @@ const buildJobApprovalPaymentContext = async ({
       mechanicId: toObjectIdString(job.assignedMechanic),
       payerUserId: payerUser._id.toString(),
       payerRole: payerUser.role,
+      vatApplied: `${vat.vatRegistered}`,
+      vatRate: `${vat.vatRate}`,
+      vatAmount: `${vat.vatAmount}`,
       ...metadata,
     },
   });
@@ -1168,9 +1179,11 @@ const sanitizeFileName = (value) =>
 const upsertFinancialRecordsForCompletedJob = async (job, paymentContext = {}) => {
   if (!job.assignedMechanic) return { invoice: null, earningTransaction: null };
 
-  const subtotal = Number(job.finalAmount ?? job.acceptedAmount ?? job.estimatedPayout ?? 0);
-  const vatAmount = Math.round(subtotal * 0.2 * 100) / 100;
-  const totalAmount = Math.round((subtotal + vatAmount) * 100) / 100;
+  const vat = calculateJobVat(
+    job,
+    Number(job.finalAmount ?? job.acceptedAmount ?? job.estimatedPayout ?? 0)
+  );
+  const { subtotal, vatAmount, totalAmount } = vat;
   const platformFee = Math.round(subtotal * 0.12 * 100) / 100;
   const netAmount = Math.max(Math.round((subtotal - platformFee) * 100) / 100, 0);
   const paidAt = paymentContext.paidAt || job.completedAt || new Date();
@@ -1191,6 +1204,8 @@ const upsertFinancialRecordsForCompletedJob = async (job, paymentContext = {}) =
       mechanic: job.assignedMechanic,
       subtotal,
       vatAmount,
+      vatRate: vat.vatRate,
+      vatApplied: vat.vatRegistered,
       totalAmount,
       currency: job.currency || "GBP",
       status: invoiceStatus,
@@ -1227,10 +1242,19 @@ const upsertFinancialRecordsForCompletedJob = async (job, paymentContext = {}) =
         rating: readMechanicProfileRatingAverage(job.assignedMechanic),
         profilePhotoUrl: job.assignedMechanic?.mechanicProfile?.profilePhotoUrl || undefined,
       },
+      supplierSnapshot: {
+        supplierType: vat.supplierType || undefined,
+        supplierId: vat.supplierId || undefined,
+        name: vat.supplierName || undefined,
+        vatRegistered: vat.vatRegistered,
+        vatNumber: vat.vatNumber || undefined,
+      },
     });
   } else {
     invoice.subtotal = subtotal;
     invoice.vatAmount = vatAmount;
+    invoice.vatRate = vat.vatRate;
+    invoice.vatApplied = vat.vatRegistered;
     invoice.totalAmount = totalAmount;
     invoice.currency = job.currency || invoice.currency || "GBP";
     invoice.status = invoiceStatus;
@@ -1265,6 +1289,13 @@ const upsertFinancialRecordsForCompletedJob = async (job, paymentContext = {}) =
         },
       ];
     }
+    invoice.supplierSnapshot = {
+      supplierType: vat.supplierType || undefined,
+      supplierId: vat.supplierId || undefined,
+      name: vat.supplierName || undefined,
+      vatRegistered: vat.vatRegistered,
+      vatNumber: vat.vatNumber || undefined,
+    };
     const mp = job.assignedMechanic?.mechanicProfile;
     if (mp) {
       const prev = invoice.mechanicSnapshot || {};
@@ -2337,5 +2368,3 @@ export const createJobLocationPing = async (jobId, user, payload) => {
     updatedAt: now,
   };
 };
-
-
