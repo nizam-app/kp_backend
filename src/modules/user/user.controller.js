@@ -1,6 +1,7 @@
 import { sendResponse } from "../../utils/sendResponse.js";
 import {
   acceptUserTerms,
+  deleteOwnAccount,
   getOwnProfile,
   updateMechanicAvailability,
   updateOwnProfile,
@@ -48,5 +49,14 @@ export const updateMechanicAvailabilityController = async (req, res) => {
   return sendResponse(res, {
     message: "Availability updated",
     data: updated,
+  });
+};
+
+export const deleteMeController = async (req, res) => {
+  const result = await deleteOwnAccount(req.user, req.body);
+
+  return sendResponse(res, {
+    message: "Account deleted",
+    data: result,
   });
 };

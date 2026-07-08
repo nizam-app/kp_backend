@@ -9,6 +9,19 @@ import {
 } from "../../constants/domain.js";
 import { Job } from "../job/job.model.js";
 import { Review } from "../review/review.model.js";
+import { Vehicle } from "../vehicle/vehicle.model.js";
+import { Notification } from "../notification/notification.model.js";
+import { DeviceToken } from "../notification/deviceToken.model.js";
+
+const SELF_DELETE_ROLES = [
+  ROLES.FLEET,
+  ROLES.MECHANIC,
+  ROLES.MECHANIC_EMPLOYEE,
+  ROLES.COMPANY,
+];
+
+const ACCOUNT_HAS_DEPENDENCIES_MESSAGE =
+  "This account still has linked jobs, fleet vehicles, or members and cannot be removed yet";
 
 /** Monday 00:00:00.000 local → next Monday 00:00 exclusive (calendar week). */
 const getMechanicCalendarWeekBounds = () => {
@@ -1082,4 +1095,71 @@ export const acceptUserTerms = async (user, payload = {}) => {
 
   await user.save({ validateBeforeSave: false });
   return buildProfileResponse(user);
+};
+
+export const getUserDeletionBlockers = async (user) => {
+  const ownsMembers = [ROLES.FLEET, ROLES.COMPANY].includes(user.role);
+
+  const [jobsCount, vehiclesCount, memberCount] = await Promise.all([
+    Job.countDocuments({
+      $or: [{ fleet: user._id }, { assignedMechanic: user._id }],
+    }),
+    user.role === ROLES.FLEET ? Vehicle.countDocuments({ fleet: user._id }) : 0,
+    ownsMembers
+      ? User.countDocuments({
+          "companyMembership.company": user._id,
+          "companyMembership.status": { $in: ["ACTIVE", "PENDING"] },
+        })
+      : 0,
+  ]);
+
+  return {
+    jobsCount,
+    vehiclesCount,
+    memberCount,
+    blocked: jobsCount > 0 || vehiclesCount > 0 || memberCount > 0,
+  };
+};
+
+export const removeUserAccount = async (user) => {
+  const blockers = await getUserDeletionBlockers(user);
+  if (blockers.blocked) {
+    throw new AppError(ACCOUNT_HAS_DEPENDENCIES_MESSAGE, 400);
+  }
+
+  await Promise.all([
+    Notification.deleteMany({ user: user._id }),
+    PaymentMethod.updateMany({ user: user._id }, { isActive: false }),
+    DeviceToken.updateMany({ user: user._id }, { isActive: false }),
+  ]);
+  await User.deleteOne({ _id: user._id });
+
+  return {
+    _id: user._id,
+    email: user.email,
+    deleted: true,
+  };
+};
+
+export const deleteOwnAccount = async (user, payload = {}) => {
+  if (!SELF_DELETE_ROLES.includes(user.role)) {
+    throw new AppError("This account type cannot be deleted from the app", 403);
+  }
+
+  const password = `${payload.password || ""}`.trim();
+  if (!password) {
+    throw new AppError("Password is required to delete your account", 400);
+  }
+
+  const userWithPassword = await User.findById(user._id).select("+password");
+  if (!userWithPassword) {
+    throw new AppError("User not found", 404);
+  }
+
+  const passwordMatches = await userWithPassword.comparePassword(password);
+  if (!passwordMatches) {
+    throw new AppError("Incorrect password", 401);
+  }
+
+  return removeUserAccount(userWithPassword);
 };

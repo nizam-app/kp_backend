@@ -23,6 +23,7 @@ import { JobEvent } from "../jobEvent/jobEvent.model.js";
 import { ChatMessage } from "../chat/chat.model.js";
 import { sendJobMessage } from "../chat/chat.service.js";
 import { calculateJobVat } from "../../utils/vat.js";
+import { removeUserAccount } from "../user/user.service.js";
 
 const serviceRequestBucketFromJobStatus = (status) => {
   if ([JOB_STATUS.COMPLETED].includes(status)) return "COMPLETED";
@@ -1315,28 +1316,7 @@ export const deleteAdminUser = async (userId, adminUser) => {
     throw new AppError("You cannot remove your own admin account", 400);
   }
 
-  const [jobsCount, vehiclesCount, memberCount] = await Promise.all([
-    Job.countDocuments({
-      $or: [{ fleet: user._id }, { assignedMechanic: user._id }],
-    }),
-    user.role === ROLES.FLEET ? Vehicle.countDocuments({ fleet: user._id }) : 0,
-    user.role === ROLES.FLEET
-      ? User.countDocuments({
-          "companyMembership.company": user._id,
-          "companyMembership.status": { $in: ["ACTIVE", "PENDING"] },
-        })
-      : 0,
-  ]);
-
-  if (jobsCount > 0 || vehiclesCount > 0 || memberCount > 0) {
-    throw new AppError(
-      "This account still has linked jobs, fleet vehicles, or members and cannot be removed yet",
-      400
-    );
-  }
-
-  await Notification.deleteMany({ user: user._id });
-  await User.deleteOne({ _id: user._id });
+  const result = await removeUserAccount(user);
 
   await writeAuditLog(
     adminUser,
@@ -1345,11 +1325,7 @@ export const deleteAdminUser = async (userId, adminUser) => {
     "User Management"
   );
 
-  return {
-    _id: user._id,
-    email: user.email,
-    deleted: true,
-  };
+  return result;
 };
 
 export const listAdminFleet = async (query = {}) => {
