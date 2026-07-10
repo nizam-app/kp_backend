@@ -60,6 +60,18 @@ const parseLimit = (value) => {
   return Math.min(Math.floor(n), 100);
 };
 
+/** Resolve Mongo _id or human-readable jobCode (e.g. TF-8823) to ObjectId string. */
+export const resolveJobRef = async (jobIdOrCode) => {
+  const raw = `${jobIdOrCode || ""}`.trim();
+  if (!raw) throw new AppError("jobId is required", 400);
+  if (mongoose.Types.ObjectId.isValid(raw) && String(new mongoose.Types.ObjectId(raw)) === raw) {
+    return raw;
+  }
+  const job = await Job.findOne({ jobCode: raw }).select("_id");
+  if (!job) throw new AppError("Job not found", 404);
+  return job._id.toString();
+};
+
 const milesToMeters = (value) => Math.max(Number(value) || 1, 1) * 1609.34;
 
 /** Earth radius in metres (WGS84 approximation). */
@@ -1443,6 +1455,7 @@ export const createJob = async (payload, fleetUser) => {
 };
 
 export const addJobPhotos = async (jobId, user, payload = {}) => {
+  jobId = await resolveJobRef(jobId);
   const job = await Job.findById(jobId);
   if (!job) throw new AppError("Job not found", 404);
   ensureJobParticipantAccess(job, user);
@@ -1499,6 +1512,7 @@ export const addJobPhotos = async (jobId, user, payload = {}) => {
 };
 
 export const removeJobPhoto = async (jobId, user, payload = {}) => {
+  jobId = await resolveJobRef(jobId);
   const job = await Job.findById(jobId);
   if (!job) throw new AppError("Job not found", 404);
   ensureJobParticipantAccess(job, user);
@@ -1537,6 +1551,7 @@ export const removeJobPhoto = async (jobId, user, payload = {}) => {
 };
 
 export const addJobAttachments = async (jobId, user, payload = {}) => {
+  jobId = await resolveJobRef(jobId);
   const job = await Job.findById(jobId);
   if (!job) throw new AppError("Job not found", 404);
   ensureJobParticipantAccess(job, user);
@@ -1618,6 +1633,7 @@ export const addJobAttachments = async (jobId, user, payload = {}) => {
 };
 
 export const removeJobAttachment = async (jobId, user, attachmentId) => {
+  jobId = await resolveJobRef(jobId);
   if (!mongoose.Types.ObjectId.isValid(attachmentId)) {
     throw new AppError("Invalid attachment id", 400);
   }
@@ -1852,6 +1868,7 @@ export const listJobs = async (user, query) => {
 };
 
 export const getJobByIdForUser = async (jobId, user) => {
+  jobId = await resolveJobRef(jobId);
   const job = await Job.findById(jobId)
     .populate(
       "fleet",
@@ -1867,7 +1884,7 @@ export const getJobByIdForUser = async (jobId, user) => {
     );
 
   if (!job) throw new AppError("Job not found", 404);
-  if (user.role === ROLES.ADMIN) return serializeJobDetail(job.toObject(), user);
+  if (user.role === ROLES.ADMIN) return await serializeJobDetail(job.toObject(), user);
 
   const userId = toObjectIdString(user._id);
   const fleetId = toObjectIdString(job.fleet?._id || job.fleet);
@@ -1875,20 +1892,20 @@ export const getJobByIdForUser = async (jobId, user) => {
   const mechanicId = toObjectIdString(job.assignedMechanic?._id || job.assignedMechanic);
 
   if (user.role === ROLES.FLEET && fleetId === userId) {
-    return serializeJobDetail(job.toObject(), user);
+    return await serializeJobDetail(job.toObject(), user);
   }
   if ([ROLES.MECHANIC, ROLES.MECHANIC_EMPLOYEE].includes(user.role) && mechanicId === userId) {
-    return serializeJobDetail(job.toObject(), user);
+    return await serializeJobDetail(job.toObject(), user);
   }
   if (user.role === ROLES.COMPANY && companyId === userId) {
-    return serializeJobDetail(job.toObject(), user);
+    return await serializeJobDetail(job.toObject(), user);
   }
 
   if (
     [ROLES.MECHANIC, ROLES.COMPANY].includes(user.role) &&
     [JOB_STATUS.POSTED, JOB_STATUS.QUOTING].includes(job.status)
   ) {
-    return serializeJobDetail(job.toObject(), user);
+    return await serializeJobDetail(job.toObject(), user);
   }
 
   const hasQuote = await Quote.exists({
@@ -1896,7 +1913,7 @@ export const getJobByIdForUser = async (jobId, user) => {
     ...(user.role === ROLES.COMPANY ? { company: user._id } : { mechanic: user._id }),
   });
   if ([ROLES.MECHANIC, ROLES.COMPANY].includes(user.role) && hasQuote) {
-    return serializeJobDetail(job.toObject(), user);
+    return await serializeJobDetail(job.toObject(), user);
   }
 
   throw new AppError("Forbidden", 403);
@@ -1945,32 +1962,38 @@ const transitionAssignedJob = async ({
   return job;
 };
 
-export const startJourney = async (jobId, mechanicUser) =>
-  transitionAssignedJob({
+export const startJourney = async (jobId, mechanicUser) => {
+  jobId = await resolveJobRef(jobId);
+  return transitionAssignedJob({
     jobId,
     user: mechanicUser,
     fromStatuses: [JOB_STATUS.ASSIGNED],
     toStatus: JOB_STATUS.EN_ROUTE,
     eventType: "JOURNEY_STARTED",
   });
+};
 
-export const arriveAtJob = async (jobId, mechanicUser) =>
-  transitionAssignedJob({
+export const arriveAtJob = async (jobId, mechanicUser) => {
+  jobId = await resolveJobRef(jobId);
+  return transitionAssignedJob({
     jobId,
     user: mechanicUser,
     fromStatuses: [JOB_STATUS.EN_ROUTE],
     toStatus: JOB_STATUS.ON_SITE,
     eventType: "MECHANIC_ARRIVED",
   });
+};
 
-export const startJobWork = async (jobId, mechanicUser) =>
-  transitionAssignedJob({
+export const startJobWork = async (jobId, mechanicUser) => {
+  jobId = await resolveJobRef(jobId);
+  return transitionAssignedJob({
     jobId,
     user: mechanicUser,
     fromStatuses: [JOB_STATUS.ON_SITE],
     toStatus: JOB_STATUS.IN_PROGRESS,
     eventType: "WORK_STARTED",
   });
+};
 
 const countCompletionPhotoPayload = (payload = {}) => {
   if (Array.isArray(payload.photos) && payload.photos.length) return payload.photos.length;
@@ -2007,6 +2030,7 @@ const pickCompletionAttachmentItems = (payload = {}) => {
  * Notes: `repairNotes` / `repair_notes` are aliases for `workSummary` (repair notes / completion text).
  */
 export const completeJobWork = async (jobId, mechanicUser, payload = {}) => {
+  jobId = await resolveJobRef(jobId);
   const job = await Job.findById(jobId);
   if (!job) throw new AppError("Job not found", 404);
   ensureAssignedMechanic(job, mechanicUser._id);
@@ -2131,6 +2155,7 @@ export const completeJobWork = async (jobId, mechanicUser, payload = {}) => {
 };
 
 export const approveJobCompletion = async (jobId, fleetUser, payload) => {
+  jobId = await resolveJobRef(jobId);
   const job = await Job.findById(jobId)
     .populate("fleet", "fleetProfile")
     .populate("assignedCompany", "companyProfile")
@@ -2172,6 +2197,7 @@ export const approveJobCompletion = async (jobId, fleetUser, payload) => {
  * Company dispatcher: approve completion and pay online via Stripe (required).
  */
 export const approveJobCompletionAsCompany = async (jobId, companyUser, payload = {}) => {
+  jobId = await resolveJobRef(jobId);
   const job = await Job.findById(jobId)
     .populate("fleet", "fleetProfile")
     .populate("assignedCompany", "companyProfile")
@@ -2224,6 +2250,7 @@ export const approveJobCompletionAsCompany = async (jobId, companyUser, payload 
 };
 
 export const cancelJob = async (jobId, fleetUser, payload = {}) => {
+  jobId = await resolveJobRef(jobId);
   const job = await Job.findById(jobId);
   if (!job) throw new AppError("Job not found", 404);
 
@@ -2277,6 +2304,7 @@ export const previewJobCancellation = async (jobId, fleetUser) => {
   if (fleetUser.role !== ROLES.FLEET) {
     throw new AppError("Only fleet users can preview cancellation", 403);
   }
+  jobId = await resolveJobRef(jobId);
   const job = await Job.findById(jobId).select("status fleet jobCode");
   if (!job) throw new AppError("Job not found", 404);
   ensureFleetOwner(job, fleetUser._id);
@@ -2296,11 +2324,13 @@ export const previewJobCancellation = async (jobId, fleetUser) => {
 };
 
 export const getJobTimeline = async (jobId, user) => {
+  const resolvedId = await resolveJobRef(jobId);
   await getJobByIdForUser(jobId, user);
-  return JobEvent.find({ job: jobId }).sort({ createdAt: -1 }).lean();
+  return JobEvent.find({ job: resolvedId }).sort({ createdAt: -1 }).lean();
 };
 
 export const createJobLocationPing = async (jobId, user, payload) => {
+  jobId = await resolveJobRef(jobId);
   const job = await Job.findById(jobId);
   if (!job) throw new AppError("Job not found", 404);
   ensureAssignedMechanic(job, user._id);

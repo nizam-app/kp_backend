@@ -20,5 +20,7 @@ secrets/*
 
 # Local Postman collections and env files (keep on disk, do not push to GitHub)
 postman/
+.env.production
 
+.env.local
 
