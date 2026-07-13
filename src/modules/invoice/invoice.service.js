@@ -254,14 +254,7 @@ export const getInvoiceByIdForUser = async (invoiceId, user) => {
 };
 
 export const getInvoiceDownloadForUser = async (invoiceId, user) => {
-  const invoice = await Invoice.findById(invoiceId)
-    .populate("job", "assignedCompany")
-    .lean();
-  ensureInvoiceAccess(invoice, user);
-
-  return {
-    invoiceId: invoice._id,
-    invoiceNo: invoice.invoiceNo,
-    downloadUrl: invoice.pdfUrl || `/api/v1/invoices/${invoice._id}/download`,
-  };
+  // Return the full invoice detail so clients can render a real document.
+  // (pdfUrl is optional; most invoices are generated on demand.)
+  return getInvoiceByIdForUser(invoiceId, user);
 };

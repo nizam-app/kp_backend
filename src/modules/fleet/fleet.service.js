@@ -108,6 +108,7 @@ export const getFleetDashboard = async (fleetUser, query) => {
     activeJobs,
     completedJobs,
     completedTotal,
+    cancelledTotal,
     profileState,
   ] = await Promise.all([
     Job.countDocuments({ fleet: fleetUser._id, status: { $in: activeStatuses } }),
@@ -150,6 +151,7 @@ export const getFleetDashboard = async (fleetUser, query) => {
       )
       .lean(),
     Job.countDocuments({ fleet: fleetUser._id, status: JOB_STATUS.COMPLETED }),
+    Job.countDocuments({ fleet: fleetUser._id, status: JOB_STATUS.CANCELLED }),
     getProfileCompletionSummary(fleetUser),
   ]);
 
@@ -182,6 +184,9 @@ export const getFleetDashboard = async (fleetUser, query) => {
       activeCount,
       awaitingCount,
       monthCompletedCount,
+      completedCount: completedTotal,
+      cancelledCount: cancelledTotal,
+      totalCount: activeCount + completedTotal + cancelledTotal,
     },
     spend: {
       month: start.toLocaleString("en-US", { month: "long" }),

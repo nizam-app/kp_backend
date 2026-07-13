@@ -17,10 +17,14 @@ export const createVehicleController = async (req, res) => {
 };
 
 export const listVehiclesController = async (req, res) => {
-  const vehicles = await listVehicles(req.user, req.query);
+  const result = await listVehicles(req.user, req.query);
   return sendResponse(res, {
     message: "Vehicles fetched",
-    data: vehicles,
+    data: result.items,
+    meta: {
+      ...(result.meta || {}),
+      stats: result.stats,
+    },
   });
 };
 

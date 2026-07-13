@@ -53,12 +53,164 @@ export const createVehicle = async (fleetUser, payload) => {
   });
 };
 
+/** Days since last completed job after which a vehicle is flagged “due service”. */
+const SERVICE_DUE_AFTER_DAYS = 180;
+
+const daysBetween = (from, to = new Date()) => {
+  const a = new Date(from).getTime();
+  const b = new Date(to).getTime();
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+  return Math.floor((b - a) / (24 * 60 * 60 * 1000));
+};
+
+const enrichVehiclesWithJobStats = async (fleetId, vehicles) => {
+  if (!vehicles.length) return [];
+
+  const regs = vehicles.map((v) => normalizeRegistration(v.registration)).filter(Boolean);
+  const ids = vehicles.map((v) => `${v._id}`);
+
+  const jobs = await Job.find({
+    fleet: fleetId,
+    $or: [
+      { "vehicle.vehicleId": { $in: ids } },
+      ...(regs.length
+        ? regs.map((reg) => ({
+            "vehicle.registration": { $regex: new RegExp(`^${escapeRegex(reg)}$`, "i") },
+          }))
+        : []),
+    ],
+  })
+    .select("vehicle status completedAt postedAt createdAt")
+    .lean();
+
+  const byKey = new Map();
+  const pushJob = (key, job) => {
+    if (!key) return;
+    const list = byKey.get(key) || [];
+    list.push(job);
+    byKey.set(key, list);
+  };
+
+  for (const job of jobs) {
+    const vid = job.vehicle?.vehicleId ? `${job.vehicle.vehicleId}` : null;
+    const reg = normalizeRegistration(job.vehicle?.registration);
+    if (vid) pushJob(`id:${vid}`, job);
+    if (reg) pushJob(`reg:${reg}`, job);
+  }
+
+  const dedupeJobs = (lists) => {
+    const seen = new Set();
+    const out = [];
+    for (const list of lists) {
+      for (const job of list || []) {
+        const id = `${job._id}`;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        out.push(job);
+      }
+    }
+    return out;
+  };
+
+  return vehicles.map((vehicle) => {
+    const vid = `${vehicle._id}`;
+    const reg = normalizeRegistration(vehicle.registration);
+    const matched = dedupeJobs([byKey.get(`id:${vid}`), byKey.get(`reg:${reg}`)]);
+    const completed = matched
+      .filter((j) => j.status === JOB_STATUS.COMPLETED && j.completedAt)
+      .sort((a, b) => new Date(b.completedAt) - new Date(a.completedAt));
+    const lastServiceAt = completed[0]?.completedAt || null;
+    const daysSince = lastServiceAt != null ? daysBetween(lastServiceAt) : null;
+    const serviceDue =
+      !lastServiceAt || (daysSince != null && daysSince >= SERVICE_DUE_AFTER_DAYS);
+
+    return {
+      ...vehicle,
+      recentJobsCount: matched.length,
+      lastServiceAt,
+      serviceDue,
+      serviceDueAfterDays: SERVICE_DUE_AFTER_DAYS,
+      daysSinceLastService: daysSince,
+    };
+  });
+};
+
+const parsePage = (value) => {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 1;
+};
+
+const parseLimit = (value) => {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return 12;
+  return Math.min(Math.floor(n), 100);
+};
+
 export const listVehicles = async (fleetUser, query) => {
   const includeInactive = `${query.includeInactive}` === "true";
+  const pagingRequested = query.page !== undefined || query.limit !== undefined;
+  const page = parsePage(query.page);
+  const limit = parseLimit(query.limit);
+  const skip = (page - 1) * limit;
+  const status = `${query.status || "all"}`.trim().toLowerCase();
+  const q = `${query.q || query.search || ""}`.trim().toLowerCase();
+
   const filter = { fleet: fleetUser._id };
   if (!includeInactive) filter.isActive = true;
+  if (status === "active") filter.isActive = true;
+  if (status === "maintenance") filter.isActive = false;
 
-  return Vehicle.find(filter).sort({ createdAt: -1 }).lean();
+  if (q) {
+    const rx = new RegExp(escapeRegex(q), "i");
+    filter.$or = [
+      { registration: rx },
+      { make: rx },
+      { model: rx },
+      { type: rx },
+      { vin: rx },
+    ];
+  }
+
+  // Fleet-wide stats (ignore list search/status so cards stay stable)
+  const statsFilter = { fleet: fleetUser._id };
+  const [statsVehicles, total, pageVehicles] = await Promise.all([
+    Vehicle.find(statsFilter).sort({ createdAt: -1 }).lean(),
+    Vehicle.countDocuments(filter),
+    pagingRequested
+      ? Vehicle.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean()
+      : Vehicle.find(filter).sort({ createdAt: -1 }).lean(),
+  ]);
+
+  const [statsEnriched, items] = await Promise.all([
+    enrichVehiclesWithJobStats(fleetUser._id, statsVehicles),
+    enrichVehiclesWithJobStats(fleetUser._id, pageVehicles),
+  ]);
+
+  const activeCount = statsEnriched.filter((v) => v.isActive !== false).length;
+  const maintenanceCount = statsEnriched.filter((v) => v.isActive === false).length;
+  const dueServiceCount = statsEnriched.filter(
+    (v) => v.isActive !== false && v.serviceDue
+  ).length;
+
+  const effectiveLimit = pagingRequested ? limit : items.length || limit;
+  const effectiveTotal = pagingRequested ? total : items.length;
+
+  return {
+    items,
+    stats: {
+      total: statsEnriched.length,
+      active: activeCount,
+      maintenance: maintenanceCount,
+      dueService: dueServiceCount,
+      serviceDueAfterDays: SERVICE_DUE_AFTER_DAYS,
+    },
+    meta: {
+      page: pagingRequested ? page : 1,
+      limit: effectiveLimit,
+      total: effectiveTotal,
+      totalPages: Math.ceil(effectiveTotal / effectiveLimit) || 1,
+    },
+  };
 };
 
 const parseRecentJobsLimit = (query) => {
@@ -138,7 +290,7 @@ export const getVehicleByIdForFleet = async (fleetUser, vehicleId, query = {}) =
   const jobFilter = buildVehicleJobFilter(fleetUser._id, vehicle);
   const limit = parseRecentJobsLimit(query);
 
-  const [recentJobs, recentJobsTotal] = await Promise.all([
+  const [recentJobs, recentJobsTotal, enriched] = await Promise.all([
     Job.find(jobFilter)
       .sort({ updatedAt: -1, createdAt: -1 })
       .limit(limit)
@@ -148,10 +300,11 @@ export const getVehicleByIdForFleet = async (fleetUser, vehicleId, query = {}) =
       )
       .lean(),
     Job.countDocuments(jobFilter),
+    enrichVehiclesWithJobStats(fleetUser._id, [vehicle]),
   ]);
 
   return {
-    vehicle,
+    vehicle: enriched[0] || vehicle,
     recentJobs: recentJobs.map(serializeRecentJobForVehicle),
     meta: {
       recentJobsTotal,

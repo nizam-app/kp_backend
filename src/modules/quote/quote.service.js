@@ -14,6 +14,7 @@ import {
   notifyQuotesNotSelected,
   notifyQuoteWithdrawn,
 } from "../notification/jobQuoteNotification.service.js";
+import { resolveJobRef } from "../job/job.service.js";
 
 const now = () => new Date();
 const sessionOptions = (session) => (session ? { session } : {});
@@ -271,6 +272,7 @@ const withOptionalTransaction = async (work) => {
 };
 
 const ensureFleetJobOwner = async (jobId, fleetUserId) => {
+  jobId = await resolveJobRef(jobId);
   const job = await Job.findById(jobId);
   if (!job) throw new AppError("Job not found", 404);
   if (job.fleet.toString() !== fleetUserId.toString()) {
@@ -421,6 +423,7 @@ export const submitQuote = async (jobId, payload, mechanicUser) => {
     throw new AppError("Only mechanics or companies can submit quotes", 403);
   }
 
+  jobId = await resolveJobRef(jobId);
   const job = await Job.findById(jobId);
   if (!job) throw new AppError("Job not found", 404);
   if (![JOB_STATUS.POSTED, JOB_STATUS.QUOTING].includes(job.status)) {

@@ -29,6 +29,7 @@ import {
   listAdminReviews,
   listAdminServiceCatalog,
   listAdminAuditLogs,
+  getAdminSupportTicketById,
   listAdminSupportTickets,
   listAdminServiceRequests,
   listAdminUserMembers,
@@ -322,9 +323,27 @@ export const adminSupportTicketsController = async (req, res) => {
 };
 
 export const updateAdminSupportTicketController = async (req, res) => {
-  const result = await updateAdminSupportTicket(req.params.ticketId, req.body);
+  const result = await updateAdminSupportTicket(req.params.ticketId, req.body, req.user);
   return sendResponse(res, {
     message: "Admin support ticket updated",
+    data: result,
+  });
+};
+
+export const adminSupportTicketByIdController = async (req, res) => {
+  const result = await getAdminSupportTicketById(req.params.ticketId);
+  return sendResponse(res, {
+    message: "Admin support ticket fetched",
+    data: result,
+  });
+};
+
+export const adminSupportTicketReplyController = async (req, res) => {
+  const { addSupportTicketReply } = await import("../supportTicket/supportTicket.service.js");
+  const result = await addSupportTicketReply(req.user, req.params.ticketId, req.body);
+  return sendResponse(res, {
+    statusCode: 201,
+    message: "Support ticket reply added",
     data: result,
   });
 };

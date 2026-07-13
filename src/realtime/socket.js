@@ -160,11 +160,13 @@ export const emitNotificationCreated = (notification) => {
     .emit("notification:new", serializeNotificationRealtime(notification));
 };
 
-export const emitNotificationRead = ({ userId, notificationId, readAt }) => {
-  if (!ioInstance || !userId || !notificationId) return;
+export const emitNotificationRead = ({ userId, notificationId, readAt, markedAll }) => {
+  if (!ioInstance || !userId) return;
+  if (!markedAll && !notificationId) return;
   ioInstance.to(userRoom(`${userId}`)).emit("notification:read", {
-    notificationId: `${notificationId}`,
+    notificationId: notificationId ? `${notificationId}` : null,
     readAt: readAt || new Date(),
+    markedAll: Boolean(markedAll),
   });
 };
 

@@ -7,6 +7,7 @@
     "start": "node src/server.js",
     "create:admin": "node scripts/createAdmin.js",
     "seed:fake": "node scripts/seedFakeData.js",
+    "ensure:fleet-post": "node scripts/ensureFleetCanPost.js",
     "test:stripe": "node scripts/testStripeApis.mjs --role=fleet",
     "test:stripe:company": "node scripts/testStripeApis.mjs --role=company",
     "test:stripe:mechanic": "node scripts/testStripeApis.mjs --role=mechanic",

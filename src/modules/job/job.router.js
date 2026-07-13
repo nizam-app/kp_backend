@@ -10,6 +10,8 @@ import {
   cancelJobController,
   completeWorkController,
   createJobController,
+  updateJobController,
+  deleteJobController,
   getJobByIdController,
   listJobsController,
   startJourneyController,
@@ -71,6 +73,16 @@ router.get(
   catchAsync(previewJobCancellationController)
 );
 router.get("/:jobId", catchAsync(getJobByIdController));
+router.patch(
+  "/:jobId",
+  catchAsync(authorize(ROLES.FLEET)),
+  catchAsync(updateJobController)
+);
+router.delete(
+  "/:jobId",
+  catchAsync(authorize(ROLES.FLEET)),
+  catchAsync(deleteJobController)
+);
 router.post("/:jobId/photos", catchAsync(addJobPhotosController));
 router.patch("/:jobId/photos/remove", catchAsync(removeJobPhotoController));
 router.post("/:jobId/attachments", catchAsync(addJobAttachmentsController));

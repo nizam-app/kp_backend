@@ -19,11 +19,13 @@ export const buildNotificationNavigation = (type, data = {}) => {
       };
     }
     case "SUPPORT_TICKET_CREATED":
-    case "SUPPORT_TICKET_UPDATED": {
+    case "SUPPORT_TICKET_UPDATED":
+    case "SUPPORT_TICKET_REPLY": {
       const ticketId = d.ticketId != null ? `${d.ticketId}` : "";
       if (!ticketId) return null;
+      const screen = d.screen === "ADMIN_SUPPORT" ? "ADMIN_SUPPORT" : "SUPPORT_TICKET";
       return {
-        screen: "SUPPORT_TICKET",
+        screen,
         params: { ticketId },
       };
     }

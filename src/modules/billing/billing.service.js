@@ -341,12 +341,29 @@ export const attachStripeCardPaymentMethod = async (user, payload = {}) => {
   }
 
   const customerId = await ensureStripeCustomerForUser(user);
-  const attachedPaymentMethod = await attachStripePaymentMethodToCustomer({
-    customerId,
-    paymentMethodId,
-  });
 
-  const stripePaymentMethod = await retrieveStripePaymentMethod(attachedPaymentMethod.id);
+  // SetupIntent confirmation already attaches the PM to the customer — re-attach would 400.
+  let stripePaymentMethod;
+  try {
+    const attachedPaymentMethod = await attachStripePaymentMethodToCustomer({
+      customerId,
+      paymentMethodId,
+    });
+    stripePaymentMethod = await retrieveStripePaymentMethod(attachedPaymentMethod.id);
+  } catch (err) {
+    const msg = `${err?.message || ""}`.toLowerCase();
+    const alreadyAttached =
+      msg.includes("already been attached") ||
+      msg.includes("already attached") ||
+      msg.includes("previously used");
+    if (!alreadyAttached) throw err;
+
+    stripePaymentMethod = await retrieveStripePaymentMethod(paymentMethodId);
+    const pmCustomer = stripePaymentMethod.customer || null;
+    if (pmCustomer && `${pmCustomer}` !== `${customerId}`) {
+      throw new AppError("This card belongs to a different billing customer", 400);
+    }
+  }
 
   return createPaymentMethod(user, {
     methodType: "CARD",

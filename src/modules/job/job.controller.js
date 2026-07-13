@@ -11,6 +11,8 @@ import {
   cancelJob,
   completeJobWork,
   createJob,
+  updateJob,
+  deleteJob,
   removeJobPhoto,
   removeJobAttachment,
   getJobByIdForUser,
@@ -126,6 +128,32 @@ export const createJobController = async (req, res) => {
     statusCode: 201,
     message: "Job posted successfully",
     data: job,
+  });
+};
+
+export const updateJobController = async (req, res) => {
+  const payload = normalizeCreateJobBody(req.body || {});
+  if (payload.urgency !== undefined) {
+    payload.urgency = `${payload.urgency}`.trim().toUpperCase();
+  }
+  if (payload.mode !== undefined) {
+    payload.mode = `${payload.mode}`.trim().toUpperCase();
+  }
+  if (payload.issueType !== undefined) {
+    payload.issueType = `${payload.issueType}`.trim().toUpperCase();
+  }
+  const job = await updateJob(req.params.jobId, req.user, payload);
+  return sendResponse(res, {
+    message: "Job updated successfully",
+    data: job,
+  });
+};
+
+export const deleteJobController = async (req, res) => {
+  const result = await deleteJob(req.params.jobId, req.user);
+  return sendResponse(res, {
+    message: "Job deleted permanently",
+    data: result,
   });
 };
 

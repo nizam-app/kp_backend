@@ -27,6 +27,8 @@ import { Invoice } from "../invoice/invoice.model.js";
 import { EarningTransaction } from "../earning/earningTransaction.model.js";
 import { PaymentMethod } from "../billing/paymentMethod.model.js";
 import { User } from "../user/user.model.js";
+import { ChatMessage } from "../chat/chat.model.js";
+import { Notification } from "../notification/notification.model.js";
 import {
   createStripePaymentIntent,
   getStripePublicConfig,
@@ -34,6 +36,7 @@ import {
 import { getProfileCompletionSummary } from "../user/user.service.js";
 import { readMechanicProfileRatingAverage } from "../../utils/mechanicRating.js";
 import { calculateJobVat } from "../../utils/vat.js";
+import { assertValidOptionalPhone } from "../../utils/phone.js";
 import {
   notifyJobCancelled,
   notifyJobCompleted,
@@ -60,14 +63,55 @@ const parseLimit = (value) => {
   return Math.min(Math.floor(n), 100);
 };
 
+const escapeRegex = (s) => `${s || ""}`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** Optional text search across job code, title, description, and vehicle registration. */
+const applyListSearchFilter = (filter, query) => {
+  const q = `${query.q || query.search || ""}`.trim();
+  if (!q) return;
+  const rx = new RegExp(escapeRegex(q), "i");
+  filter.$and = [
+    ...(Array.isArray(filter.$and) ? filter.$and : []),
+    {
+      $or: [
+        { jobCode: rx },
+        { title: rx },
+        { description: rx },
+        { "vehicle.registration": rx },
+      ],
+    },
+  ];
+};
+
+/** Strip UI labels and normalize pasted job references before lookup. */
+export const normalizeJobRefInput = (jobIdOrCode) => {
+  let raw = `${jobIdOrCode || ""}`.trim();
+  if (!raw) return "";
+
+  raw = raw.replace(/^job\s*#?\s*/i, "").trim();
+
+  if (mongoose.Types.ObjectId.isValid(raw) && String(new mongoose.Types.ObjectId(raw)) === raw) {
+    return raw;
+  }
+
+  const codeMatch = raw.match(/\b([A-Z]{2,4}-[A-Z0-9]+)\b/i);
+  if (codeMatch) {
+    return codeMatch[1].toUpperCase();
+  }
+
+  return raw.toUpperCase();
+};
+
 /** Resolve Mongo _id or human-readable jobCode (e.g. TF-8823) to ObjectId string. */
 export const resolveJobRef = async (jobIdOrCode) => {
-  const raw = `${jobIdOrCode || ""}`.trim();
+  const raw = normalizeJobRefInput(jobIdOrCode);
   if (!raw) throw new AppError("jobId is required", 400);
   if (mongoose.Types.ObjectId.isValid(raw) && String(new mongoose.Types.ObjectId(raw)) === raw) {
     return raw;
   }
-  const job = await Job.findOne({ jobCode: raw }).select("_id");
+  const job = await Job.findOne({
+    jobCode: new RegExp(`^${raw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i"),
+  }).select("_id");
   if (!job) throw new AppError("Job not found", 404);
   return job._id.toString();
 };
@@ -324,11 +368,13 @@ const serializeJobCard = (job, viewer, extra = {}) => {
     _id: job._id,
     jobCode: job.jobCode,
     title: job.title,
-    description: job.completionSummary || job.description,
+    description: job.description || null,
+    completionSummary: job.completionSummary || null,
     issueType: job.issueType,
     issueSubtype: job.issueSubtype || null,
     tyreDetails: job.tyreDetails || null,
     urgency: job.urgency,
+    mode: job.mode || null,
     status: job.status,
     statusUi,
     vehicle: job.vehicle || null,
@@ -367,6 +413,7 @@ const serializeJobCard = (job, viewer, extra = {}) => {
       ? {
           _id: job.assignedMechanic._id || job.assignedMechanic,
           displayName: job.assignedMechanic.mechanicProfile?.displayName || null,
+          businessName: job.assignedMechanic.mechanicProfile?.businessName || null,
           phone: job.assignedMechanic.mechanicProfile?.phone || null,
           profilePhotoUrl: job.assignedMechanic.mechanicProfile?.profilePhotoUrl || null,
           rating: readMechanicProfileRatingAverage(job.assignedMechanic),
@@ -381,12 +428,22 @@ const serializeJobCard = (job, viewer, extra = {}) => {
           phone: job.assignedCompany.companyProfile?.phone || null,
         }
       : null,
+    driver: job.driver
+      ? {
+          name: job.driver.name || null,
+          phone: job.driver.phone || null,
+        }
+      : null,
     actions: {
       canTrack:
         viewer.role === ROLES.FLEET &&
         [JOB_STATUS.ASSIGNED, JOB_STATUS.EN_ROUTE, JOB_STATUS.ON_SITE, JOB_STATUS.IN_PROGRESS, JOB_STATUS.AWAITING_APPROVAL].includes(job.status),
       canApproveCompletion:
         viewer.role === ROLES.FLEET && job.status === JOB_STATUS.AWAITING_APPROVAL,
+      canEdit:
+        viewer.role === ROLES.FLEET && job.status === JOB_STATUS.POSTED,
+      canDelete:
+        viewer.role === ROLES.FLEET && job.status === JOB_STATUS.POSTED,
       canStartJourney:
         [ROLES.MECHANIC, ROLES.MECHANIC_EMPLOYEE].includes(viewer.role) &&
         job.status === JOB_STATUS.ASSIGNED,
@@ -467,7 +524,7 @@ const buildLineItemsFromCompanyInvoicePayload = (payload, job) => {
   for (let i = 0; i < partsIn.length; i += 1) {
     const p = partsIn[i];
     const desc = `${p?.description ?? p?.name ?? ""}`.trim().slice(0, 240);
-    const amount = round2(p?.amount ?? p?.price ?? p?.totalAmount ?? 0);
+    const amount = round2(p?.amount ?? p?.price ?? p?.totalAmount ?? p?.cost ?? 0);
     if (!desc) throw new AppError(`parts[${i}].description is required`, 400);
     if (!Number.isFinite(amount) || amount < 0) {
       throw new AppError(`parts[${i}].amount must be a non-negative number`, 400);
@@ -516,22 +573,21 @@ const maskCardLabel = (method) => {
 };
 
 const computeFleetPaymentBox = ({ job, defaultPaymentMethod }) => {
-  // UI meanings:
-  // - quoteAmount: base job amount (accepted or estimated)
-  // - platformFee: 12% of quote amount
-  // - totalPayable: quote + platform fee (ex VAT)
-  // - preAuthHeld: actual repair charge including VAT when the supplier is registered
-  const quoteAmount = Number(job.acceptedAmount ?? job.estimatedPayout ?? 0) || 0;
+  // Only show accepted quote amounts here — waiting quotes belong in the Quotes panel.
+  const quoteAmount = Number(job.acceptedAmount ?? job.finalAmount ?? 0) || 0;
   const platformFee = quoteAmount > 0 ? round2(quoteAmount * 0.12) : 0;
-  const totalPayable = quoteAmount > 0 ? round2(quoteAmount + platformFee) : 0;
+  const mechanicNet = quoteAmount > 0 ? round2(quoteAmount - platformFee) : 0;
   const vat = calculateJobVat(job, quoteAmount);
-  const preAuthHeld = vat.totalAmount;
+  const chargedToFleet = vat.totalAmount;
 
   return {
     quoteAmount: quoteAmount || null,
     platformFee: quoteAmount ? platformFee : null,
-    totalPayable: quoteAmount ? totalPayable : null,
-    preAuthHeld: quoteAmount ? preAuthHeld : null,
+    mechanicNet: quoteAmount ? mechanicNet : null,
+    /** @deprecated Prefer chargedToFleet — was quote+fee which fleets do not pay. */
+    totalPayable: quoteAmount ? chargedToFleet : null,
+    chargedToFleet: quoteAmount ? chargedToFleet : null,
+    preAuthHeld: quoteAmount ? chargedToFleet : null,
     vatApplied: vat.vatRegistered,
     vatRate: vat.vatRate,
     vatAmount: quoteAmount ? vat.vatAmount : null,
@@ -928,6 +984,12 @@ const serializeJobDetail = async (job, viewer) => {
         }).lean()
       : null;
 
+  const invoiceDoc = await Invoice.findOne({ job: job._id })
+    .select(
+      "invoiceNo status totalAmount subtotal vatAmount vatRate vatApplied currency paidAt issuedAt lineItems billedToSnapshot mechanicSnapshot"
+    )
+    .lean();
+
   return {
     ...base,
     tracking: mergedTracking,
@@ -958,14 +1020,34 @@ const serializeJobDetail = async (job, viewer) => {
           myQuoteId: myQuote._id,
           amount: myQuote.amount,
           status: myQuote.status,
+          notes: myQuote.notes || null,
           availabilityType: myQuote.availabilityType,
           scheduledAt: myQuote.scheduledAt || null,
+          etaMinutes: myQuote.etaMinutes ?? null,
         }
       : null,
     paymentSummary:
       viewer.role === ROLES.FLEET
         ? computeFleetPaymentBox({ job, defaultPaymentMethod })
         : null,
+    invoice: invoiceDoc
+      ? {
+          _id: invoiceDoc._id,
+          invoiceNo: invoiceDoc.invoiceNo,
+          status: invoiceDoc.status,
+          totalAmount: invoiceDoc.totalAmount,
+          subtotal: invoiceDoc.subtotal,
+          vatAmount: invoiceDoc.vatAmount,
+          vatRate: invoiceDoc.vatRate,
+          vatApplied: invoiceDoc.vatApplied,
+          currency: invoiceDoc.currency,
+          paidAt: invoiceDoc.paidAt,
+          issuedAt: invoiceDoc.issuedAt,
+          lineItems: invoiceDoc.lineItems || [],
+          billedToSnapshot: invoiceDoc.billedToSnapshot || null,
+          mechanicSnapshot: invoiceDoc.mechanicSnapshot || null,
+        }
+      : null,
     jobSummary: buildJobSummaryForDetail(job, statusTimes),
   };
 };
@@ -992,13 +1074,29 @@ const generateInvoiceNo = async () => {
 
 const ensureLocation = (payload) => {
   const location = payload.location || {};
-  const coordinates = location.coordinates || payload.coordinates;
+  let coordinates = location.coordinates || payload.coordinates;
+
+  // Accept GeoJSON [lng, lat] or plain { lat, lng } / { latitude, longitude }.
+  if (!Array.isArray(coordinates) || coordinates.length !== 2) {
+    const lng = Number(location.lng ?? location.longitude ?? payload.lng ?? payload.longitude);
+    const lat = Number(location.lat ?? location.latitude ?? payload.lat ?? payload.latitude);
+    if (Number.isFinite(lng) && Number.isFinite(lat)) {
+      coordinates = [lng, lat];
+    }
+  }
+
   if (!Array.isArray(coordinates) || coordinates.length !== 2) {
     throw new AppError("location.coordinates must be [lng, lat]", 400);
   }
+
+  const [lng, lat] = coordinates.map(Number);
+  if (!Number.isFinite(lng) || !Number.isFinite(lat)) {
+    throw new AppError("location.coordinates must be [lng, lat]", 400);
+  }
+
   return {
     type: "Point",
-    coordinates,
+    coordinates: [lng, lat],
     address: location.address || payload.address,
   };
 };
@@ -1191,6 +1289,20 @@ const sanitizeFileName = (value) =>
 const upsertFinancialRecordsForCompletedJob = async (job, paymentContext = {}) => {
   if (!job.assignedMechanic) return { invoice: null, earningTransaction: null };
 
+  // Ensure fleet billing fields are available for invoice snapshots.
+  if (!job.fleet?.fleetProfile) {
+    await job.populate?.(
+      "fleet",
+      "email fleetProfile.companyName fleetProfile.vatNumber fleetProfile.billingAddress"
+    );
+  }
+  if (!job.fleet?.fleetProfile && job.fleet) {
+    const fleetDoc = await User.findById(job.fleet)
+      .select("email fleetProfile.companyName fleetProfile.vatNumber fleetProfile.billingAddress")
+      .lean();
+    if (fleetDoc) job.fleet = fleetDoc;
+  }
+
   const vat = calculateJobVat(
     job,
     Number(job.finalAmount ?? job.acceptedAmount ?? job.estimatedPayout ?? 0)
@@ -1246,7 +1358,7 @@ const upsertFinancialRecordsForCompletedJob = async (job, paymentContext = {}) =
       billedToSnapshot: {
         companyName: job.fleet?.fleetProfile?.companyName,
         vatNumber: job.fleet?.fleetProfile?.vatNumber,
-        address: job.location?.address,
+        address: job.fleet?.fleetProfile?.billingAddress || undefined,
       },
       mechanicSnapshot: {
         displayName: job.assignedMechanic?.mechanicProfile?.displayName,
@@ -1319,6 +1431,13 @@ const upsertFinancialRecordsForCompletedJob = async (job, paymentContext = {}) =
         profilePhotoUrl: mp.profilePhotoUrl ?? prev.profilePhotoUrl,
       };
     }
+    invoice.billedToSnapshot = {
+      companyName:
+        job.fleet?.fleetProfile?.companyName || invoice.billedToSnapshot?.companyName,
+      vatNumber: job.fleet?.fleetProfile?.vatNumber || invoice.billedToSnapshot?.vatNumber,
+      address:
+        job.fleet?.fleetProfile?.billingAddress || invoice.billedToSnapshot?.address,
+    };
     await invoice.save();
   }
 
@@ -1426,7 +1545,9 @@ export const createJob = async (payload, fleetUser) => {
       payload.driverName || payload.driverPhone
         ? {
             name: `${payload.driverName || ""}`.trim() || undefined,
-            phone: `${payload.driverPhone || ""}`.trim() || undefined,
+            phone:
+              assertValidOptionalPhone(payload.driverPhone, "Driver phone") ||
+              undefined,
           }
         : undefined,
     photos: payload.photos || [],
@@ -1452,6 +1573,160 @@ export const createJob = async (payload, fleetUser) => {
   });
 
   return job;
+};
+
+const assertPostedFleetJob = (job, fleetUser) => {
+  ensureFleetOwner(job, fleetUser._id);
+  if (job.status !== JOB_STATUS.POSTED) {
+    throw new AppError("Only POSTED jobs can be edited or deleted", 400, {
+      code: "JOB_NOT_EDITABLE",
+      status: job.status,
+    });
+  }
+};
+
+export const updateJob = async (jobId, fleetUser, payload = {}) => {
+  jobId = await resolveJobRef(jobId);
+  const job = await Job.findById(jobId);
+  if (!job) throw new AppError("Job not found", 404);
+  assertPostedFleetJob(job, fleetUser);
+
+  const next = { ...(payload || {}) };
+  if (typeof next.location === "string") {
+    try {
+      next.location = JSON.parse(next.location);
+    } catch {
+      throw new AppError("location must be valid JSON", 400);
+    }
+  }
+
+  if (next.title !== undefined) {
+    const title = `${next.title}`.trim();
+    if (!title) throw new AppError("title cannot be empty", 400);
+    job.title = title;
+  }
+  if (next.description !== undefined) {
+    const description = `${next.description}`.trim();
+    if (!description) throw new AppError("description cannot be empty", 400);
+    job.description = description;
+  }
+  if (next.urgency !== undefined) {
+    job.urgency = `${next.urgency}`.trim().toUpperCase();
+  }
+  if (next.mode !== undefined) {
+    job.mode = `${next.mode}`.trim().toUpperCase();
+  }
+
+  if (
+    next.registration !== undefined ||
+    next.vehicleType !== undefined ||
+    next.vehicleMake !== undefined ||
+    next.vehicleModel !== undefined ||
+    next.trailerMakeModel !== undefined ||
+    next.trailer !== undefined ||
+    next.vehicleId !== undefined
+  ) {
+    job.vehicle = {
+      ...(job.vehicle?.toObject?.() || job.vehicle || {}),
+      ...(next.vehicleId !== undefined ? { vehicleId: next.vehicleId } : {}),
+      ...(next.registration !== undefined
+        ? { registration: `${next.registration}`.trim() }
+        : {}),
+      ...(next.vehicleType !== undefined ? { type: next.vehicleType } : {}),
+      ...(next.vehicleMake !== undefined ? { make: next.vehicleMake } : {}),
+      ...(next.vehicleModel !== undefined ? { model: next.vehicleModel } : {}),
+      ...(next.trailerMakeModel !== undefined || next.trailer !== undefined
+        ? {
+            trailerMakeModel:
+              `${next.trailerMakeModel || next.trailer || ""}`.trim() || undefined,
+          }
+        : {}),
+    };
+  }
+
+  if (
+    next.issueType !== undefined ||
+    next.issueSubtype !== undefined ||
+    next.jobCategory !== undefined
+  ) {
+    const { issueType, issueSubtype } = resolveIssueClassification(next);
+    job.issueType = issueType;
+    job.issueSubtype = issueSubtype || undefined;
+  }
+
+  if (next.tyreDetails !== undefined || next.tyreSize || next.tyreAxlePosition || next.tyreSide) {
+    job.tyreDetails = buildTyreDetailsFromPayload(next);
+  }
+
+  if (next.location !== undefined || next.coordinates !== undefined || next.address !== undefined || next.lat != null || next.lng != null) {
+    const baseLoc =
+      next.location && typeof next.location === "object"
+        ? { ...next.location }
+        : { ...(job.location?.toObject?.() || job.location || {}) };
+    if (next.address !== undefined) baseLoc.address = next.address;
+    if (next.lat != null) baseLoc.lat = next.lat;
+    if (next.lng != null) baseLoc.lng = next.lng;
+    job.location = ensureLocation({
+      location: baseLoc,
+      coordinates: next.coordinates || baseLoc.coordinates,
+      address: baseLoc.address,
+      lat: baseLoc.lat,
+      lng: baseLoc.lng,
+    });
+  }
+
+  if (next.driverName !== undefined || next.driverPhone !== undefined) {
+    const name =
+      next.driverName !== undefined
+        ? `${next.driverName || ""}`.trim()
+        : job.driver?.name;
+    const phone =
+      next.driverPhone !== undefined
+        ? assertValidOptionalPhone(next.driverPhone, "Driver phone")
+        : job.driver?.phone;
+    job.driver = name || phone ? { name: name || undefined, phone: phone || undefined } : undefined;
+  }
+
+  const scheduling = normalizeAvailabilityWindow(next);
+  if (next.availabilityWindow || next.availabilityFrom || next.availabilityTo || next.scheduledFor) {
+    job.scheduledFor = scheduling.scheduledFor;
+    job.availabilityWindow = scheduling.availabilityWindow;
+  }
+
+  await job.save();
+
+  await createJobEvent({
+    jobId: job._id,
+    actorId: fleetUser._id,
+    type: "JOB_UPDATED",
+    note: "Fleet updated job details",
+    payload: { fields: Object.keys(payload || {}) },
+  });
+
+  return job;
+};
+
+export const deleteJob = async (jobId, fleetUser) => {
+  jobId = await resolveJobRef(jobId);
+  const job = await Job.findById(jobId);
+  if (!job) throw new AppError("Job not found", 404);
+  assertPostedFleetJob(job, fleetUser);
+
+  const id = job._id;
+  const jobCode = job.jobCode;
+
+  await Promise.all([
+    Quote.deleteMany({ job: id }),
+    JobEvent.deleteMany({ job: id }),
+    JobLocationPing.deleteMany({ job: id }),
+    ChatMessage.deleteMany({ job: id }),
+    Notification.deleteMany({ "data.jobId": `${id}` }),
+    Notification.deleteMany({ "data.jobId": id }),
+  ]);
+
+  await Job.deleteOne({ _id: id });
+
+  return { deleted: true, jobId: `${id}`, jobCode };
 };
 
 export const addJobPhotos = async (jobId, user, payload = {}) => {
@@ -1692,6 +1967,11 @@ export const listJobs = async (user, query) => {
     filter.fleet = user._id;
     if (listTab === "completed") {
       filter.status = JOB_STATUS.COMPLETED;
+      const days = Number(query.days);
+      if (Number.isFinite(days) && days > 0) {
+        const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+        filter.completedAt = { $gte: since };
+      }
     } else if (listTab === "active" || listTab === "tracking") {
       const fleetActiveList = [
         JOB_STATUS.POSTED,
@@ -1721,14 +2001,24 @@ export const listJobs = async (user, query) => {
   if ([ROLES.MECHANIC, ROLES.MECHANIC_EMPLOYEE].includes(user.role)) {
     if (`${query.feed}` === "true") {
       filter.status = { $in: [JOB_STATUS.POSTED, JOB_STATUS.QUOTING] };
-      if (query.lat && query.lng) {
-        const lat = Number(query.lat);
-        const lng = Number(query.lng);
-        const radiusMiles = Number(query.radiusMiles || query.radius || 15);
-        if (Number.isFinite(lat) && Number.isFinite(lng) && Number.isFinite(radiusMiles)) {
-          nearPoint = { lat, lng };
-          filter.location = locationWithinRadiusFilter(lng, lat, radiusMiles);
+      const radiusMiles = Number(
+        query.radiusMiles ||
+          query.radius ||
+          user.mechanicProfile?.serviceRadiusMiles ||
+          25
+      );
+      let lat = query.lat != null ? Number(query.lat) : NaN;
+      let lng = query.lng != null ? Number(query.lng) : NaN;
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+        const lk = user.mechanicProfile?.lastKnownLocation?.coordinates;
+        if (Array.isArray(lk) && lk.length === 2) {
+          lng = Number(lk[0]);
+          lat = Number(lk[1]);
         }
+      }
+      if (Number.isFinite(lat) && Number.isFinite(lng) && Number.isFinite(radiusMiles)) {
+        nearPoint = { lat, lng };
+        filter.location = locationWithinRadiusFilter(lng, lat, radiusMiles);
       }
       if (query.issueType) {
         filter.issueType = { $in: `${query.issueType}`.split(",") };
@@ -1802,6 +2092,8 @@ export const listJobs = async (user, query) => {
     }
   }
 
+  applyListSearchFilter(filter, query);
+
   const queryBuilder = Job.find(filter)
     .sort({ createdAt: -1 })
     .skip(skip)
@@ -1816,7 +2108,7 @@ export const listJobs = async (user, query) => {
     )
     .populate(
       "assignedMechanic",
-      "email role mechanicProfile.displayName mechanicProfile.phone mechanicProfile.rating mechanicProfile.profilePhotoUrl mechanicProfile.availability"
+      "email role mechanicProfile.displayName mechanicProfile.businessName mechanicProfile.phone mechanicProfile.rating mechanicProfile.profilePhotoUrl mechanicProfile.availability"
     )
     .lean();
 
@@ -1841,6 +2133,28 @@ export const listJobs = async (user, query) => {
       distanceMiles: roundMiles(distanceMeters),
     });
   });
+
+  // Attach invoice refs for completed jobs (avoids N+1 on the client).
+  if (serializedItems.length) {
+    const invoices = await Invoice.find({
+      job: { $in: items.map((j) => j._id) },
+    })
+      .select("_id invoiceNo job totalAmount status paidAt")
+      .lean();
+    const byJob = new Map(invoices.map((inv) => [String(inv.job), inv]));
+    for (const card of serializedItems) {
+      const inv = byJob.get(String(card._id));
+      if (inv) {
+        card.invoice = {
+          _id: inv._id,
+          invoiceNo: inv.invoiceNo,
+          totalAmount: inv.totalAmount,
+          status: inv.status,
+          paidAt: inv.paidAt || null,
+        };
+      }
+    }
+  }
 
   const insightBase = {
     activeCount: serializedItems.filter(
@@ -1872,7 +2186,7 @@ export const getJobByIdForUser = async (jobId, user) => {
   const job = await Job.findById(jobId)
     .populate(
       "fleet",
-      "email role fleetProfile.companyName fleetProfile.contactName fleetProfile.phone fleetProfile.billingAddress fleetProfile.rating"
+      "email role fleetProfile.companyName fleetProfile.contactName fleetProfile.phone fleetProfile.billingAddress fleetProfile.vatNumber fleetProfile.rating"
     )
     .populate(
       "assignedCompany",
@@ -1880,7 +2194,7 @@ export const getJobByIdForUser = async (jobId, user) => {
     )
     .populate(
       "assignedMechanic",
-      "email role mechanicProfile.displayName mechanicProfile.phone mechanicProfile.rating mechanicProfile.profilePhotoUrl mechanicProfile.availability"
+      "email role mechanicProfile.displayName mechanicProfile.businessName mechanicProfile.phone mechanicProfile.rating mechanicProfile.profilePhotoUrl mechanicProfile.availability"
     );
 
   if (!job) throw new AppError("Job not found", 404);

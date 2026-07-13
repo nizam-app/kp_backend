@@ -14,6 +14,7 @@ import { EarningTransaction } from "../src/modules/earning/earningTransaction.mo
 import { Review } from "../src/modules/review/review.model.js";
 import { JobLocationPing } from "../src/modules/jobLocationPing/jobLocationPing.model.js";
 import { ChatMessage } from "../src/modules/chat/chat.model.js";
+import { PaymentMethod } from "../src/modules/billing/paymentMethod.model.js";
 import {
   ROLES,
   USER_STATUS,
@@ -24,6 +25,39 @@ import {
   QUOTE_AVAILABILITY,
   MECHANIC_AVAILABILITY,
 } from "../src/constants/domain.js";
+
+/** Seed a default MANUAL card so fleet profile completion (and job posting) works without Stripe. */
+async function ensureFleetDefaultPaymentMethod(user) {
+  if (!user?._id) return;
+  const existing = await PaymentMethod.findOne({
+    user: user._id,
+    isActive: true,
+    isDefault: true,
+  });
+  if (existing) return existing;
+
+  await PaymentMethod.updateMany(
+    { user: user._id, isActive: true },
+    { $set: { isDefault: false } }
+  );
+
+  return PaymentMethod.create({
+    user: user._id,
+    ownerType: "FLEET",
+    methodType: "CARD",
+    provider: "MANUAL",
+    providerMethodId: `manual_seed_${user._id}`,
+    card: {
+      brand: "visa",
+      last4: "4242",
+      expMonth: 12,
+      expYear: new Date().getFullYear() + 3,
+    },
+    billingAddress: user.fleetProfile?.billingAddress || "123 Logistics Ave, JHB",
+    isDefault: true,
+    isActive: true,
+  });
+}
 
 const must = (key) => {
   const v = `${process.env[key] || ""}`.trim();
@@ -344,6 +378,7 @@ async function run() {
       rating: { average: 4.7, count: 156 },
     },
   });
+  await ensureFleetDefaultPaymentMethod(fleet);
 
   const james = await upsertUser({
     email: "mechanic@truckfix.dev",
@@ -360,9 +395,10 @@ async function run() {
       hourlyRate: 75,
       skills: ["TYRES", "BRAKES"],
       profilePhotoUrl: "https://i.pravatar.cc/150?img=11",
+      // Piccadilly, Manchester — matches base label; feed distances use this when GPS denied
       lastKnownLocation: {
         type: "Point",
-        coordinates: [-1.8284, 52.4862],
+        coordinates: [-2.2426, 53.4808],
         updatedAt: new Date(),
       },
       profileCompleted: true,
@@ -747,6 +783,105 @@ async function run() {
     }),
   });
 
+  /**
+   * Distance-filter demo jobs around James (Manchester Piccadilly [-2.2426, 53.4808]).
+   * Approx miles from base — use Job Feed tabs ≤5 / ≤10 / ≤15 / ≤25 to verify filtering.
+   */
+  const distanceDemoJobs = [
+    {
+      jobCode: "TF-DIST02",
+      miles: "~2 mi",
+      coordinates: [-2.286, 53.487],
+      address: "Salford Quays, Manchester (~2 mi)",
+      registration: "DIST 02",
+      title: "Battery flat — Quays",
+      description: "Distance demo: ~2 miles from Piccadilly",
+      urgency: JOB_URGENCY.MEDIUM,
+      estimatedPayout: 85,
+      minutesAgo: 20,
+    },
+    {
+      jobCode: "TF-DIST08",
+      miles: "~8 mi",
+      coordinates: [-2.428, 53.578],
+      address: "Bolton ring road (~8 mi)",
+      registration: "DIST 08",
+      title: "Brake warning light",
+      description: "Distance demo: ~8 miles from Piccadilly",
+      urgency: JOB_URGENCY.HIGH,
+      estimatedPayout: 140,
+      minutesAgo: 35,
+    },
+    {
+      jobCode: "TF-DIST14",
+      miles: "~14 mi",
+      coordinates: [-2.10, 53.55],
+      address: "Oldham / A62 corridor (~14 mi)",
+      registration: "DIST 14",
+      title: "Air leak — trailer",
+      description: "Distance demo: ~14 miles from Piccadilly",
+      urgency: JOB_URGENCY.MEDIUM,
+      estimatedPayout: 160,
+      minutesAgo: 50,
+    },
+    {
+      jobCode: "TF-DIST20",
+      miles: "~20 mi",
+      coordinates: [-2.24, 53.77],
+      address: "Burnley area (~20 mi)",
+      registration: "DIST 20",
+      title: "Overheating — hard shoulder",
+      description: "Distance demo: ~20 miles from Piccadilly",
+      urgency: JOB_URGENCY.CRITICAL,
+      estimatedPayout: 220,
+      minutesAgo: 12,
+    },
+    {
+      jobCode: "TF-DIST40",
+      miles: "~40 mi (outside 25 mi radius)",
+      coordinates: [-1.5491, 53.8008],
+      address: "Leeds city centre (~40 mi)",
+      registration: "DIST 40",
+      title: "Tyre blowout — Leeds",
+      description: "Distance demo: ~40 miles — should NOT appear in James’s 25 mi feed",
+      urgency: JOB_URGENCY.HIGH,
+      estimatedPayout: 190,
+      minutesAgo: 8,
+    },
+  ];
+
+  for (const demo of distanceDemoJobs) {
+    await upsertJobByCode({
+      jobCode: demo.jobCode,
+      build: () => ({
+        fleet: fleet._id,
+        assignedMechanic: null,
+        assignedCompany: null,
+        acceptedQuote: null,
+        vehicle: {
+          registration: demo.registration,
+          make: "DAF",
+          model: "XF",
+          type: "Artic",
+        },
+        issueType: ISSUE_TYPES.BREAKDOWN_UNKNOWN_ISSUE,
+        title: demo.title,
+        description: demo.description,
+        urgency: demo.urgency,
+        mode: "EMERGENCY",
+        location: {
+          type: "Point",
+          coordinates: demo.coordinates,
+          address: demo.address,
+        },
+        status: JOB_STATUS.POSTED,
+        postedAt: minutesAgo(demo.minutesAgo),
+        quoteCount: 0,
+        estimatedPayout: demo.estimatedPayout,
+        currency: "GBP",
+      }),
+    });
+  }
   const jobCompanyFeedQuote1 = await upsertJobByCode({
     jobCode: "TF-FEEDQ1",
     build: () => ({
@@ -1173,7 +1308,7 @@ async function run() {
     }),
   });
 
-  await upsertJobByCode({
+  const jobPriorMonth8700 = await upsertJobByCode({
     jobCode: "TF-8700P",
     build: () => ({
       fleet: fleet._id,
@@ -1499,6 +1634,22 @@ async function run() {
     job: jobEarning8761,
     fleet,
     mechanic: james,
+  });
+
+  await ensureInvoiceForJob({
+    invoiceNo: "INV-TF-8700P",
+    job: jobPriorMonth8700,
+    fleet,
+    mechanic: tom,
+    extra: {
+      subtotal: 2400,
+      vatAmount: 0,
+      totalAmount: 2400,
+      paidAt: prevMonthNoon(),
+      lineItems: [
+        { description: "Prior month seed completion", quantity: 1, unitAmount: 2400, totalAmount: 2400 },
+      ],
+    },
   });
 
   await ensureReviewForSeedJob({ job: jobCompanyCompletedMonth, fleet, mechanic: james });
@@ -1940,6 +2091,44 @@ async function run() {
     });
   }
 
+  // Live-map demos: mechanic GPS + ETA on EN_ROUTE / ON_SITE seed jobs
+  const liveTrackCodes = ["TF-8821", "TF-8822", "TF-8825"];
+  for (const code of liveTrackCodes) {
+    const liveJob = await Job.findOne({ jobCode: code })
+      .select("_id assignedMechanic location status")
+      .lean();
+    if (!liveJob?._id || !liveJob.assignedMechanic) continue;
+    const site = liveJob.location?.coordinates;
+    const [siteLng, siteLat] = Array.isArray(site) && site.length === 2 ? site.map(Number) : [-1.9, 52.48];
+    const mechLng = siteLng - 0.035;
+    const mechLat = siteLat + 0.02;
+    await JobLocationPing.deleteMany({ job: liveJob._id });
+    await JobLocationPing.create({
+      job: liveJob._id,
+      mechanic: liveJob.assignedMechanic,
+      point: { type: "Point", coordinates: [mechLng, mechLat] },
+      heading: 120,
+      speed: 28,
+      accuracy: 12,
+      pingedAt: minutesAgo(3),
+    });
+    await Job.updateOne(
+      { _id: liveJob._id },
+      {
+        $set: {
+          "tracking.latestMechanicLocation": {
+            point: { type: "Point", coordinates: [mechLng, mechLat] },
+            heading: 120,
+            speed: 28,
+            accuracy: 12,
+            updatedAt: minutesAgo(3),
+          },
+          "tracking.etaMinutes": code === "TF-8825" ? 8 : 14,
+        },
+      }
+    );
+  }
+
   const pendingReviewDemoIds = await Job.find({ jobCode: { $in: ["TF-8820", "TF-8819"] } })
     .select("_id")
     .lean();
@@ -2078,6 +2267,11 @@ async function run() {
   console.log(
     "Seeded jobCodes:",
     [
+      "TF-DIST02",
+      "TF-DIST08",
+      "TF-DIST14",
+      "TF-DIST20",
+      "TF-DIST40",
       "TF-8819",
       "TF-8819C",
       "TF-8819D",

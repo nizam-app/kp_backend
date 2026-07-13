@@ -304,14 +304,36 @@ const serializeFleetManagementItem = (fleet, vehicles = []) => ({
 
 const serializeSupportTicketForAdmin = (ticket) => {
   const priority = supportPriorityFromTicket(ticket);
+  const replies =
+    ticket.replies?.map((reply) => ({
+      _id: reply._id,
+      message: reply.message,
+      internal: Boolean(reply.internal),
+      role: reply.role || reply.sender?.role || null,
+      createdAt: reply.createdAt,
+      sender: reply.sender
+        ? {
+            _id: reply.sender._id || reply.sender,
+            email: reply.sender.email || null,
+            displayName:
+              reply.sender.fleetProfile?.companyName ||
+              reply.sender.mechanicProfile?.displayName ||
+              reply.sender.adminProfile?.displayName ||
+              null,
+          }
+        : null,
+    })) || [];
+
   return {
     _id: ticket._id,
+    ticketRef: ticket.ticketRef || null,
     subject: ticket.subject,
     message: ticket.message,
     category: ticket.category,
+    jobCode: ticket.jobCode || null,
     status: {
       value: ticket.status,
-      label: ticket.status.replace("_", " "),
+      label: ticket.status.replace(/_/g, " "),
       tone: supportStatusTone(ticket.status),
     },
     priority,
@@ -329,6 +351,10 @@ const serializeSupportTicketForAdmin = (ticket) => {
           email: ticket.assignedTo.email || null,
         }
       : null,
+    resolution: ticket.resolution || null,
+    resolvedAt: ticket.resolvedAt || null,
+    replies,
+    repliesCount: replies.length,
     createdAt: ticket.createdAt,
     updatedAt: ticket.updatedAt,
   };
@@ -1802,9 +1828,22 @@ export const getAdminLiveTracking = async () => {
     activeJobs.map((job) => [job.assignedMechanic.toString(), job])
   );
 
+  const readPoint = (src) => {
+    const coords = src?.coordinates || src?.point?.coordinates;
+    if (!Array.isArray(coords) || coords.length !== 2) return null;
+    const [lng, lat] = coords.map(Number);
+    if (!Number.isFinite(lng) || !Number.isFinite(lat)) return null;
+    return { lat, lng };
+  };
+
   const items = mechanics.map((mechanic) => {
     const job = activeJobMap.get(mechanic._id.toString()) || null;
     const ping = latestPingMap.get(mechanic._id.toString()) || null;
+    const fromTracking = readPoint(job?.tracking?.latestMechanicLocation?.point);
+    const fromPing = readPoint(ping?.point);
+    const fromProfile = readPoint(mechanic.mechanicProfile?.lastKnownLocation);
+    const jobSite = readPoint(job?.location);
+
     const state =
       job?.status === JOB_STATUS.EN_ROUTE
         ? "EN_ROUTE"
@@ -1814,9 +1853,12 @@ export const getAdminLiveTracking = async () => {
         ? "AVAILABLE"
         : "OFFLINE";
 
+    const mechanicPos = fromTracking || fromPing || fromProfile || null;
+
     return {
       _id: mechanic._id,
       displayName: mechanic.mechanicProfile?.displayName || mechanic.email,
+      businessName: mechanic.mechanicProfile?.businessName || null,
       baseLocationText: mechanic.mechanicProfile?.baseLocationText || null,
       state,
       currentJob: job
@@ -1824,18 +1866,57 @@ export const getAdminLiveTracking = async () => {
             _id: job._id,
             jobCode: job.jobCode,
             title: job.title,
+            status: job.status,
             fleetCompanyName: job.fleet?.fleetProfile?.companyName || null,
             etaMinutes: job.tracking?.etaMinutes ?? null,
+            address: job.location?.address || null,
+            site: jobSite,
+            vehicle: job.vehicle
+              ? {
+                  registration: job.vehicle.registration || null,
+                  type: job.vehicle.type || null,
+                }
+              : null,
           }
         : null,
-      latestLocation: ping
+      latestLocation: mechanicPos
         ? {
-            point: ping.point,
-            pingedAt: ping.pingedAt,
+            lat: mechanicPos.lat,
+            lng: mechanicPos.lng,
+            point: { type: "Point", coordinates: [mechanicPos.lng, mechanicPos.lat] },
+            pingedAt: ping?.pingedAt || job?.tracking?.latestMechanicLocation?.updatedAt || null,
           }
         : null,
     };
   });
+
+  // Also expose open/posted jobs (no mechanic yet) for admin overview pins
+  const openJobs = await Job.find({
+    status: { $in: [JOB_STATUS.POSTED, JOB_STATUS.QUOTING] },
+  })
+    .sort({ postedAt: -1 })
+    .limit(40)
+    .populate("fleet", "fleetProfile.companyName")
+    .lean();
+
+  const openJobPins = openJobs
+    .map((job) => {
+      const site = readPoint(job.location);
+      if (!site) return null;
+      return {
+        _id: job._id,
+        jobCode: job.jobCode,
+        title: job.title,
+        status: job.status,
+        fleetCompanyName: job.fleet?.fleetProfile?.companyName || null,
+        address: job.location?.address || null,
+        site,
+        vehicle: job.vehicle
+          ? { registration: job.vehicle.registration || null, type: job.vehicle.type || null }
+          : null,
+      };
+    })
+    .filter(Boolean);
 
   return {
     cards: {
@@ -1843,12 +1924,18 @@ export const getAdminLiveTracking = async () => {
       onJob: items.filter((item) => item.state === "ON_JOB").length,
       enRoute: items.filter((item) => item.state === "EN_ROUTE").length,
       available: items.filter((item) => item.state === "AVAILABLE").length,
+      openJobs: openJobPins.length,
     },
     items,
+    openJobs: openJobPins,
   };
 };
 
 export const listAdminSupportTickets = async (query = {}) => {
+  const { reconcileMisfiledSupportTickets, reconcileSupportTicketIfNeeded } =
+    await import("../supportTicket/supportTicket.service.js");
+  await reconcileMisfiledSupportTickets();
+
   const page = parsePage(query.page);
   const limit = parseLimit(query.limit);
   const skip = (page - 1) * limit;
@@ -1868,6 +1955,7 @@ export const listAdminSupportTickets = async (query = {}) => {
       .limit(limit)
       .populate("user", "email fleetProfile.companyName mechanicProfile.displayName")
       .populate("assignedTo", "email")
+      .populate("replies.sender", "email role fleetProfile.companyName mechanicProfile.displayName adminProfile.displayName")
       .lean(),
     SupportTicket.countDocuments(filter),
     SupportTicket.find({})
@@ -1891,6 +1979,8 @@ export const listAdminSupportTickets = async (query = {}) => {
     items = items.filter((ticket) => supportPriorityFromTicket(ticket) === priority);
   }
 
+  items = await Promise.all(items.map((ticket) => reconcileSupportTicketIfNeeded(ticket)));
+
   const stats = {
     open: allTickets.filter((ticket) => ticket.status === "OPEN").length,
     inProgress: allTickets.filter((ticket) => ticket.status === "IN_PROGRESS").length,
@@ -1912,22 +2002,24 @@ export const listAdminSupportTickets = async (query = {}) => {
   };
 };
 
-export const updateAdminSupportTicket = async (ticketId, payload = {}) => {
-  const ticket = await SupportTicket.findById(ticketId);
+export const getAdminSupportTicketById = async (ticketId) => {
+  const { reconcileSupportTicketIfNeeded } = await import(
+    "../supportTicket/supportTicket.service.js"
+  );
+  let ticket = await SupportTicket.findById(ticketId)
+    .populate("user", "email fleetProfile.companyName mechanicProfile.displayName")
+    .populate("assignedTo", "email")
+    .populate("replies.sender", "email role fleetProfile.companyName mechanicProfile.displayName adminProfile.displayName")
+    .lean();
   if (!ticket) throw new AppError("Support ticket not found", 404);
+  ticket = await reconcileSupportTicketIfNeeded(ticket);
+  return serializeSupportTicketForAdmin(ticket);
+};
 
-  if (payload.status) {
-    ticket.status = `${payload.status}`.trim().toUpperCase();
-  }
-  if (payload.resolution !== undefined) {
-    ticket.resolution = `${payload.resolution || ""}`.trim() || undefined;
-  }
-  if (ticket.status === "RESOLVED" && !ticket.resolvedAt) {
-    ticket.resolvedAt = new Date();
-  }
-
-  await ticket.save();
-  return ticket;
+export const updateAdminSupportTicket = async (ticketId, payload = {}, adminUser) => {
+  if (!adminUser) throw new AppError("Admin user required", 401);
+  const { updateSupportTicket } = await import("../supportTicket/supportTicket.service.js");
+  return updateSupportTicket(adminUser, ticketId, payload);
 };
 
 export const listAdminDisputes = async (query = {}) => {

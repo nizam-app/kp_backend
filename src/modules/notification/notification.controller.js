@@ -1,8 +1,10 @@
 import { sendResponse } from "../../utils/sendResponse.js";
 import {
+  deleteNotification,
   getNotificationById,
   listDeviceTokens,
   listNotifications,
+  markAllNotificationsRead,
   markNotificationRead,
   registerDeviceToken,
 } from "./notification.service.js";
@@ -29,6 +31,22 @@ export const markNotificationReadController = async (req, res) => {
   return sendResponse(res, {
     message: "Notification marked as read",
     data: notification,
+  });
+};
+
+export const markAllNotificationsReadController = async (req, res) => {
+  const result = await markAllNotificationsRead(req.user);
+  return sendResponse(res, {
+    message: "All notifications marked as read",
+    data: result,
+  });
+};
+
+export const deleteNotificationController = async (req, res) => {
+  const result = await deleteNotification(req.user, req.params.id);
+  return sendResponse(res, {
+    message: "Notification deleted",
+    data: result,
   });
 };
 

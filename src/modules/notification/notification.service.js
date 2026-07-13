@@ -113,6 +113,36 @@ export const markNotificationRead = async (user, notificationId) => {
   return serializeNotification(notification);
 };
 
+export const markAllNotificationsRead = async (user) => {
+  const now = new Date();
+  const result = await Notification.updateMany(
+    { user: user._id, isRead: false },
+    { $set: { isRead: true, readAt: now } }
+  );
+  emitNotificationRead({
+    userId: user._id,
+    notificationId: null,
+    readAt: now,
+    markedAll: true,
+  });
+  return {
+    matched: result.matchedCount ?? result.n ?? 0,
+    modified: result.modifiedCount ?? result.nModified ?? 0,
+  };
+};
+
+export const deleteNotification = async (user, notificationId) => {
+  const notification = await Notification.findOneAndDelete({
+    _id: notificationId,
+    user: user._id,
+  }).lean();
+  if (!notification) throw new AppError("Notification not found", 404);
+  return {
+    _id: notification._id,
+    deleted: true,
+  };
+};
+
 export const registerDeviceToken = async (user, payload = {}) => {
   const tokenValue = `${payload.token || ""}`.trim();
   const platform = `${payload.platform || ""}`.trim();

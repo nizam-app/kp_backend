@@ -6,7 +6,7 @@ import { handleProfileImageMulterError } from "../../config/profileImageUpload.j
 import {
   adminDashboardController,adminAuditLogsController,adminDisputesController,adminFinancialController,adminFleetController,adminLiveTrackingController,
   adminNotificationsController,adminPromotionsController,adminReportsController,adminReviewsController,adminServiceCatalogController,
-  adminServiceRequestByIdController,adminServiceRequestsController,adminSettingsController,adminSupportTicketsController,adminUserByIdController,adminUserMembersController,adminUsersController,approveMechanicController,
+  adminServiceRequestByIdController,adminServiceRequestsController,adminSettingsController,adminSupportTicketsController,adminSupportTicketByIdController,adminSupportTicketReplyController,adminUserByIdController,adminUserMembersController,adminUsersController,approveMechanicController,
   createAdminFinancialInvoiceController,createAdminFleetController,createAdminFleetVehicleController,createAdminUserController,
   createAdminDisputeController,createAdminPromotionController,createAdminServiceCatalogController,createAdminServiceRequestInvoiceController,
   deleteAdminUserController,
@@ -72,7 +72,9 @@ router.post(
 );
 router.patch("/settings", catchAsync(updateAdminSettingsController));
 router.get("/support", catchAsync(adminSupportTicketsController));
+router.get("/support/:ticketId", catchAsync(adminSupportTicketByIdController));
 router.patch("/support/:ticketId", catchAsync(updateAdminSupportTicketController));
+router.post("/support/:ticketId/replies", catchAsync(adminSupportTicketReplyController));
 router.get("/disputes", catchAsync(adminDisputesController));
 router.post("/disputes", catchAsync(createAdminDisputeController));
 router.patch("/disputes/:disputeId", catchAsync(updateAdminDisputeController));
