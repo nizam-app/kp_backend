@@ -176,6 +176,11 @@ const jobSchema = new Schema(
     finalAmount: { type: Number, min: 0 },
     currency: { type: String, trim: true, default: "GBP" },
     completionSummary: { type: String, trim: true },
+    /**
+     * Mechanic-submitted invoice breakdown at WORK_COMPLETED (call-out / labour / parts).
+     * Used when fleet approves so the paid Invoice line items match the completion UI.
+     */
+    completionInvoice: { type: Schema.Types.Mixed, default: undefined },
     tracking: {
       latestMechanicLocation: journeyLocationSchema,
       etaMinutes: { type: Number, min: 0 },

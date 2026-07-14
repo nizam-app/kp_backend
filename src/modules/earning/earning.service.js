@@ -1,6 +1,7 @@
 import AppError from "../../utils/AppError.js";
 import { EarningTransaction } from "./earningTransaction.model.js";
 import { Invoice } from "../invoice/invoice.model.js";
+import { Job } from "../job/job.model.js";
 import { User } from "../user/user.model.js";
 import { Review } from "../review/review.model.js";
 
@@ -99,8 +100,75 @@ const ensureMechanic = (user) => {
   }
 };
 
+/**
+ * Earning txs must follow the paid invoice / completion bill (ex VAT), not the original quote.
+ * Heals stale rows so summary charts and job cards stay consistent with invoices.
+ */
+const resolveEarningGrossFromSources = (tx, invoice = null, job = null) => {
+  const fromInvoice = Number(invoice?.subtotal);
+  if (Number.isFinite(fromInvoice) && fromInvoice > 0) return roundMoney(fromInvoice);
+
+  const fromJob = Number(job?.finalAmount);
+  if (Number.isFinite(fromJob) && fromJob > 0) return roundMoney(fromJob);
+
+  return roundMoney(tx?.grossAmount);
+};
+
+const computeEarningFeeNet = (gross) => {
+  const g = roundMoney(gross);
+  const platformFee = roundMoney(g * 0.12);
+  const netAmount = Math.max(roundMoney(g - platformFee), 0);
+  return { grossAmount: g, platformFee, netAmount };
+};
+
+/** Persist invoice-aligned amounts for this mechanic before aggregates / lists. */
+const reconcileMechanicEarningsWithInvoices = async (mechanicId) => {
+  const txs = await EarningTransaction.find({ mechanic: mechanicId })
+    .select("_id job grossAmount platformFee netAmount")
+    .lean();
+  if (!txs.length) return;
+
+  const jobIds = txs.map((t) => t.job).filter(Boolean);
+  const invoices = await Invoice.find({
+    mechanic: mechanicId,
+    job: { $in: jobIds },
+  })
+    .select("job subtotal")
+    .lean();
+  const invByJob = new Map(invoices.map((inv) => [String(inv.job), inv]));
+
+  const jobs = await Job.find({ _id: { $in: jobIds } })
+    .select("_id finalAmount")
+    .lean();
+  const jobById = new Map(jobs.map((j) => [String(j._id), j]));
+
+  const ops = [];
+  for (const tx of txs) {
+    const inv = invByJob.get(String(tx.job));
+    const job = jobById.get(String(tx.job));
+    const gross = resolveEarningGrossFromSources(tx, inv, job);
+    const { grossAmount, platformFee, netAmount } = computeEarningFeeNet(gross);
+    if (
+      Math.abs(Number(tx.grossAmount) - grossAmount) > 0.02 ||
+      Math.abs(Number(tx.netAmount) - netAmount) > 0.02
+    ) {
+      ops.push({
+        updateOne: {
+          filter: { _id: tx._id },
+          update: { $set: { grossAmount, platformFee, netAmount } },
+        },
+      });
+    }
+  }
+
+  if (ops.length) {
+    await EarningTransaction.bulkWrite(ops);
+  }
+};
+
 export const getEarningsSummary = async (user) => {
   ensureMechanic(user);
+  await reconcileMechanicEarningsWithInvoices(user._id);
 
   const now = new Date();
   const { start: monthStart, end: monthEnd } = getMonthRange(now);
@@ -302,6 +370,7 @@ const serializeInvoiceForEarnings = (invoice, currencyFallback) => {
 
 export const listEarningJobs = async (user, query = {}) => {
   ensureMechanic(user);
+  await reconcileMechanicEarningsWithInvoices(user._id);
 
   const page = parsePage(query.page);
   const limit = parseLimit(query.limit);
@@ -351,9 +420,10 @@ export const listEarningJobs = async (user, query = {}) => {
       const invoice = jobIdStr ? invoiceByJobId.get(jobIdStr) : undefined;
       const review = jobIdStr ? reviewByJobId.get(jobIdStr) : undefined;
       const cur = item.currency || invoice?.currency || "GBP";
-      const gross = roundMoney(item.grossAmount);
-      const fee = roundMoney(item.platformFee);
-      const net = roundMoney(item.netAmount);
+      // Prefer invoice work total when present (same canon as Quotes / fleet invoice).
+      const { grossAmount: gross, platformFee: fee, netAmount: net } = computeEarningFeeNet(
+        resolveEarningGrossFromSources(item, invoice, item.job)
+      );
       const feeWhole = Math.round(fee);
       const completedAt = item.job?.completedAt || null;
       const paidAt = item.paidAt || null;

@@ -43,32 +43,55 @@ const INVALID_TOKEN_CODES = new Set([
 
 let initAttempted = false;
 let firebaseReady = false;
+let missingConfigWarned = false;
 
-export const isPushConfigured = () =>
-  Boolean(
-    (env.FIREBASE_SERVICE_ACCOUNT_PATH || "").trim() ||
-      (env.FIREBASE_SERVICE_ACCOUNT_JSON || "").trim()
-  );
+function resolveServiceAccountPath() {
+  const rel = (env.FIREBASE_SERVICE_ACCOUNT_PATH || "").trim();
+  if (!rel) return null;
+  return path.isAbsolute(rel) ? rel : path.resolve(process.cwd(), rel);
+}
+
+export const isPushConfigured = () => {
+  const jsonRaw = (env.FIREBASE_SERVICE_ACCOUNT_JSON || "").trim();
+  if (jsonRaw) return true;
+  const abs = resolveServiceAccountPath();
+  return Boolean(abs && fs.existsSync(abs));
+};
+
+function warnPushDisabledOnce(message) {
+  if (missingConfigWarned) return;
+  missingConfigWarned = true;
+  console.warn(`[push] ${message} Push notifications are disabled until Firebase is configured.`);
+}
 
 function tryInitFirebase() {
   if (initAttempted) return firebaseReady;
   initAttempted = true;
-  if (!isPushConfigured()) return false;
+
+  const jsonRaw = (env.FIREBASE_SERVICE_ACCOUNT_JSON || "").trim();
+  const abs = resolveServiceAccountPath();
+
+  if (!jsonRaw && !abs) return false;
+
+  if (!jsonRaw && abs && !fs.existsSync(abs)) {
+    warnPushDisabledOnce(
+      `Service account file not found at ${abs}. Check FIREBASE_SERVICE_ACCOUNT_PATH in .env or use FIREBASE_SERVICE_ACCOUNT_JSON.`
+    );
+    return false;
+  }
+
   try {
     if (admin.apps.length > 0) {
       firebaseReady = true;
       return true;
     }
-    const jsonRaw = (env.FIREBASE_SERVICE_ACCOUNT_JSON || "").trim();
     if (jsonRaw) {
       const cred = JSON.parse(jsonRaw);
       admin.initializeApp({ credential: admin.credential.cert(cred) });
       firebaseReady = true;
       return true;
     }
-    const rel = (env.FIREBASE_SERVICE_ACCOUNT_PATH || "").trim();
-    if (rel) {
-      const abs = path.isAbsolute(rel) ? rel : path.resolve(process.cwd(), rel);
+    if (abs) {
       const cred = JSON.parse(fs.readFileSync(abs, "utf8"));
       admin.initializeApp({ credential: admin.credential.cert(cred) });
       firebaseReady = true;

@@ -37,6 +37,7 @@ import { getProfileCompletionSummary } from "../user/user.service.js";
 import { readMechanicProfileRatingAverage } from "../../utils/mechanicRating.js";
 import { calculateJobVat } from "../../utils/vat.js";
 import { assertValidOptionalPhone } from "../../utils/phone.js";
+import { resolveQuoteDisplayLifecycle } from "../../utils/quoteDisplayLifecycle.js";
 import {
   notifyJobCancelled,
   notifyJobCompleted,
@@ -572,38 +573,91 @@ const maskCardLabel = (method) => {
   return `${brand} •••• ${last4}`;
 };
 
-const computeFleetPaymentBox = ({ job, defaultPaymentMethod }) => {
-  // Only show accepted quote amounts here — waiting quotes belong in the Quotes panel.
-  const quoteAmount = Number(job.acceptedAmount ?? job.finalAmount ?? 0) || 0;
-  const platformFee = quoteAmount > 0 ? round2(quoteAmount * 0.12) : 0;
-  const mechanicNet = quoteAmount > 0 ? round2(quoteAmount - platformFee) : 0;
-  const vat = calculateJobVat(job, quoteAmount);
-  const chargedToFleet = vat.totalAmount;
+const computeFleetPaymentBox = ({ job, defaultPaymentMethod, invoice = null }) => {
+  const originalQuoteAmount = Number(job.acceptedAmount ?? 0) || 0;
+  const isSettled =
+    job.status === JOB_STATUS.COMPLETED ||
+    `${invoice?.status || ""}`.toUpperCase() === "PAID" ||
+    Boolean(invoice?.paidAt);
+
+  const isAwaitingApproval = job.status === JOB_STATUS.AWAITING_APPROVAL;
+
+  /**
+   * Pre-settlement (assigned → in progress): payment hold follows accepted quote.
+   * Awaiting approval: prefer submitted completion bill so fleet sees Quoted vs Submitted.
+   * After complete/pay: canon is completion bill (invoice subtotal / finalAmount).
+   */
+  let billExVat;
+  if (isSettled) {
+    billExVat = Number(invoice?.subtotal ?? job.finalAmount ?? job.acceptedAmount ?? 0) || 0;
+  } else if (isAwaitingApproval) {
+    billExVat =
+      Number(
+        job.completionInvoice?.subtotal ?? job.finalAmount ?? job.acceptedAmount ?? 0
+      ) || 0;
+  } else {
+    billExVat = Number(job.acceptedAmount ?? job.finalAmount ?? 0) || 0;
+  }
+
+  const platformFee = billExVat > 0 ? round2(billExVat * 0.12) : 0;
+  const mechanicNet = billExVat > 0 ? round2(billExVat - platformFee) : 0;
+
+  let vatApplied = false;
+  let vatRate = 0;
+  let vatAmount = null;
+  let chargedToFleet = null;
+
+  if (isSettled && invoice && (invoice.totalAmount != null || invoice.subtotal != null)) {
+    vatApplied = invoice.vatApplied === true || Number(invoice.vatAmount) > 0;
+    vatAmount = vatApplied ? round2(Number(invoice.vatAmount) || 0) : 0;
+    vatRate =
+      Number(invoice.vatRate) > 0
+        ? Number(invoice.vatRate)
+        : vatApplied && billExVat > 0
+          ? vatAmount / billExVat
+          : 0;
+    chargedToFleet = round2(
+      Number(invoice.totalAmount != null ? invoice.totalAmount : billExVat + (vatAmount || 0)) ||
+        billExVat
+    );
+  } else if (billExVat > 0) {
+    const vat = calculateJobVat(job, billExVat);
+    vatApplied = Boolean(vat.vatRegistered);
+    vatRate = vat.vatRate || 0;
+    vatAmount = vat.vatAmount;
+    chargedToFleet = vat.totalAmount;
+  }
 
   return {
-    quoteAmount: quoteAmount || null,
-    platformFee: quoteAmount ? platformFee : null,
-    mechanicNet: quoteAmount ? mechanicNet : null,
-    /** @deprecated Prefer chargedToFleet — was quote+fee which fleets do not pay. */
-    totalPayable: quoteAmount ? chargedToFleet : null,
-    chargedToFleet: quoteAmount ? chargedToFleet : null,
-    preAuthHeld: quoteAmount ? chargedToFleet : null,
-    vatApplied: vat.vatRegistered,
-    vatRate: vat.vatRate,
-    vatAmount: quoteAmount ? vat.vatAmount : null,
+    /** Accepted quote — historical; shown as “Original quote” after settlement. */
+    quoteAmount: originalQuoteAmount || null,
+    /** Amount the mechanic/billing uses before VAT (completion or quote). */
+    billExVat: billExVat || null,
+    platformFee: billExVat > 0 ? platformFee : null,
+    mechanicNet: billExVat > 0 ? mechanicNet : null,
+    /** @deprecated Prefer chargedToFleet */
+    totalPayable: chargedToFleet,
+    chargedToFleet,
+    /** Hold amount before approve; after settle equals final charged. */
+    preAuthHeld: chargedToFleet,
+    vatApplied,
+    vatRate,
+    vatAmount: billExVat > 0 ? vatAmount : null,
     cardLabel: defaultPaymentMethod ? maskCardLabel(defaultPaymentMethod) : null,
     cardExpMonth: defaultPaymentMethod?.card?.expMonth ?? null,
     cardExpYear: defaultPaymentMethod?.card?.expYear ?? null,
-    finalAmount: Number(job.finalAmount ?? job.acceptedAmount ?? 0) || null,
+    finalAmount: Number(job.finalAmount ?? billExVat ?? 0) || null,
+    isSettled,
+    isAwaitingApproval,
     status:
-      job.status === JOB_STATUS.COMPLETED
+      job.status === JOB_STATUS.COMPLETED || isSettled
         ? "PAID"
         : [JOB_STATUS.ASSIGNED, JOB_STATUS.EN_ROUTE, JOB_STATUS.ON_SITE, JOB_STATUS.IN_PROGRESS, JOB_STATUS.AWAITING_APPROVAL].includes(
             job.status
           )
           ? "AUTHORIZED"
           : "PENDING",
-    currency: job.currency || "GBP",
+    currency: invoice?.currency || job.currency || "GBP",
   };
 };
 
@@ -643,11 +697,41 @@ const resolvePayerStripeCustomerId = (payerUser, paymentMethod) => {
   return null;
 };
 
-const computeJobApprovalChargeTotal = (job) =>
-  calculateJobVat(
-    job,
-    Number(job.finalAmount ?? job.acceptedAmount ?? job.estimatedPayout ?? 0) || 0
-  ).totalAmount;
+/**
+ * Bill base (ex VAT) for approve / charge / invoice / earnings.
+ * Prefers completion line items → completionInvoice → finalAmount.
+ * Accepted quote is last-resort legacy only — never overwrite acceptedAmount.
+ */
+const sumInvoiceLinesExVat = (lineItems) => {
+  if (!Array.isArray(lineItems) || !lineItems.length) return null;
+  const sum = round2(
+    lineItems.reduce((acc, row) => acc + (Number(row.totalAmount) || 0), 0)
+  );
+  return sum > 0 ? sum : null;
+};
+
+const resolveApprovalBillExVat = (job, lineItems = null) => {
+  const fromLines = sumInvoiceLinesExVat(lineItems);
+  if (fromLines != null) return fromLines;
+
+  const fromCompletion = Number(job?.completionInvoice?.subtotal);
+  if (Number.isFinite(fromCompletion) && fromCompletion > 0) return round2(fromCompletion);
+
+  const fromFinal = Number(job?.finalAmount);
+  if (Number.isFinite(fromFinal) && fromFinal > 0) return round2(fromFinal);
+
+  const fromQuote = Number(job?.acceptedAmount ?? job?.estimatedPayout ?? 0);
+  if (Number.isFinite(fromQuote) && fromQuote > 0) return round2(fromQuote);
+
+  return 0;
+};
+
+const hasCompletionBill = (job, lineItems = null) => {
+  if (sumInvoiceLinesExVat(lineItems) != null) return true;
+  if (Number(job?.completionInvoice?.subtotal) > 0) return true;
+  if (Number(job?.finalAmount) > 0) return true;
+  return false;
+};
 
 /** Fleet: optional Stripe. Company: Stripe required when configured. */
 const buildJobApprovalPaymentContext = async ({
@@ -655,12 +739,34 @@ const buildJobApprovalPaymentContext = async ({
   payerUser,
   paymentMethodId,
   metadata = {},
+  billExVat: billExVatInput = null,
+  lineItems = null,
 }) => {
+  const subtotal =
+    billExVatInput != null && Number.isFinite(Number(billExVatInput)) && Number(billExVatInput) > 0
+      ? round2(Number(billExVatInput))
+      : resolveApprovalBillExVat(job, lineItems);
+  const vat = calculateJobVat(job, subtotal);
+  const platformFee = round2(subtotal * 0.12);
+  /** Mechanic payout is on ex-VAT work total (same as EarningTransaction). */
+  const mechanicNetAmount = Math.max(round2(subtotal - platformFee), 0);
+
+  const moneyMeta = {
+    billExVat: subtotal,
+    chargeTotal: vat.totalAmount,
+    vatAmount: vat.vatAmount,
+    vatRate: vat.vatRate,
+    vatApplied: vat.vatRegistered,
+    platformFee,
+    mechanicNetAmount,
+  };
+
   const defaultContext = {
     provider: "MANUAL",
     invoiceStatus: "PAID",
     paymentStatus: "SUCCEEDED",
     paidAt: new Date(),
+    ...moneyMeta,
   };
 
   const methodId = `${paymentMethodId || ""}`.trim();
@@ -684,15 +790,7 @@ const buildJobApprovalPaymentContext = async ({
     throw new AppError("Stripe is not configured on the server", 503);
   }
 
-  const totalAmount = computeJobApprovalChargeTotal(job);
-  const subtotal =
-    Number(job.finalAmount ?? job.acceptedAmount ?? job.estimatedPayout ?? 0) || 0;
-  const vat = calculateJobVat(job, subtotal);
-  const platformFee = Math.round(subtotal * 0.12 * 100) / 100;
-  const mechanicNetAmount = Math.max(
-    Math.round((vat.totalAmount - platformFee) * 100) / 100,
-    0
-  );
+  const totalAmount = vat.totalAmount;
   const mechanicProfile = job.assignedMechanic?.mechanicProfile;
   const mechanicConnectAccountId =
     mechanicProfile?.stripeConnectChargesEnabled &&
@@ -713,9 +811,11 @@ const buildJobApprovalPaymentContext = async ({
       mechanicId: toObjectIdString(job.assignedMechanic),
       payerUserId: payerUser._id.toString(),
       payerRole: payerUser.role,
+      billExVat: `${subtotal}`,
       vatApplied: `${vat.vatRegistered}`,
       vatRate: `${vat.vatRate}`,
       vatAmount: `${vat.vatAmount}`,
+      chargeTotal: `${totalAmount}`,
       ...metadata,
     },
   });
@@ -731,6 +831,7 @@ const buildJobApprovalPaymentContext = async ({
     stripeClientSecret: paymentIntent.client_secret || null,
     lastError: paymentIntent.last_payment_error?.message || null,
     paidAt: mapped.paid ? new Date() : undefined,
+    ...moneyMeta,
   };
 };
 
@@ -962,7 +1063,9 @@ const serializeJobDetail = async (job, viewer) => {
   const myQuote =
     viewer.role === ROLES.MECHANIC
       ? await Quote.findOne({ job: job._id, mechanic: viewer._id }).sort({ createdAt: -1 }).lean()
-      : null;
+      : viewer.role === ROLES.COMPANY
+        ? await Quote.findOne({ job: job._id, company: viewer._id }).sort({ createdAt: -1 }).lean()
+        : null;
 
   const statusTimes = await deriveStatusTimes(job._id, job);
   const mlResult = await loadLatestMechanicLocationForJob(job);
@@ -1016,19 +1119,27 @@ const serializeJobDetail = async (job, viewer) => {
       ],
     },
     quoteContext: myQuote
-      ? {
-          myQuoteId: myQuote._id,
-          amount: myQuote.amount,
-          status: myQuote.status,
-          notes: myQuote.notes || null,
-          availabilityType: myQuote.availabilityType,
-          scheduledAt: myQuote.scheduledAt || null,
-          etaMinutes: myQuote.etaMinutes ?? null,
-        }
+      ? (() => {
+          const { displayStatus, canOpenActiveJob } = resolveQuoteDisplayLifecycle({
+            status: myQuote.status,
+            job: { status: job.status },
+          });
+          return {
+            myQuoteId: myQuote._id,
+            amount: myQuote.amount,
+            status: myQuote.status,
+            displayStatus,
+            canOpenActiveJob,
+            notes: myQuote.notes || null,
+            availabilityType: myQuote.availabilityType,
+            scheduledAt: myQuote.scheduledAt || null,
+            etaMinutes: myQuote.etaMinutes ?? null,
+          };
+        })()
       : null,
     paymentSummary:
       viewer.role === ROLES.FLEET
-        ? computeFleetPaymentBox({ job, defaultPaymentMethod })
+        ? computeFleetPaymentBox({ job, defaultPaymentMethod, invoice: invoiceDoc })
         : null,
     invoice: invoiceDoc
       ? {
@@ -1286,6 +1397,70 @@ const sanitizeFileName = (value) =>
     .replace(/[^a-zA-Z0-9._-]/g, "-")
     .replace(/-+/g, "-");
 
+const defaultInvoiceLineItems = (job, subtotal) => {
+  const amount = round2(Number(subtotal) || 0);
+  return [
+    {
+      description: "Repair service",
+      quantity: 1,
+      unitAmount: amount,
+      totalAmount: amount,
+    },
+  ];
+};
+
+/**
+ * Prefer mechanic completion breakdown (call-out / labour / parts) over a single lump line.
+ */
+const resolveCompletionInvoiceLineItems = async (job) => {
+  const fromJob = job?.completionInvoice?.lineItems;
+  if (Array.isArray(fromJob) && fromJob.length) {
+    return fromJob.map((row) => ({
+      description: `${row.description || "Service"}`.trim().slice(0, 240) || "Service",
+      quantity: Number(row.quantity) > 0 ? Number(row.quantity) : 1,
+      unitAmount: round2(Number(row.unitAmount ?? row.totalAmount ?? 0)),
+      totalAmount: round2(Number(row.totalAmount ?? row.unitAmount ?? 0)),
+    }));
+  }
+
+  const event = await JobEvent.findOne({
+    job: job._id,
+    type: "WORK_COMPLETED",
+  })
+    .sort({ createdAt: -1 })
+    .select("payload")
+    .lean();
+
+  const summaries = event?.payload?.invoiceLineItems || event?.payload?.invoiceLineSummaries;
+  if (Array.isArray(summaries) && summaries.length) {
+    return summaries.map((row) => {
+      const total = round2(Number(row.totalAmount ?? row.amount ?? row.unitAmount ?? 0));
+      const qty = Number(row.quantity) > 0 ? Number(row.quantity) : 1;
+      const unit = row.unitAmount != null ? round2(Number(row.unitAmount)) : total;
+      return {
+        description: `${row.description || "Service"}`.trim().slice(0, 240) || "Service",
+        quantity: qty,
+        unitAmount: unit,
+        totalAmount: total,
+      };
+    });
+  }
+
+  return null;
+};
+
+const isDegenerateInvoiceLineItems = (lineItems, job) => {
+  if (!Array.isArray(lineItems) || lineItems.length === 0) return true;
+  if (lineItems.length !== 1) return false;
+  const desc = `${lineItems[0]?.description || ""}`.trim();
+  const jobDesc = `${job?.description || ""}`.trim();
+  const jobSummary = `${job?.completionSummary || ""}`.trim();
+  if (!desc) return true;
+  if (jobDesc && desc === jobDesc) return true;
+  if (jobSummary && desc === jobSummary) return true;
+  return false;
+};
+
 const upsertFinancialRecordsForCompletedJob = async (job, paymentContext = {}) => {
   if (!job.assignedMechanic) return { invoice: null, earningTransaction: null };
 
@@ -1303,21 +1478,39 @@ const upsertFinancialRecordsForCompletedJob = async (job, paymentContext = {}) =
     if (fleetDoc) job.fleet = fleetDoc;
   }
 
-  const vat = calculateJobVat(
-    job,
-    Number(job.finalAmount ?? job.acceptedAmount ?? job.estimatedPayout ?? 0)
-  );
+  const lineItemsFromContext =
+    Array.isArray(paymentContext.lineItems) && paymentContext.lineItems.length > 0
+      ? paymentContext.lineItems
+      : null;
+  let customLines = lineItemsFromContext;
+  if (!customLines) {
+    customLines = await resolveCompletionInvoiceLineItems(job);
+  }
+
+  // Same number Stripe/MANUAL charged — do not re-derive from quote after the fact.
+  const billExVat = resolveApprovalBillExVat(job, customLines);
+  const chargedSubtotal =
+    paymentContext.billExVat != null && Number(paymentContext.billExVat) > 0
+      ? round2(Number(paymentContext.billExVat))
+      : billExVat;
+
+  const vat = calculateJobVat(job, chargedSubtotal);
   const { subtotal, vatAmount, totalAmount } = vat;
-  const platformFee = Math.round(subtotal * 0.12 * 100) / 100;
-  const netAmount = Math.max(Math.round((subtotal - platformFee) * 100) / 100, 0);
+  const platformFee =
+    paymentContext.platformFee != null
+      ? round2(Number(paymentContext.platformFee))
+      : round2(subtotal * 0.12);
+  const netAmount =
+    paymentContext.mechanicNetAmount != null
+      ? Math.max(round2(Number(paymentContext.mechanicNetAmount)), 0)
+      : Math.max(round2(subtotal - platformFee), 0);
   const paidAt = paymentContext.paidAt || job.completedAt || new Date();
   const invoiceStatus = paymentContext.invoiceStatus || "PAID";
   const paymentStatus = paymentContext.paymentStatus || "SUCCEEDED";
 
-  const customLines =
-    Array.isArray(paymentContext.lineItems) && paymentContext.lineItems.length > 0
-      ? paymentContext.lineItems
-      : null;
+  const resolvedLines = customLines?.length
+    ? customLines
+    : defaultInvoiceLineItems(job, subtotal);
 
   let invoice = await Invoice.findOne({ job: job._id });
   if (!invoice) {
@@ -1347,14 +1540,7 @@ const upsertFinancialRecordsForCompletedJob = async (job, paymentContext = {}) =
         capturedAmount: invoiceStatus === "PAID" ? totalAmount : undefined,
         updatedAt: new Date(),
       },
-      lineItems: customLines || [
-        {
-          description: job.completionSummary || job.description || "Repair service",
-          quantity: 1,
-          unitAmount: subtotal,
-          totalAmount: subtotal,
-        },
-      ],
+      lineItems: resolvedLines,
       billedToSnapshot: {
         companyName: job.fleet?.fleetProfile?.companyName,
         vatNumber: job.fleet?.fleetProfile?.vatNumber,
@@ -1401,17 +1587,8 @@ const upsertFinancialRecordsForCompletedJob = async (job, paymentContext = {}) =
       capturedAmount: invoiceStatus === "PAID" ? totalAmount : undefined,
       updatedAt: new Date(),
     };
-    if (customLines) {
-      invoice.lineItems = customLines;
-    } else if (!invoice.lineItems?.length) {
-      invoice.lineItems = [
-        {
-          description: job.completionSummary || job.description || "Repair service",
-          quantity: 1,
-          unitAmount: subtotal,
-          totalAmount: subtotal,
-        },
-      ];
+    if (customLines?.length || isDegenerateInvoiceLineItems(invoice.lineItems, job)) {
+      invoice.lineItems = resolvedLines;
     }
     invoice.supplierSnapshot = {
       supplierType: vat.supplierType || undefined,
@@ -2139,7 +2316,9 @@ export const listJobs = async (user, query) => {
     const invoices = await Invoice.find({
       job: { $in: items.map((j) => j._id) },
     })
-      .select("_id invoiceNo job totalAmount status paidAt")
+      .select(
+        "_id invoiceNo job totalAmount subtotal vatAmount vatRate vatApplied status paidAt currency"
+      )
       .lean();
     const byJob = new Map(invoices.map((inv) => [String(inv.job), inv]));
     for (const card of serializedItems) {
@@ -2149,9 +2328,26 @@ export const listJobs = async (user, query) => {
           _id: inv._id,
           invoiceNo: inv.invoiceNo,
           totalAmount: inv.totalAmount,
+          subtotal: inv.subtotal ?? null,
+          vatAmount: inv.vatAmount ?? null,
+          vatRate: inv.vatRate ?? null,
+          vatApplied: inv.vatApplied === true || Number(inv.vatAmount) > 0,
           status: inv.status,
           paidAt: inv.paidAt || null,
+          currency: inv.currency || card.currency,
         };
+      }
+      // Completed cards: canon = completion bill (ex VAT); charge = invoice total when paid.
+      if (card.status === JOB_STATUS.COMPLETED) {
+        const billExVat =
+          Number(
+            inv?.subtotal ?? card.finalAmount ?? card.acceptedAmount ?? card.estimatedPayout ?? 0
+          ) || 0;
+        card.billExVat = billExVat || null;
+        card.chargedToFleet =
+          inv?.totalAmount != null
+            ? round2(Number(inv.totalAmount))
+            : billExVat || null;
       }
     }
   }
@@ -2422,8 +2618,11 @@ export const completeJobWork = async (jobId, mechanicUser, payload = {}) => {
       ...(invoiceBreakdown
         ? {
             invoiceSubtotal: invoiceBreakdown.subtotal,
+            invoiceLineItems: invoiceBreakdown.lineItems,
             invoiceLineSummaries: invoiceBreakdown.lineItems.map((row) => ({
               description: row.description,
+              quantity: row.quantity,
+              unitAmount: row.unitAmount,
               totalAmount: row.totalAmount,
             })),
           }
@@ -2434,6 +2633,29 @@ export const completeJobWork = async (jobId, mechanicUser, payload = {}) => {
         j.finalAmount = finalForJob;
       }
       j.completionSummary = payload.workSummary || j.completionSummary;
+      if (invoiceBreakdown) {
+        j.completionInvoice = {
+          currency: j.currency || job.currency || "GBP",
+          subtotal: invoiceBreakdown.subtotal,
+          lineItems: invoiceBreakdown.lineItems.map((row) => ({
+            description: row.description,
+            quantity: row.quantity,
+            unitAmount: row.unitAmount,
+            totalAmount: row.totalAmount,
+          })),
+          submittedInputs:
+            inv && typeof inv === "object" && !Array.isArray(inv)
+              ? {
+                  callOutCharge: inv.callOutCharge ?? inv.callOutFee ?? 0,
+                  labourHours: Number(inv.labourHours ?? inv.labour?.hours ?? 0),
+                  labourRatePerHour: Number(
+                    inv.labourRatePerHour ?? inv.labour?.ratePerHour ?? inv.hourlyRate ?? 0
+                  ),
+                  parts: Array.isArray(inv.parts) ? inv.parts : [],
+                }
+              : undefined,
+        };
+      }
     },
   });
 
@@ -2468,7 +2690,7 @@ export const completeJobWork = async (jobId, mechanicUser, payload = {}) => {
   return base;
 };
 
-export const approveJobCompletion = async (jobId, fleetUser, payload) => {
+export const approveJobCompletion = async (jobId, fleetUser, payload = {}) => {
   jobId = await resolveJobRef(jobId);
   const job = await Job.findById(jobId)
     .populate("fleet", "fleetProfile")
@@ -2482,27 +2704,56 @@ export const approveJobCompletion = async (jobId, fleetUser, payload) => {
   }
 
   const fromStatus = job.status;
-  if (payload.finalAmount !== undefined) {
-    job.finalAmount = Number(payload.finalAmount);
+  /** Historical quote — never mutate after accept. */
+  const acceptedAmountSnapshot = job.acceptedAmount;
+
+  const completionLines = await resolveCompletionInvoiceLineItems(job);
+
+  // Fleet may only supply finalAmount when mechanic never submitted a completion bill.
+  if (payload.finalAmount !== undefined && !hasCompletionBill(job, completionLines)) {
+    const override = round2(Number(payload.finalAmount));
+    if (!Number.isFinite(override) || override <= 0) {
+      throw new AppError("finalAmount must be a positive number", 400);
+    }
+    job.finalAmount = override;
+  }
+
+  const billExVat = resolveApprovalBillExVat(job, completionLines);
+  if (!(billExVat > 0)) {
+    throw new AppError(
+      "Cannot approve: completion amount is missing. Mechanic must submit finalAmount / invoice lines first.",
+      400
+    );
+  }
+  job.finalAmount = billExVat;
+  if (acceptedAmountSnapshot != null) {
+    job.acceptedAmount = acceptedAmountSnapshot;
   }
 
   const paymentContext = await buildJobApprovalPaymentContext({
     job,
     payerUser: fleetUser,
     paymentMethodId: payload.paymentMethodId,
+    billExVat,
+    lineItems: completionLines,
   });
 
   assertStripePaymentSucceeded(paymentContext, {
     required: Boolean(`${payload.paymentMethodId || ""}`.trim()),
   });
 
-  await markJobCompletedAfterApproval(job, payload);
+  // Persist finalAmount only — quote stays frozen; empty payload avoids re-applying body.finalAmount.
+  await markJobCompletedAfterApproval(job, {});
 
   return finalizeApprovedJobCompletion({
     job,
     fromStatus,
     actorUser: fleetUser,
-    paymentContext,
+    paymentContext: {
+      ...paymentContext,
+      billExVat,
+      ...(completionLines?.length ? { lineItems: completionLines } : {}),
+    },
     eventExtras: { paymentMethodId: payload.paymentMethodId },
   });
 };
@@ -2532,24 +2783,41 @@ export const approveJobCompletionAsCompany = async (jobId, companyUser, payload 
   }
 
   const fromStatus = job.status;
+  const acceptedAmountSnapshot = job.acceptedAmount;
   const breakdown = buildLineItemsFromCompanyInvoicePayload(payload, job);
+  const completionLines =
+    breakdown?.lineItems || (await resolveCompletionInvoiceLineItems(job));
 
   if (breakdown) {
     job.finalAmount = breakdown.subtotal;
-  } else if (payload.finalAmount !== undefined) {
+  } else if (payload.finalAmount !== undefined && !hasCompletionBill(job, completionLines)) {
     job.finalAmount = round2(Number(payload.finalAmount));
+  }
+
+  const billExVat = resolveApprovalBillExVat(job, completionLines);
+  if (!(billExVat > 0)) {
+    throw new AppError(
+      "Cannot approve: completion amount is missing. Submit invoice lines or finalAmount first.",
+      400
+    );
+  }
+  job.finalAmount = billExVat;
+  if (acceptedAmountSnapshot != null) {
+    job.acceptedAmount = acceptedAmountSnapshot;
   }
 
   const paymentContext = await buildJobApprovalPaymentContext({
     job,
     payerUser: companyUser,
     paymentMethodId,
+    billExVat,
+    lineItems: completionLines,
     metadata: { companyId: companyUser._id.toString(), approvedByCompany: "true" },
   });
 
   assertStripePaymentSucceeded(paymentContext, { required: true });
 
-  await markJobCompletedAfterApproval(job, payload, breakdown);
+  await markJobCompletedAfterApproval(job, {}, breakdown || null);
 
   return finalizeApprovedJobCompletion({
     job,
@@ -2557,7 +2825,8 @@ export const approveJobCompletionAsCompany = async (jobId, companyUser, payload 
     actorUser: companyUser,
     paymentContext: {
       ...paymentContext,
-      ...(breakdown ? { lineItems: breakdown.lineItems } : {}),
+      billExVat,
+      ...(completionLines?.length ? { lineItems: completionLines } : {}),
     },
     eventExtras: { approvedByCompany: true, paymentMethodId },
   });

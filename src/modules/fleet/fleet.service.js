@@ -37,50 +37,80 @@ const statusUi = (status) => {
   return map[status] || { label: status, tone: "neutral" };
 };
 
-const serializeDashboardJob = (job, invoice = null) => ({
-  _id: job._id,
-  jobCode: job.jobCode,
-  title: job.title,
-  description: job.completionSummary || job.description,
-  urgency: job.urgency,
-  status: job.status,
-  statusUi: statusUi(job.status),
-  vehicle: job.vehicle || null,
-  location: job.location || null,
-  currency: job.currency || "GBP",
-  amount: job.finalAmount ?? job.acceptedAmount ?? job.estimatedPayout ?? null,
-  etaMinutes: job.tracking?.etaMinutes ?? null,
-  postedAt: job.postedAt || job.createdAt,
-  completedAt: job.completedAt || null,
-  assignedMechanic: job.assignedMechanic
-    ? {
-        _id: job.assignedMechanic._id || job.assignedMechanic,
-        displayName: job.assignedMechanic.mechanicProfile?.displayName || null,
-        phone: job.assignedMechanic.mechanicProfile?.phone || null,
-        profilePhotoUrl: job.assignedMechanic.mechanicProfile?.profilePhotoUrl || null,
-        rating: readMechanicProfileRatingAverage(job.assignedMechanic),
-      }
-    : null,
-  actions: {
-    canApproveCompletion: job.status === JOB_STATUS.AWAITING_APPROVAL,
-    canTrack: [
-      JOB_STATUS.ASSIGNED,
-      JOB_STATUS.EN_ROUTE,
-      JOB_STATUS.ON_SITE,
-      JOB_STATUS.IN_PROGRESS,
-      JOB_STATUS.AWAITING_APPROVAL,
-    ].includes(job.status),
-    canViewInvoice: Boolean(invoice),
-    canDownloadPdf: Boolean(invoice?.pdfUrl || invoice?._id),
-  },
-  invoice: invoice
-    ? {
-        _id: invoice._id,
-        invoiceNo: invoice.invoiceNo,
-        pdfUrl: invoice.pdfUrl || null,
-      }
-    : null,
-});
+const round2 = (n) => Math.round((Number(n || 0) + Number.EPSILON) * 100) / 100;
+
+/** Completion bill (ex VAT) for paid/completed rows — never prefer quote once final/invoice exists. */
+const resolveCompletedBillExVat = (job, invoice = null) => {
+  const n = Number(
+    invoice?.subtotal ?? job.finalAmount ?? job.acceptedAmount ?? job.estimatedPayout ?? 0
+  );
+  return Number.isFinite(n) && n > 0 ? round2(n) : null;
+};
+
+const serializeDashboardJob = (job, invoice = null) => {
+  const isCompleted = job.status === JOB_STATUS.COMPLETED;
+  const billExVat = isCompleted ? resolveCompletedBillExVat(job, invoice) : null;
+  const chargedToFleet =
+    isCompleted && invoice?.totalAmount != null
+      ? round2(Number(invoice.totalAmount))
+      : billExVat;
+
+  return {
+    _id: job._id,
+    jobCode: job.jobCode,
+    title: job.title,
+    description: job.completionSummary || job.description,
+    urgency: job.urgency,
+    status: job.status,
+    statusUi: statusUi(job.status),
+    vehicle: job.vehicle || null,
+    location: job.location || null,
+    currency: invoice?.currency || job.currency || "GBP",
+    /** @deprecated Prefer billExVat / finalAmount on completed jobs */
+    amount: billExVat ?? job.finalAmount ?? job.acceptedAmount ?? job.estimatedPayout ?? null,
+    acceptedAmount: job.acceptedAmount ?? null,
+    finalAmount: job.finalAmount ?? null,
+    billExVat,
+    chargedToFleet,
+    etaMinutes: job.tracking?.etaMinutes ?? null,
+    postedAt: job.postedAt || job.createdAt,
+    completedAt: job.completedAt || null,
+    assignedMechanic: job.assignedMechanic
+      ? {
+          _id: job.assignedMechanic._id || job.assignedMechanic,
+          displayName: job.assignedMechanic.mechanicProfile?.displayName || null,
+          phone: job.assignedMechanic.mechanicProfile?.phone || null,
+          profilePhotoUrl: job.assignedMechanic.mechanicProfile?.profilePhotoUrl || null,
+          rating: readMechanicProfileRatingAverage(job.assignedMechanic),
+        }
+      : null,
+    actions: {
+      canApproveCompletion: job.status === JOB_STATUS.AWAITING_APPROVAL,
+      canTrack: [
+        JOB_STATUS.ASSIGNED,
+        JOB_STATUS.EN_ROUTE,
+        JOB_STATUS.ON_SITE,
+        JOB_STATUS.IN_PROGRESS,
+        JOB_STATUS.AWAITING_APPROVAL,
+      ].includes(job.status),
+      canViewInvoice: Boolean(invoice),
+      canDownloadPdf: Boolean(invoice?.pdfUrl || invoice?._id),
+    },
+    invoice: invoice
+      ? {
+          _id: invoice._id,
+          invoiceNo: invoice.invoiceNo,
+          pdfUrl: invoice.pdfUrl || null,
+          totalAmount: invoice.totalAmount ?? null,
+          subtotal: invoice.subtotal ?? null,
+          vatAmount: invoice.vatAmount ?? null,
+          vatApplied: invoice.vatApplied === true || Number(invoice.vatAmount) > 0,
+          status: invoice.status || null,
+          currency: invoice.currency || job.currency || "GBP",
+        }
+      : null,
+  };
+};
 
 export const getFleetDashboard = async (fleetUser, query) => {
   if (!fleetUser?._id) throw new AppError("Unauthorized", 401);
@@ -160,7 +190,9 @@ export const getFleetDashboard = async (fleetUser, query) => {
     fleet: fleetUser._id,
     job: { $in: invoiceJobIds },
   })
-    .select("_id job invoiceNo pdfUrl")
+    .select(
+      "_id job invoiceNo pdfUrl totalAmount subtotal vatAmount vatApplied status currency"
+    )
     .lean();
 
   const invoiceByJobId = new Map(

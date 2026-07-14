@@ -15,6 +15,12 @@ import {
   notifyQuoteWithdrawn,
 } from "../notification/jobQuoteNotification.service.js";
 import { resolveJobRef } from "../job/job.service.js";
+import { Invoice } from "../invoice/invoice.model.js";
+import {
+  quoteDisplayStatusUi,
+  quoteSummaryLineForDisplay,
+  resolveQuoteDisplayLifecycle,
+} from "../../utils/quoteDisplayLifecycle.js";
 
 const now = () => new Date();
 const sessionOptions = (session) => (session ? { session } : {});
@@ -43,17 +49,6 @@ const quoteBreakdown = (quote) => {
   const parts = 0;
   const labour = Math.max(total - callOutFee - parts, 0);
   return { labour, callOutFee, parts, total, currency: quote?.currency || "GBP" };
-};
-
-const quoteStatusUi = (status) => {
-  const map = {
-    WAITING: { label: "Waiting", tone: "amber" },
-    ACCEPTED: { label: "Accepted", tone: "green" },
-    DECLINED: { label: "Declined", tone: "red" },
-    EXPIRED: { label: "Expired", tone: "neutral" },
-    WITHDRAWN: { label: "Withdrawn", tone: "neutral" },
-  };
-  return map[status] || { label: status, tone: "neutral" };
 };
 
 /** Matches `user.model` mechanicProfile.skills enum; used for Fleet quote cards. */
@@ -111,7 +106,10 @@ const quoteDistanceKm = (quote) => {
   return Math.round(km * 10) / 10;
 };
 
-const serializeQuote = (quote) => ({
+const serializeQuote = (quote) => {
+  const { displayStatus, canOpenActiveJob } = resolveQuoteDisplayLifecycle(quote);
+
+  return {
   _id: quote._id,
   amount: quote.amount,
   notes: quote.notes || null,
@@ -120,7 +118,9 @@ const serializeQuote = (quote) => ({
   etaMinutes: quote.etaMinutes ?? null,
   currency: quote.currency,
   status: quote.status,
-  statusUi: quoteStatusUi(quote.status),
+  /** Derived UI phase: keeps raw quote.status intact, reflects job outcome after accept. */
+  displayStatus,
+  statusUi: quoteDisplayStatusUi(displayStatus),
   expiresAt: quote.expiresAt || null,
   acceptedAt: quote.acceptedAt || null,
   declinedAt: quote.declinedAt || null,
@@ -130,16 +130,7 @@ const serializeQuote = (quote) => ({
   quotedAgoLabel: formatQuoteRelativeAge(quote.createdAt),
   distanceKm: quoteDistanceKm(quote),
   breakdown: quoteBreakdown(quote),
-  summaryLine:
-    quote.status === QUOTE_STATUS.ACCEPTED
-      ? "Accepted! Tap to view active job"
-      : quote.status === QUOTE_STATUS.WAITING
-      ? "Waiting for fleet response"
-      : quote.status === QUOTE_STATUS.EXPIRED
-      ? "Quote expired"
-      : quote.status === QUOTE_STATUS.WITHDRAWN
-      ? "Quote withdrawn"
-      : null,
+  summaryLine: quoteSummaryLineForDisplay(displayStatus),
   mechanic: quote.mechanic
     ? {
         _id: quote.mechanic._id || quote.mechanic,
@@ -171,6 +162,7 @@ const serializeQuote = (quote) => ({
         description: quote.job.description || null,
         urgency: quote.job.urgency || null,
         status: quote.job.status || null,
+        finalAmount: quote.job.finalAmount ?? null,
         postedAt: quote.job.postedAt || null,
         createdAt: quote.job.createdAt || null,
         location: quote.job.location || null,
@@ -200,12 +192,13 @@ const serializeQuote = (quote) => ({
   actions: {
     canAmend: quote.status === QUOTE_STATUS.WAITING,
     canWithdraw: quote.status === QUOTE_STATUS.WAITING,
-    canOpenActiveJob: quote.status === QUOTE_STATUS.ACCEPTED,
+    canOpenActiveJob,
     canResubmit: [QUOTE_STATUS.DECLINED, QUOTE_STATUS.EXPIRED, QUOTE_STATUS.WITHDRAWN].includes(
       quote.status
     ),
   },
-});
+  };
+};
 
 /** Waiting quotes end when the job is terminal or when an optional `expiresAt` time passes (legacy). */
 const JOB_TERMINAL_FOR_QUOTES = [JOB_STATUS.CANCELLED, JOB_STATUS.COMPLETED];
@@ -299,7 +292,7 @@ const baseQuotePopulate = (query) =>
     .populate({
       path: "job",
       select:
-        "jobCode title description urgency status location vehicle photos issueType fleet assignedCompany assignedMechanic createdAt postedAt",
+        "jobCode title description urgency status location vehicle photos issueType fleet assignedCompany assignedMechanic finalAmount createdAt postedAt",
       populate: {
         path: "fleet",
         select:
@@ -500,8 +493,44 @@ export const getQuoteByIdForUser = async (quoteId, user) => {
   const quote = await baseQuotePopulate(Quote.findById(quoteId)).lean();
   await mergeQuoteActorsProfileExtrasFromDb([quote]);
   ensureQuoteAccess(quote, user);
+
+  const serialized = serializeQuote(quote);
+  const jobId = quote.job?._id || quote.job;
+  let invoice = null;
+  if (jobId) {
+    const invoiceDoc = await Invoice.findOne({ job: jobId })
+      .select("_id invoiceNo status totalAmount subtotal vatAmount currency paidAt issuedAt")
+      .lean();
+    if (invoiceDoc) {
+      invoice = {
+        _id: invoiceDoc._id,
+        invoiceNo: invoiceDoc.invoiceNo || null,
+        status: invoiceDoc.status || null,
+        totalAmount: invoiceDoc.totalAmount ?? null,
+        subtotal: invoiceDoc.subtotal ?? null,
+        vatAmount: invoiceDoc.vatAmount ?? null,
+        currency: invoiceDoc.currency || "GBP",
+        paidAt: invoiceDoc.paidAt || null,
+        issuedAt: invoiceDoc.issuedAt || null,
+        downloadPath: `/api/v1/invoices/${invoiceDoc._id}/download`,
+      };
+    }
+  }
+
+  const jobFinal =
+    quote.job && typeof quote.job === "object" && quote.job.finalAmount != null
+      ? Number(quote.job.finalAmount)
+      : null;
+
   return {
-    ...serializeQuote(quote),
+    ...serialized,
+    invoice,
+    finalAmount: invoice?.subtotal ?? jobFinal ?? null,
+    billExVat: invoice?.subtotal ?? jobFinal ?? null,
+    chargedToFleet:
+      invoice?.totalAmount != null
+        ? Number(invoice.totalAmount)
+        : invoice?.subtotal ?? jobFinal ?? null,
     fleet: quote.fleet
       ? {
           _id: quote.fleet._id || quote.fleet,
@@ -512,7 +541,7 @@ export const getQuoteByIdForUser = async (quoteId, user) => {
       : null,
     job: quote.job
       ? {
-          ...serializeQuote(quote).job,
+          ...serialized.job,
           photos: quote.job.photos || [],
           issueType: quote.job.issueType || null,
         }
@@ -787,6 +816,61 @@ export const withdrawQuote = async (quoteId, mechanicUser) => {
   return serializeQuote(populated);
 };
 
+const round2Money = (n) => Math.round((Number(n || 0) + Number.EPSILON) * 100) / 100;
+
+/**
+ * Completed / awaiting-approval quotes: attach invoice + billExVat so list cards
+ * can show Submitted invoice vs Your quote.
+ */
+const attachCompletionBillingToQuotes = async (items) => {
+  if (!Array.isArray(items) || !items.length) return items;
+
+  const attachPhases = new Set(["COMPLETED", "AWAITING_APPROVAL"]);
+  const jobIds = [];
+  for (const q of items) {
+    if (!attachPhases.has(`${q.displayStatus || ""}`.toUpperCase())) continue;
+    const jobId = q.job?._id || q.job;
+    if (jobId) jobIds.push(jobId);
+  }
+  if (!jobIds.length) return items;
+
+  const invoices = await Invoice.find({ job: { $in: jobIds } })
+    .select("_id invoiceNo job totalAmount subtotal vatAmount currency status paidAt issuedAt")
+    .lean();
+  const byJob = new Map(invoices.map((inv) => [String(inv.job), inv]));
+
+  for (const q of items) {
+    if (!attachPhases.has(`${q.displayStatus || ""}`.toUpperCase())) continue;
+    const jobId = q.job?._id || q.job;
+    const inv = byJob.get(String(jobId));
+    const jobFinal = q.job?.finalAmount != null ? Number(q.job.finalAmount) : null;
+    const billExVat =
+      round2Money(Number(inv?.subtotal ?? jobFinal ?? q.amount ?? 0)) || null;
+
+    if (inv) {
+      q.invoice = {
+        _id: inv._id,
+        invoiceNo: inv.invoiceNo || null,
+        status: inv.status || null,
+        totalAmount: inv.totalAmount ?? null,
+        subtotal: inv.subtotal ?? null,
+        vatAmount: inv.vatAmount ?? null,
+        currency: inv.currency || q.currency || "GBP",
+        paidAt: inv.paidAt || null,
+        issuedAt: inv.issuedAt || null,
+        downloadPath: `/api/v1/invoices/${inv._id}/download`,
+      };
+    }
+
+    q.finalAmount = inv?.subtotal != null ? Number(inv.subtotal) : jobFinal;
+    q.billExVat = billExVat;
+    q.chargedToFleet =
+      inv?.totalAmount != null ? round2Money(Number(inv.totalAmount)) : billExVat;
+  }
+
+  return items;
+};
+
 export const listMechanicQuotes = async (mechanicUser, query) => {
   const baseOwnerFilter =
     mechanicUser.role === ROLES.COMPANY
@@ -808,7 +892,9 @@ export const listMechanicQuotes = async (mechanicUser, query) => {
   ).lean();
 
   await mergeQuoteActorsProfileExtrasFromDb(quotes);
-  return quotes.map(serializeQuote);
+  const items = quotes.map(serializeQuote);
+  await attachCompletionBillingToQuotes(items);
+  return items;
 };
 
 const parseQuotePage = (value) => {
@@ -875,6 +961,7 @@ export const listOwnerQuotesPaginated = async (ownerUser, query = {}) => {
 
   await mergeQuoteActorsProfileExtrasFromDb(quotes);
   const items = quotes.map(serializeQuote);
+  await attachCompletionBillingToQuotes(items);
   return {
     items,
     meta: {

@@ -3,8 +3,12 @@ import { ROLES } from "../../constants/domain.js";
 import { companyEarningsBreakdown } from "../../utils/companyEarningsMath.js";
 import { resolveMechanicRatingForInvoiceContext } from "../../utils/mechanicRating.js";
 import { Invoice } from "./invoice.model.js";
+import { Job } from "../job/job.model.js";
+import { JobEvent } from "../jobEvent/jobEvent.model.js";
 
 const toObjectIdString = (value) => value?.toString();
+
+const roundMoney = (n) => Math.round((Number(n || 0) + Number.EPSILON) * 100) / 100;
 
 const formatJobDurationLabel = (job) => {
   if (!job?.completedAt) return null;
@@ -45,14 +49,102 @@ const buildFallbackLineItems = (invoice) => {
     return invoice.lineItems;
   }
 
+  const amount = roundMoney(invoice.subtotal ?? invoice.totalAmount ?? 0);
   return [
     {
-      description: invoice.job?.completionSummary || invoice.job?.description || "Repair service",
+      description: "Repair service",
       quantity: 1,
-      unitAmount: invoice.subtotal,
-      totalAmount: invoice.subtotal,
+      unitAmount: amount,
+      totalAmount: amount,
     },
   ];
+};
+
+const isDegenerateInvoiceLines = (lineItems, job) => {
+  if (!Array.isArray(lineItems) || lineItems.length === 0) return true;
+  if (lineItems.length !== 1) return false;
+  const desc = `${lineItems[0]?.description || ""}`.trim();
+  const jobDesc = `${job?.description || ""}`.trim();
+  const jobSummary = `${job?.completionSummary || ""}`.trim();
+  if (!desc) return true;
+  if (jobDesc && desc === jobDesc) return true;
+  if (jobSummary && desc === jobSummary) return true;
+  return false;
+};
+
+const recoverCompletionLineItems = async (jobId, jobDoc) => {
+  const job =
+    jobDoc ||
+    (await Job.findById(jobId).select("completionInvoice description completionSummary").lean());
+  if (!job) return null;
+
+  const fromJob = job.completionInvoice?.lineItems;
+  if (Array.isArray(fromJob) && fromJob.length) {
+    return fromJob.map((row) => ({
+      description: `${row.description || "Service"}`.trim().slice(0, 240) || "Service",
+      quantity: Number(row.quantity) > 0 ? Number(row.quantity) : 1,
+      unitAmount: roundMoney(Number(row.unitAmount ?? row.totalAmount ?? 0)),
+      totalAmount: roundMoney(Number(row.totalAmount ?? row.unitAmount ?? 0)),
+    }));
+  }
+
+  const event = await JobEvent.findOne({ job: job._id || jobId, type: "WORK_COMPLETED" })
+    .sort({ createdAt: -1 })
+    .select("payload")
+    .lean();
+  const rows = event?.payload?.invoiceLineItems || event?.payload?.invoiceLineSummaries;
+  if (!Array.isArray(rows) || !rows.length) return null;
+
+  return rows.map((row) => {
+    const total = roundMoney(Number(row.totalAmount ?? row.amount ?? row.unitAmount ?? 0));
+    const qty = Number(row.quantity) > 0 ? Number(row.quantity) : 1;
+    const unit = row.unitAmount != null ? roundMoney(Number(row.unitAmount)) : total;
+    return {
+      description: `${row.description || "Service"}`.trim().slice(0, 240) || "Service",
+      quantity: qty,
+      unitAmount: unit,
+      totalAmount: total,
+    };
+  });
+};
+
+const ensureInvoiceLineItemsAccurate = async (invoiceLean) => {
+  if (!invoiceLean?._id) return invoiceLean;
+  const jobId = invoiceLean.job?._id || invoiceLean.job;
+  let jobLean =
+    invoiceLean.job && typeof invoiceLean.job === "object" ? { ...invoiceLean.job } : null;
+  if (jobId && (!jobLean?.completionInvoice || !jobLean?.description)) {
+    const extra = await Job.findById(jobId)
+      .select("description completionSummary completionInvoice")
+      .lean();
+    if (extra) jobLean = { ...(jobLean || {}), ...extra };
+  }
+
+  if (!isDegenerateInvoiceLines(invoiceLean.lineItems, jobLean || invoiceLean.job)) {
+    return invoiceLean;
+  }
+
+  const recovered = await recoverCompletionLineItems(jobId, jobLean);
+  if (recovered?.length) {
+    invoiceLean.lineItems = recovered;
+    await Invoice.updateOne({ _id: invoiceLean._id }, { $set: { lineItems: recovered } });
+    return invoiceLean;
+  }
+
+  if (
+    Array.isArray(invoiceLean.lineItems) &&
+    invoiceLean.lineItems.length === 1 &&
+    isDegenerateInvoiceLines(invoiceLean.lineItems, jobLean || invoiceLean.job)
+  ) {
+    const amount = roundMoney(
+      invoiceLean.lineItems[0].totalAmount ?? invoiceLean.subtotal ?? invoiceLean.totalAmount ?? 0
+    );
+    invoiceLean.lineItems = [
+      { description: "Repair service", quantity: 1, unitAmount: amount, totalAmount: amount },
+    ];
+    await Invoice.updateOne({ _id: invoiceLean._id }, { $set: { lineItems: invoiceLean.lineItems } });
+  }
+  return invoiceLean;
 };
 
 const toInvoiceSummary = (invoice) => ({
@@ -214,6 +306,10 @@ export const listInvoices = async (user, query = {}) => {
   if (user.role === "FLEET") filter.fleet = user._id;
   if (user.role === "MECHANIC") filter.mechanic = user._id;
   if (query.status) filter.status = `${query.status}`.trim().toUpperCase();
+  if (query.job) {
+    const jobId = `${query.job}`.trim();
+    if (jobId) filter.job = jobId;
+  }
 
   const [items, total] = await Promise.all([
     Invoice.find(filter)
@@ -237,10 +333,10 @@ export const listInvoices = async (user, query = {}) => {
 };
 
 export const getInvoiceByIdForUser = async (invoiceId, user) => {
-  const invoice = await Invoice.findById(invoiceId)
+  let invoice = await Invoice.findById(invoiceId)
     .populate(
       "job",
-      "jobCode title description completionSummary vehicle location completedAt assignedAt postedAt createdAt assignedCompany finalAmount acceptedAmount estimatedPayout"
+      "jobCode title description completionSummary completionInvoice vehicle location completedAt assignedAt postedAt createdAt assignedCompany finalAmount acceptedAmount estimatedPayout"
     )
     .populate("fleet", "email fleetProfile.companyName fleetProfile.vatNumber fleetProfile.billingAddress")
     .populate(
@@ -250,6 +346,7 @@ export const getInvoiceByIdForUser = async (invoiceId, user) => {
     .lean();
 
   ensureInvoiceAccess(invoice, user);
+  invoice = await ensureInvoiceLineItemsAccurate(invoice);
   return toInvoiceDetail(invoice);
 };
 

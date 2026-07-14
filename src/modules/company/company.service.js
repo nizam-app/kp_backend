@@ -636,6 +636,9 @@ const serializeTeamMember = (member, stats = {}, extras = {}) => {
     verificationStatus: member.mechanicProfile?.verification?.status || null,
     jobsCompleted: stats.jobsCompleted || 0,
     activeJobs,
+    activeJob: stats.activeJob || null,
+    assignable: activeJobs === 0,
+    responseMinutesAvg: member.mechanicProfile?.stats?.responseMinutesAvg ?? null,
     joinedAt: member.companyMembership?.joinedAt || member.createdAt,
     joinedMonthLabel: formatJoinedMonthYear(
       member.companyMembership?.joinedAt || member.createdAt
@@ -819,6 +822,7 @@ export const getCompanyDashboard = async (companyUser) => {
     teamCount,
     onlineMechanicsCount,
     activeJobsCount,
+    completedJobsCount,
     unassignedJobsCount,
     pendingInvitesCount,
     unassignedJobs,
@@ -843,6 +847,10 @@ export const getCompanyDashboard = async (companyUser) => {
     Job.countDocuments({
       assignedCompany: companyUser._id,
       status: { $in: ACTIVE_JOB_STATUSES },
+    }),
+    Job.countDocuments({
+      assignedCompany: companyUser._id,
+      status: JOB_STATUS.COMPLETED,
     }),
     Job.countDocuments(unassignedFilter),
     CompanyInvite.countDocuments({ company: companyUser._id, status: "PENDING" }),
@@ -932,6 +940,7 @@ export const getCompanyDashboard = async (companyUser) => {
     },
     cards: {
       activeJobs: activeJobsCount,
+      completedJobs: completedJobsCount,
       mechanics: teamCount,
       onlineMechanics: onlineMechanicsCount,
       monthRevenue: currentMonthGross,
@@ -1256,6 +1265,26 @@ export const assignMechanicToCompanyJob = async (jobId, employeeId, companyUser)
 
   if (!job) throw new AppError("Job not found", 404);
   if (!employee) throw new AppError("Mechanic employee not found", 404);
+
+  const activeOnOtherJob = await Job.findOne({
+    assignedCompany: companyUser._id,
+    assignedMechanic: employee._id,
+    status: { $in: ACTIVE_JOB_STATUSES },
+    _id: { $ne: job._id },
+  })
+    .select("jobCode status")
+    .lean();
+
+  if (activeOnOtherJob) {
+    throw new AppError(
+      activeOnOtherJob.jobCode
+        ? `This mechanic is already on active job ${activeOnOtherJob.jobCode}`
+        : "This mechanic already has an active job assigned",
+      409,
+      { code: "MECHANIC_ALREADY_BUSY", activeJob: activeOnOtherJob }
+    );
+  }
+
   if (`${job.assignedCompany || ""}` !== `${companyUser._id}`) {
     throw new AppError("Job is not assigned to this company", 403);
   }
@@ -1322,7 +1351,16 @@ export const getCompanyTeam = async (companyUser) => {
             status: { $in: ACTIVE_JOB_STATUSES },
           },
         },
-        { $group: { _id: "$assignedMechanic", count: { $sum: 1 } } },
+        { $sort: { assignedAt: -1, updatedAt: -1 } },
+        {
+          $group: {
+            _id: "$assignedMechanic",
+            count: { $sum: 1 },
+            activeJobId: { $first: "$_id" },
+            activeJobCode: { $first: "$jobCode" },
+            activeJobStatus: { $first: "$status" },
+          },
+        },
       ]),
       Job.aggregate([
         {
@@ -1340,23 +1378,62 @@ export const getCompanyTeam = async (companyUser) => {
       }),
     ]);
 
-  const activeMap = new Map(activeJobsByMechanic.map((item) => [`${item._id}`, item.count]));
+  const activeMap = new Map(
+    activeJobsByMechanic.map((item) => [
+      `${item._id}`,
+      {
+        count: item.count || 0,
+        activeJob:
+          item.count > 0
+            ? {
+                _id: item.activeJobId,
+                jobCode: item.activeJobCode || null,
+                status: item.activeJobStatus || null,
+              }
+            : null,
+      },
+    ])
+  );
   const completedMap = new Map(
     completedJobsByMechanic.map((item) => [`${item._id}`, item.count])
   );
 
   const employeeDisplayRefById = resolveEmployeeDisplayRefs(members);
 
+  const serializedMembers = members.map((member) => {
+    const activeStats = activeMap.get(`${member._id}`) || { count: 0, activeJob: null };
+    const activeJobs = activeStats.count || 0;
+    const jobsCompleted = completedMap.get(`${member._id}`) || 0;
+    return serializeTeamMember(
+      member,
+      { activeJobs, jobsCompleted, activeJob: activeStats.activeJob },
+      { employeeDisplayRef: employeeDisplayRefById.get(`${member._id}`) || null }
+    );
+  });
+
+  const ratingValues = serializedMembers
+    .map((m) => m.rating)
+    .filter((r) => Number.isFinite(Number(r)) && Number(r) > 0);
+  const avgRating =
+    ratingValues.length > 0
+      ? Math.round((ratingValues.reduce((a, b) => a + Number(b), 0) / ratingValues.length) * 10) / 10
+      : 0;
+
+  const responseValues = members
+    .map((m) => m.mechanicProfile?.stats?.responseMinutesAvg)
+    .filter((x) => Number.isFinite(Number(x)) && Number(x) > 0);
+  const avgResponseMinutes = responseValues.length
+    ? Math.round(responseValues.reduce((a, b) => a + Number(b), 0) / responseValues.length)
+    : null;
+
+  const jobsCompletedTotal = serializedMembers.reduce((s, m) => s + (m.jobsCompleted || 0), 0);
+  const activeJobsTotal = serializedMembers.reduce((s, m) => s + (m.activeJobs || 0), 0);
+  const onlineNow = members.filter(
+    (m) => (m.mechanicProfile?.availability || MECHANIC_AVAILABILITY.OFFLINE) === MECHANIC_AVAILABILITY.ONLINE
+  ).length;
+
   return {
-    members: members.map((member) => {
-      const activeJobs = activeMap.get(`${member._id}`) || 0;
-      const jobsCompleted = completedMap.get(`${member._id}`) || 0;
-      return serializeTeamMember(
-        member,
-        { activeJobs, jobsCompleted },
-        { employeeDisplayRef: employeeDisplayRefById.get(`${member._id}`) || null }
-      );
-    }),
+    members: serializedMembers,
     pendingInvites: pendingInvites.map((inv) => serializeInvite(inv, { includeSecrets: false })),
     inviteAction: {
       method: "POST",
@@ -1367,8 +1444,17 @@ export const getCompanyTeam = async (companyUser) => {
     meta: {
       pendingReviewCount,
       jobsNavBadgeCount: pendingReviewCount,
-      memberCount: members.length,
+      memberCount: serializedMembers.length,
       pendingInviteCount: pendingInvites.length,
+      serviceRadiusMiles: companyUser.companyProfile?.serviceRadiusMiles ?? null,
+      stats: {
+        memberCount: serializedMembers.length,
+        avgRating,
+        jobsCompletedTotal,
+        activeJobsTotal,
+        onlineNow,
+        avgResponseMinutes,
+      },
     },
   };
 };
@@ -1529,6 +1615,7 @@ export const getCompanyEarningsSummary = async (companyUser) => {
               $ifNull: ["$finalAmount", { $ifNull: ["$acceptedAmount", "$estimatedPayout"] }],
             },
           },
+          count: { $sum: 1 },
         },
       },
     ]),
@@ -1599,8 +1686,10 @@ export const getCompanyEarningsSummary = async (companyUser) => {
   ]);
 
   const monthGross = monthAgg[0]?.gross || 0;
+  const monthCompletedJobs = monthAgg[0]?.count || 0;
   const allTimeGross = allTimeAgg[0]?.gross || 0;
   const monthNet = Math.max(Math.round(monthGross * 0.88 * 100) / 100, 0);
+  const monthPlatformFee = Math.max(Math.round((monthGross - monthNet) * 100) / 100, 0);
   const allTimeNet = Math.max(Math.round(allTimeGross * 0.88 * 100) / 100, 0);
 
   const monthShort = now.toLocaleString("en-GB", { month: "short" });
@@ -1616,6 +1705,8 @@ export const getCompanyEarningsSummary = async (companyUser) => {
     cards: {
       monthGross,
       monthNet,
+      monthPlatformFee,
+      monthCompletedJobs,
       allTimeGross,
       allTimeNet,
       completedJobs: completedCount,

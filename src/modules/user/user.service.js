@@ -749,11 +749,7 @@ const buildProfileResponse = async (user) => {
 
   if (base.role === "COMPANY") {
     const teamOverview = await fetchCompanyTeamOverviewForProfile(base._id);
-    const computedMetrics = await fetchCompanyProfileMetrics(base._id);
-    const profileMetrics = mergeCompanyProfileMetrics(
-      computedMetrics,
-      base.companyProfile?.profileMetricsOverride
-    );
+    const profileMetrics = await fetchCompanyProfileMetrics(base._id);
     response.companySummary = {
       companyName: base.companyProfile?.companyName || null,
       contactName: base.companyProfile?.contactName || null,
