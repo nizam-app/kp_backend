@@ -18,6 +18,7 @@ import {
   isEmailConfigured,
   sendPasswordResetEmail,
 } from "../email/email.service.js";
+import { notifyCompanyInviteResolved } from "../notification/jobQuoteNotification.service.js";
 import { env } from "../../config/env.js";
 const sanitizeUser = (userDoc) => userDoc.toObject();
 const hashToken = (token) =>
@@ -234,6 +235,16 @@ export const registerUser = async (payload = {}) => {
     await User.findByIdAndUpdate(invite.company, {
       $inc: { "companyProfile.teamSize": 1 },
     });
+
+    try {
+      await notifyCompanyInviteResolved(invite.company, {
+        inviteId: invite._id,
+        mechanicEmail: email.toLowerCase(),
+        accepted: true,
+      });
+    } catch {
+      /* non-blocking */
+    }
   }
 
   const { accessToken, refreshToken } = await issueAuthTokens(user);

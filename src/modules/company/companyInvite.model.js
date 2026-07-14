@@ -9,7 +9,7 @@ const companyInviteSchema = new Schema(
     invitedBy: { type: Schema.Types.ObjectId, ref: "User", required: true },
     status: {
       type: String,
-      enum: ["PENDING", "ACCEPTED", "CANCELLED", "EXPIRED"],
+      enum: ["PENDING", "ACCEPTED", "CANCELLED", "DECLINED", "EXPIRED"],
       default: "PENDING",
     },
     token: { type: String, required: true, unique: true, index: true },

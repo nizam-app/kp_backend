@@ -67,6 +67,26 @@ export const buildNotificationNavigation = (type, data = {}) => {
         },
       };
     }
+    case "COMPANY_INVITE_RECEIVED":
+    case "COMPANY_INVITE_CANCELLED": {
+      return {
+        screen: "COMPANY_INVITE",
+        params: {
+          ...(d.inviteId ? { inviteId: `${d.inviteId}` } : {}),
+          ...(d.companyId ? { companyId: `${d.companyId}` } : {}),
+          ...(d.companyName ? { companyName: `${d.companyName}` } : {}),
+        },
+      };
+    }
+    case "COMPANY_INVITE_ACCEPTED":
+    case "COMPANY_INVITE_DECLINED": {
+      return {
+        screen: "COMPANY_TEAM",
+        params: {
+          ...(d.inviteId ? { inviteId: `${d.inviteId}` } : {}),
+        },
+      };
+    }
     default:
       return null;
   }

@@ -1671,6 +1671,13 @@ async function run() {
 
   await ensureCompanyInvite({ company, email: "pending.join+swift@truckfix.dev", invitedBy: company });
   await ensureCompanyInvite({ company: johnCompany, email: "pending.join+john@truckfix.dev", invitedBy: johnCompany });
+  /** Demo invite emails (no accounts yet — accept via /register link; cancel via Team pending list). */
+  await ensureCompanyInvite({ company, email: "invite.accept@truckfix.dev", invitedBy: company });
+  await ensureCompanyInvite({ company, email: "invite.cancel@truckfix.dev", invitedBy: company });
+  /** Existing sole-trader James — only while still independent MECHANIC. */
+  if (james?.role === "MECHANIC") {
+    await ensureCompanyInvite({ company, email: "mechanic@truckfix.dev", invitedBy: company });
+  }
 
   // ── Quotes ───────────────────────────────────────────────────────────────────
   // Posted job: multiple competing quotes (Fleet “quotes received” demo)
@@ -2264,6 +2271,11 @@ async function run() {
     "employee@truckfix.dev / employee.jsmith@truckfix.dev / employee.mjohnson@truckfix.dev / employee.dwilson@truckfix.dev / Password123!"
   );
   console.log("John Co mechanic employee:", "employee.johnco@truckfix.dev / Password123!");
+  console.log("Company invite demos (Swift company@truckfix.dev):");
+  console.log(" - New accept signup:", "invite.accept@truckfix.dev (copy link → /register → Password123!)");
+  console.log(" - Cancel pending:", "invite.cancel@truckfix.dev (Team → Cancel)");
+  console.log(" - Existing accept (James):", "mechanic@truckfix.dev → /mechanic/invite");
+  console.log("Set APP_PUBLIC_URL for email signup links (e.g. http://localhost:5173).");
   console.log(
     "Seeded jobCodes:",
     [

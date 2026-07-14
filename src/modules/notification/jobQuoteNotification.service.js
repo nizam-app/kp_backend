@@ -200,3 +200,61 @@ export const notifyJobCompleted = async (job, { approvedByCompany = false } = {}
     }),
   });
 };
+
+/** Existing mechanic received a company team invite. */
+export const notifyCompanyInviteReceived = async (
+  mechanicUserId,
+  { inviteId, companyId, companyName } = {}
+) => {
+  const brand = companyName || "A company";
+  await notifyUsers([mechanicUserId], {
+    type: "COMPANY_INVITE_RECEIVED",
+    title: `Team invite from ${brand}`,
+    body: `${brand} invited you to join their mechanic team. Open the invite to accept or decline.`,
+    data: {
+      inviteId: inviteId != null ? `${inviteId}` : null,
+      companyId: companyId != null ? `${companyId}` : null,
+      companyName: brand,
+      screen: "COMPANY_INVITE",
+    },
+  });
+};
+
+/** Company cancelled a pending invite — notify the mechanic if they have an account. */
+export const notifyCompanyInviteCancelled = async (
+  mechanicUserId,
+  { inviteId, companyId, companyName } = {}
+) => {
+  const brand = companyName || "A company";
+  await notifyUsers([mechanicUserId], {
+    type: "COMPANY_INVITE_CANCELLED",
+    title: `Invite cancelled — ${brand}`,
+    body: `${brand} cancelled their team invitation.`,
+    data: {
+      inviteId: inviteId != null ? `${inviteId}` : null,
+      companyId: companyId != null ? `${companyId}` : null,
+      companyName: brand,
+      screen: "COMPANY_INVITE",
+    },
+  });
+};
+
+/** Mechanic accepted/declined — notify the company account. */
+export const notifyCompanyInviteResolved = async (
+  companyUserId,
+  { inviteId, mechanicEmail, companyName, accepted } = {}
+) => {
+  const email = mechanicEmail || "A mechanic";
+  await notifyUsers([companyUserId], {
+    type: accepted ? "COMPANY_INVITE_ACCEPTED" : "COMPANY_INVITE_DECLINED",
+    title: accepted ? "Invite accepted" : "Invite declined",
+    body: accepted
+      ? `${email} accepted your team invitation${companyName ? ` for ${companyName}` : ""}.`
+      : `${email} declined your team invitation.`,
+    data: {
+      inviteId: inviteId != null ? `${inviteId}` : null,
+      mechanicEmail: email,
+      screen: "COMPANY_TEAM",
+    },
+  });
+};

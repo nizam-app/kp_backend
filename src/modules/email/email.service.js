@@ -70,4 +70,52 @@ export const sendPasswordResetEmail = async ({ to, resetToken }) => {
   }
 };
 
+export const sendCompanyInviteEmail = async ({
+  to,
+  signupUrl,
+  companyName,
+  existingAccount = false,
+  loginUrl = null,
+}) => {
+  const resend = getResend();
+  if (!resend) {
+    return { sent: false, reason: "email_not_configured" };
+  }
+
+  const brand = companyName || "a TruckFix company";
+  const actionUrl = existingAccount ? loginUrl || signupUrl : signupUrl;
+  if (!actionUrl) {
+    return { sent: false, reason: "missing_signup_url" };
+  }
+
+  const cta = existingAccount
+    ? "Log in to accept your invite"
+    : "Accept invite & create your account";
+  const bodyText = existingAccount
+    ? `You've been invited to join ${brand} as a mechanic employee on TruckFix.\n\nYou already have an account — log in, then open Company invite to accept or decline:\n${actionUrl}\n\nThis invite expires in 7 days.`
+    : `You've been invited to join ${brand} as a mechanic employee on TruckFix.\n\nAccept your invite:\n${actionUrl}\n\nThis link expires in 7 days.`;
+
+  const { error } = await resend.emails.send({
+    from: env.EMAIL_FROM,
+    to: [to],
+    subject: `You're invited to join ${brand} on TruckFix`,
+    text: bodyText,
+    html: `
+      <div style="font-family:system-ui,sans-serif;max-width:480px;">
+        <h2>Join ${brand} on TruckFix</h2>
+        <p>You've been invited to join the team as a mechanic employee.</p>
+        <p><a href="${actionUrl}">${cta}</a></p>
+        <p style="color:#666;font-size:12px;">Or copy this link:<br/>${actionUrl}</p>
+        <p>This invite expires in 7 days.</p>
+        <p style="margin-top:24px;color:#999;font-size:12px;">TruckFix</p>
+      </div>
+    `,
+  });
+
+  if (error) {
+    throw new Error(error.message || "Resend send failed");
+  }
+  return { sent: true };
+};
+
 export { GENERIC_PASSWORD_RESET_MESSAGE };

@@ -7,6 +7,11 @@ import {
   updateOwnProfile,
   updateUserPreferences,
 } from "./user.service.js";
+import {
+  acceptCompanyInviteAsMechanic,
+  declineCompanyInviteAsMechanic,
+  listPendingInvitesForMechanic,
+} from "../company/company.service.js";
 
 export const getMe = async (req, res) => {
   const user = await getOwnProfile(req.user._id);
@@ -57,6 +62,30 @@ export const deleteMeController = async (req, res) => {
 
   return sendResponse(res, {
     message: "Account deleted",
+    data: result,
+  });
+};
+
+export const listMyCompanyInvitesController = async (req, res) => {
+  const result = await listPendingInvitesForMechanic(req.user);
+  return sendResponse(res, {
+    message: "Pending company invites",
+    data: result,
+  });
+};
+
+export const acceptMyCompanyInviteController = async (req, res) => {
+  const result = await acceptCompanyInviteAsMechanic(req.params.inviteId, req.user);
+  return sendResponse(res, {
+    message: "Invite accepted",
+    data: result,
+  });
+};
+
+export const declineMyCompanyInviteController = async (req, res) => {
+  const result = await declineCompanyInviteAsMechanic(req.params.inviteId, req.user);
+  return sendResponse(res, {
+    message: "Invite declined",
     data: result,
   });
 };

@@ -1,7 +1,13 @@
 import crypto from "crypto";
 import mongoose from "mongoose";
 import AppError from "../../utils/AppError.js";
-import { ROLES, JOB_STATUS, MECHANIC_AVAILABILITY, QUOTE_STATUS } from "../../constants/domain.js";
+import {
+  ROLES,
+  JOB_STATUS,
+  MECHANIC_AVAILABILITY,
+  QUOTE_STATUS,
+  MECHANIC_BUSINESS_TYPE,
+} from "../../constants/domain.js";
 import { Job } from "../job/job.model.js";
 import { Invoice } from "../invoice/invoice.model.js";
 import { User } from "../user/user.model.js";
@@ -17,7 +23,13 @@ import { companyEarningsBreakdown } from "../../utils/companyEarningsMath.js";
 import { readMechanicProfileRatingAverage, resolveMechanicRatingForInvoiceContext } from "../../utils/mechanicRating.js";
 import { listOwnerQuotesPaginated, countOwnerQuotesByStatus } from "../quote/quote.service.js";
 import { env } from "../../config/env.js";
-import { notifyMechanicAssigned } from "../notification/jobQuoteNotification.service.js";
+import {
+  notifyMechanicAssigned,
+  notifyCompanyInviteCancelled,
+  notifyCompanyInviteReceived,
+  notifyCompanyInviteResolved,
+} from "../notification/jobQuoteNotification.service.js";
+import { sendCompanyInviteEmail } from "../email/email.service.js";
 
 const ACTIVE_JOB_STATUSES = [
   JOB_STATUS.ASSIGNED,
@@ -505,14 +517,21 @@ const buildMechanicEmployeeSignupUrl = (invite) => {
  */
 const serializeInvite = (invite, options = {}) => {
   const { includeSecrets = false } = options;
+  const rawStatus = invite.status || "PENDING";
+  const expired =
+    rawStatus === "PENDING" &&
+    invite.expiresAt &&
+    new Date(invite.expiresAt).getTime() <= Date.now();
+  const status = expired ? "EXPIRED" : rawStatus;
   const out = {
     _id: invite._id,
     email: invite.email,
-    status: invite.status,
+    status,
     expiresAt: invite.expiresAt,
     acceptedAt: invite.acceptedAt || null,
     cancelledAt: invite.cancelledAt || null,
     createdAt: invite.createdAt,
+    updatedAt: invite.updatedAt || null,
   };
   if (includeSecrets && invite.token) {
     out.inviteToken = invite.token;
@@ -1331,7 +1350,7 @@ export const assignMechanicToCompanyJob = async (jobId, employeeId, companyUser)
 export const getCompanyTeam = async (companyUser) => {
   ensureCompanyUser(companyUser);
 
-  const [members, pendingInvites, activeJobsByMechanic, completedJobsByMechanic, pendingReviewCount] =
+  const [members, allInvites, activeJobsByMechanic, completedJobsByMechanic, pendingReviewCount] =
     await Promise.all([
       User.find({
         role: ROLES.MECHANIC_EMPLOYEE,
@@ -1340,8 +1359,9 @@ export const getCompanyTeam = async (companyUser) => {
       })
         .sort({ createdAt: -1 })
         .lean(),
-      CompanyInvite.find({ company: companyUser._id, status: "PENDING" })
+      CompanyInvite.find({ company: companyUser._id })
         .sort({ createdAt: -1 })
+        .limit(100)
         .lean(),
       Job.aggregate([
         {
@@ -1377,6 +1397,9 @@ export const getCompanyTeam = async (companyUser) => {
         status: JOB_STATUS.AWAITING_APPROVAL,
       }),
     ]);
+
+  const invitations = allInvites.map((inv) => serializeInvite(inv, { includeSecrets: false }));
+  const pendingInvites = invitations.filter((inv) => inv.status === "PENDING");
 
   const activeMap = new Map(
     activeJobsByMechanic.map((item) => [
@@ -1434,7 +1457,8 @@ export const getCompanyTeam = async (companyUser) => {
 
   return {
     members: serializedMembers,
-    pendingInvites: pendingInvites.map((inv) => serializeInvite(inv, { includeSecrets: false })),
+    pendingInvites,
+    invitations,
     inviteAction: {
       method: "POST",
       path: "/api/v1/company/team/invitations",
@@ -1446,6 +1470,7 @@ export const getCompanyTeam = async (companyUser) => {
       jobsNavBadgeCount: pendingReviewCount,
       memberCount: serializedMembers.length,
       pendingInviteCount: pendingInvites.length,
+      invitationCount: invitations.length,
       serviceRadiusMiles: companyUser.companyProfile?.serviceRadiusMiles ?? null,
       stats: {
         memberCount: serializedMembers.length,
@@ -1541,6 +1566,22 @@ export const createCompanyInvite = async (companyUser, payload = {}) => {
     throw new AppError("This user is already part of the company", 409);
   }
 
+  const existingUser = await User.findOne({ email }).select("role companyMembership").lean();
+  if (existingUser) {
+    if ([ROLES.COMPANY, ROLES.FLEET, ROLES.ADMIN].includes(existingUser.role)) {
+      throw new AppError("This email belongs to a non-mechanic account", 409);
+    }
+    if (
+      existingUser.role === ROLES.MECHANIC_EMPLOYEE &&
+      existingUser.companyMembership?.status === "ACTIVE" &&
+      `${existingUser.companyMembership?.company}` !== `${companyUser._id}`
+    ) {
+      throw new AppError("This mechanic already belongs to another company", 409);
+    }
+  }
+
+  const existingAccount = existingUser?.role === ROLES.MECHANIC;
+
   const existingInvite = await CompanyInvite.findOne({
     company: companyUser._id,
     email,
@@ -1549,7 +1590,8 @@ export const createCompanyInvite = async (companyUser, payload = {}) => {
   });
 
   if (existingInvite) {
-    return serializeInvite(existingInvite, { includeSecrets: true });
+    const serialized = serializeInvite(existingInvite, { includeSecrets: true });
+    return { ...serialized, emailSent: false, existingAccount };
   }
 
   const invite = await CompanyInvite.create({
@@ -1560,7 +1602,40 @@ export const createCompanyInvite = async (companyUser, payload = {}) => {
     expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
   });
 
-  return serializeInvite(invite, { includeSecrets: true });
+  const serialized = serializeInvite(invite, { includeSecrets: true });
+  const loginUrl = env.APP_PUBLIC_URL
+    ? `${env.APP_PUBLIC_URL}/login?${new URLSearchParams({
+        next: '/mechanic/invite',
+        ...(email ? { email } : {}),
+      }).toString()}`
+    : null;
+  let emailSent = false;
+  try {
+    const mail = await sendCompanyInviteEmail({
+      to: email,
+      signupUrl: serialized.signupUrl || null,
+      loginUrl,
+      existingAccount,
+      companyName: companyUser.companyProfile?.companyName || null,
+    });
+    emailSent = Boolean(mail?.sent);
+  } catch {
+    emailSent = false;
+  }
+
+  if (existingAccount && existingUser?._id) {
+    try {
+      await notifyCompanyInviteReceived(existingUser._id, {
+        inviteId: invite._id,
+        companyId: companyUser._id,
+        companyName: companyUser.companyProfile?.companyName || null,
+      });
+    } catch {
+      /* non-blocking */
+    }
+  }
+
+  return { ...serialized, emailSent, existingAccount };
 };
 
 export const cancelCompanyInvite = async (inviteId, companyUser) => {
@@ -1577,7 +1652,175 @@ export const cancelCompanyInvite = async (inviteId, companyUser) => {
   invite.cancelledAt = new Date();
   await invite.save();
 
+  try {
+    const mechanic = await User.findOne({
+      email: invite.email,
+      role: { $in: [ROLES.MECHANIC, ROLES.MECHANIC_EMPLOYEE] },
+    })
+      .select("_id")
+      .lean();
+    if (mechanic?._id) {
+      await notifyCompanyInviteCancelled(mechanic._id, {
+        inviteId: invite._id,
+        companyId: companyUser._id,
+        companyName: companyUser.companyProfile?.companyName || null,
+      });
+    }
+  } catch {
+    /* non-blocking */
+  }
+
   return serializeInvite(invite, { includeSecrets: false });
+};
+
+const serializeMechanicFacingInvite = (invite, companyDoc) => ({
+  _id: invite._id,
+  email: invite.email,
+  status: invite.status,
+  expiresAt: invite.expiresAt,
+  createdAt: invite.createdAt,
+  company: {
+    _id: companyDoc?._id || invite.company,
+    companyName: companyDoc?.companyProfile?.companyName || "Company",
+    contactName: companyDoc?.companyProfile?.contactName || null,
+  },
+});
+
+/** Pending company invites addressed to the logged-in mechanic email. */
+export const listPendingInvitesForMechanic = async (mechanicUser) => {
+  if (![ROLES.MECHANIC, ROLES.MECHANIC_EMPLOYEE].includes(mechanicUser.role)) {
+    throw new AppError("Only mechanics can view company invites", 403);
+  }
+
+  const email = `${mechanicUser.email || ""}`.trim().toLowerCase();
+  if (!email) return { invites: [] };
+
+  const invites = await CompanyInvite.find({
+    email,
+    status: "PENDING",
+    expiresAt: { $gt: new Date() },
+  })
+    .sort({ createdAt: -1 })
+    .lean();
+
+  if (!invites.length) return { invites: [] };
+
+  const companyIds = [...new Set(invites.map((i) => `${i.company}`))];
+  const companies = await User.find({ _id: { $in: companyIds } })
+    .select("companyProfile.companyName companyProfile.contactName")
+    .lean();
+  const byId = new Map(companies.map((c) => [`${c._id}`, c]));
+
+  return {
+    invites: invites.map((invite) =>
+      serializeMechanicFacingInvite(invite, byId.get(`${invite.company}`))
+    ),
+  };
+};
+
+export const acceptCompanyInviteAsMechanic = async (inviteId, mechanicUser) => {
+  if (mechanicUser.role !== ROLES.MECHANIC) {
+    throw new AppError(
+      mechanicUser.role === ROLES.MECHANIC_EMPLOYEE
+        ? "You already belong to a company team"
+        : "Only independent mechanics can accept company invites",
+      403
+    );
+  }
+
+  const email = `${mechanicUser.email || ""}`.trim().toLowerCase();
+  const invite = await CompanyInvite.findOne({
+    _id: inviteId,
+    email,
+    status: "PENDING",
+    expiresAt: { $gt: new Date() },
+  });
+  if (!invite) throw new AppError("Invite not found or expired", 404);
+
+  if (
+    mechanicUser.companyMembership?.status === "ACTIVE" &&
+    mechanicUser.companyMembership?.company
+  ) {
+    throw new AppError("You already belong to a company team", 409);
+  }
+
+  const user = await User.findById(mechanicUser._id);
+  if (!user) throw new AppError("User not found", 404);
+
+  user.role = ROLES.MECHANIC_EMPLOYEE;
+  user.companyMembership = {
+    company: invite.company,
+    invitedBy: invite.invitedBy,
+    joinedAt: new Date(),
+    status: "ACTIVE",
+  };
+  if (!user.mechanicProfile) user.mechanicProfile = {};
+  user.mechanicProfile.businessType = MECHANIC_BUSINESS_TYPE.COMPANY;
+  await user.save();
+
+  invite.status = "ACCEPTED";
+  invite.acceptedAt = new Date();
+  await invite.save();
+
+  await User.findByIdAndUpdate(invite.company, {
+    $inc: { "companyProfile.teamSize": 1 },
+  });
+
+  const company = await User.findById(invite.company)
+    .select("companyProfile.companyName companyProfile.contactName")
+    .lean();
+
+  try {
+    await notifyCompanyInviteResolved(invite.company, {
+      inviteId: invite._id,
+      mechanicEmail: email,
+      companyName: company?.companyProfile?.companyName || null,
+      accepted: true,
+    });
+  } catch {
+    /* non-blocking */
+  }
+
+  return {
+    invite: serializeMechanicFacingInvite(invite, company),
+    user: user.toObject(),
+  };
+};
+
+export const declineCompanyInviteAsMechanic = async (inviteId, mechanicUser) => {
+  if (![ROLES.MECHANIC, ROLES.MECHANIC_EMPLOYEE].includes(mechanicUser.role)) {
+    throw new AppError("Only mechanics can decline company invites", 403);
+  }
+
+  const email = `${mechanicUser.email || ""}`.trim().toLowerCase();
+  const invite = await CompanyInvite.findOne({
+    _id: inviteId,
+    email,
+    status: "PENDING",
+    expiresAt: { $gt: new Date() },
+  });
+  if (!invite) throw new AppError("Invite not found or expired", 404);
+
+  invite.status = "DECLINED";
+  invite.cancelledAt = new Date();
+  await invite.save();
+
+  const company = await User.findById(invite.company)
+    .select("companyProfile.companyName companyProfile.contactName")
+    .lean();
+
+  try {
+    await notifyCompanyInviteResolved(invite.company, {
+      inviteId: invite._id,
+      mechanicEmail: email,
+      companyName: company?.companyProfile?.companyName || null,
+      accepted: false,
+    });
+  } catch {
+    /* non-blocking */
+  }
+
+  return serializeMechanicFacingInvite(invite, company);
 };
 
 export const getCompanyEarningsSummary = async (companyUser) => {

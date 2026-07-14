@@ -3,8 +3,11 @@ import { catchAsync } from "../../utils/catchAsync.js";
 import { authorize, protect } from "../../middlewares/auth.js";
 import {
   acceptTermsController,
+  acceptMyCompanyInviteController,
+  declineMyCompanyInviteController,
   deleteMeController,
   getMe,
+  listMyCompanyInvitesController,
   updateMechanicAvailabilityController,
   updateMe,
   updatePreferencesController,
@@ -34,6 +37,22 @@ router.patch(
   "/mechanic/availability",
   catchAsync(authorize(ROLES.MECHANIC, ROLES.MECHANIC_EMPLOYEE)),
   catchAsync(updateMechanicAvailabilityController)
+);
+
+router.get(
+  "/me/company-invites",
+  catchAsync(authorize(ROLES.MECHANIC, ROLES.MECHANIC_EMPLOYEE)),
+  catchAsync(listMyCompanyInvitesController)
+);
+router.post(
+  "/me/company-invites/:inviteId/accept",
+  catchAsync(authorize(ROLES.MECHANIC)),
+  catchAsync(acceptMyCompanyInviteController)
+);
+router.post(
+  "/me/company-invites/:inviteId/decline",
+  catchAsync(authorize(ROLES.MECHANIC, ROLES.MECHANIC_EMPLOYEE)),
+  catchAsync(declineMyCompanyInviteController)
 );
 
 export default router;
