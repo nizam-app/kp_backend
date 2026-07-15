@@ -2,10 +2,11 @@ import { sendResponse } from "../../utils/sendResponse.js";
 import {
   acceptQuote,
   amendQuote,
+  countOwnerQuotesByStatus,
   declineQuote,
   getQuoteByIdForUser,
   listJobQuotes,
-  listMechanicQuotes,
+  listOwnerQuotesPaginated,
   submitQuote,
   withdrawQuote,
 } from "./quote.service.js";
@@ -79,9 +80,23 @@ export const withdrawQuoteController = async (req, res) => {
 };
 
 export const listMyQuotesController = async (req, res) => {
-  const quotes = await listMechanicQuotes(req.user, req.query);
+  const [result, quoteCounts] = await Promise.all([
+    listOwnerQuotesPaginated(req.user, req.query),
+    countOwnerQuotesByStatus(req.user),
+  ]);
   return sendResponse(res, {
     message: "My quotes fetched",
-    data: quotes,
+    data: result.items,
+    meta: {
+      ...result.meta,
+      quotesByStatus: {
+        ALL: quoteCounts.total,
+        WAITING: quoteCounts.WAITING,
+        ACCEPTED: quoteCounts.ACCEPTED,
+        DECLINED: quoteCounts.DECLINED,
+        EXPIRED: quoteCounts.EXPIRED,
+        WITHDRAWN: quoteCounts.WITHDRAWN,
+      },
+    },
   });
 };

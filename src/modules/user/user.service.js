@@ -606,6 +606,61 @@ const mergeCompanyProfileMetrics = (computed, override) => {
   return { totalJobs, avgRating, responseMinutesAvg };
 };
 
+const buildMechanicEmploymentSummary = async (user) => {
+  if (user.role === ROLES.MECHANIC) {
+    return {
+      accountType: "INDEPENDENT",
+      isEmployed: false,
+      companyId: null,
+      companyName: null,
+      contactName: null,
+      phone: null,
+      jobTitle: null,
+      employeeDisplayRef: null,
+      joinedAt: null,
+      status: null,
+    };
+  }
+
+  if (user.role !== ROLES.MECHANIC_EMPLOYEE) {
+    return null;
+  }
+
+  const membership = user.companyMembership || {};
+  const companyId = membership.company;
+  if (!companyId) {
+    return {
+      accountType: "EMPLOYEE",
+      isEmployed: false,
+      companyId: null,
+      companyName: null,
+      contactName: null,
+      phone: null,
+      jobTitle: membership.jobTitle || null,
+      employeeDisplayRef: membership.employeeDisplayRef || null,
+      joinedAt: membership.joinedAt || null,
+      status: membership.status || null,
+    };
+  }
+
+  const company = await User.findById(companyId)
+    .select("companyProfile.companyName companyProfile.contactName companyProfile.phone")
+    .lean();
+
+  return {
+    accountType: "EMPLOYEE",
+    isEmployed: membership.status === "ACTIVE",
+    companyId: `${companyId}`,
+    companyName: company?.companyProfile?.companyName || null,
+    contactName: company?.companyProfile?.contactName || null,
+    phone: company?.companyProfile?.phone || null,
+    jobTitle: membership.jobTitle || null,
+    employeeDisplayRef: membership.employeeDisplayRef || null,
+    joinedAt: membership.joinedAt || null,
+    status: membership.status || null,
+  };
+};
+
 const buildProfileResponse = async (user) => {
   const { defaultPaymentMethod, profileCompletion } =
     await getProfileCompletionSummary(user);
@@ -734,6 +789,7 @@ const buildProfileResponse = async (user) => {
       ratingCount: mp.rating?.count ?? 0,
       responseMinutes: mp.stats?.responseMinutesAvg ?? 0,
     };
+    response.employmentSummary = await buildMechanicEmploymentSummary(user);
   }
 
   if (base.role === "FLEET") {
@@ -803,6 +859,17 @@ export const getOwnProfile = async (userId) => {
   return buildProfileResponse(user);
 };
 
+/** Unwrap nested `fleetProfile` / `companyProfile` objects from client PATCH bodies. */
+const flattenRoleProfilePayload = (user, payload = {}) => {
+  if (user.role === ROLES.FLEET && payload.fleetProfile && typeof payload.fleetProfile === "object") {
+    return { ...payload, ...payload.fleetProfile };
+  }
+  if (user.role === ROLES.COMPANY && payload.companyProfile && typeof payload.companyProfile === "object") {
+    return { ...payload, ...payload.companyProfile };
+  }
+  return payload;
+};
+
 /**
  * PATCH /api/v1/users/me — profile update.
  *
@@ -841,8 +908,10 @@ export const updateOwnProfile = async (user, payload) => {
     user.email = email;
   }
 
+  const profilePayload = flattenRoleProfilePayload(user, payload);
+
   if (user.role === "FLEET") {
-    const patch = filterObject(payload, [
+    const patch = filterObject(profilePayload, [
       "profilePhotoUrl",
       "companyName",
       "contactName",
@@ -968,7 +1037,7 @@ export const updateOwnProfile = async (user, payload) => {
   }
 
   if (user.role === "COMPANY") {
-    const patch = filterObject(payload, [
+    let patch = filterObject(profilePayload, [
       "profilePhotoUrl",
       "companyName",
       "contactName",
@@ -986,8 +1055,13 @@ export const updateOwnProfile = async (user, payload) => {
       "bankDisplayName",
       "bankAccountMasked",
       "bankSortCode",
+      "bankName",
+      "bankAccount",
+      "bankAccountNumber",
+      "sortCode",
     ]);
 
+    patch = normalizeBankBillingPatch(patch);
     const normalizedPatch = coerceVatRegisteredInPatch(patch);
     const nextProfile = {
       ...(user.companyProfile || {}),

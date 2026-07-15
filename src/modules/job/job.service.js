@@ -1288,7 +1288,7 @@ const ensureAssignedMechanic = (job, mechanicUserId) => {
   }
 };
 
-const ensureJobParticipantAccess = (job, user) => {
+export const assertJobParticipantAccess = (job, user) => {
   if (user.role === ROLES.ADMIN) return;
 
   const fleetId = toObjectIdString(job.fleet);
@@ -1910,7 +1910,7 @@ export const addJobPhotos = async (jobId, user, payload = {}) => {
   jobId = await resolveJobRef(jobId);
   const job = await Job.findById(jobId);
   if (!job) throw new AppError("Job not found", 404);
-  ensureJobParticipantAccess(job, user);
+  assertJobParticipantAccess(job, user);
 
   const incoming = Array.isArray(payload.photos)
     ? payload.photos
@@ -1967,7 +1967,7 @@ export const removeJobPhoto = async (jobId, user, payload = {}) => {
   jobId = await resolveJobRef(jobId);
   const job = await Job.findById(jobId);
   if (!job) throw new AppError("Job not found", 404);
-  ensureJobParticipantAccess(job, user);
+  assertJobParticipantAccess(job, user);
 
   const photoUrl = `${payload.photoUrl || ""}`.trim();
   if (!photoUrl) throw new AppError("photoUrl is required", 400);
@@ -2006,7 +2006,7 @@ export const addJobAttachments = async (jobId, user, payload = {}) => {
   jobId = await resolveJobRef(jobId);
   const job = await Job.findById(jobId);
   if (!job) throw new AppError("Job not found", 404);
-  ensureJobParticipantAccess(job, user);
+  assertJobParticipantAccess(job, user);
 
   const items = Array.isArray(payload.items)
     ? payload.items
@@ -2091,7 +2091,7 @@ export const removeJobAttachment = async (jobId, user, attachmentId) => {
   }
   const job = await Job.findById(jobId);
   if (!job) throw new AppError("Job not found", 404);
-  ensureJobParticipantAccess(job, user);
+  assertJobParticipantAccess(job, user);
 
   const att = job.attachments.id(attachmentId);
   if (!att) throw new AppError("Attachment not found", 404);

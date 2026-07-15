@@ -14,6 +14,8 @@ import {
   getCompanyTeamMemberById,
   removeCompanyTeamMember,
   listCompanyEarningJobs,
+  resendCompanyInvite,
+  validateCompanyInviteToken,
 } from "./company.service.js";
 import { approveJobCompletionAsCompany } from "../job/job.service.js";
 
@@ -94,10 +96,12 @@ export const companyApproveJobCompletionController = async (req, res) => {
 };
 
 export const companyTeamController = async (req, res) => {
-  const result = await getCompanyTeam(req.user);
+  const result = await getCompanyTeam(req.user, req.query);
+  const { pagination, ...data } = result;
   return sendResponse(res, {
     message: "Company team fetched",
-    data: result,
+    data,
+    meta: pagination,
   });
 };
 
@@ -130,6 +134,25 @@ export const companyCancelInviteController = async (req, res) => {
   const result = await cancelCompanyInvite(req.params.inviteId, req.user);
   return sendResponse(res, {
     message: "Company invite cancelled",
+    data: result,
+  });
+};
+
+export const companyResendInviteController = async (req, res) => {
+  const result = await resendCompanyInvite(req.params.inviteId, req.user);
+  return sendResponse(res, {
+    message: result.emailSent ? "Invitation email resent" : "Invite link refreshed (email not sent)",
+    data: result,
+  });
+};
+
+export const validateCompanyInviteController = async (req, res) => {
+  const result = await validateCompanyInviteToken({
+    token: req.query.token,
+    email: req.query.email,
+  });
+  return sendResponse(res, {
+    message: result.valid ? "Invite is valid" : "Invite is not valid",
     data: result,
   });
 };

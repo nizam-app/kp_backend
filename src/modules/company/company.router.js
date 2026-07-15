@@ -18,6 +18,7 @@ import {
   companyTeamController,
   companyTeamMemberByIdController,
   companyRemoveTeamMemberController,
+  companyResendInviteController,
 } from "./company.controller.js";
 
 const router = Router();
@@ -38,6 +39,7 @@ router.get("/team", catchAsync(companyTeamController));
 router.get("/team/members/:mechanicId", catchAsync(companyTeamMemberByIdController));
 router.delete("/team/members/:mechanicId", catchAsync(companyRemoveTeamMemberController));
 router.post("/team/invitations", catchAsync(companyCreateInviteController));
+router.post("/team/invitations/:inviteId/resend", catchAsync(companyResendInviteController));
 router.delete("/team/invitations/:inviteId", catchAsync(companyCancelInviteController));
 router.get("/earnings/summary", catchAsync(companyEarningsSummaryController));
 router.get("/earnings/jobs", catchAsync(companyEarningJobsController));

@@ -500,6 +500,43 @@ const parseLimit = (value) => {
   return Math.min(Math.floor(n), 100);
 };
 
+const buildInviteStatusFilter = (statusKey) => {
+  const key = `${statusKey || "all"}`.toUpperCase();
+  if (key === "ALL") return {};
+  const now = new Date();
+  if (key === "PENDING") {
+    return {
+      status: "PENDING",
+      $or: [{ expiresAt: { $gt: now } }, { expiresAt: null }, { expiresAt: { $exists: false } }],
+    };
+  }
+  if (key === "EXPIRED") {
+    return {
+      $or: [
+        { status: "EXPIRED" },
+        { status: "PENDING", expiresAt: { $lte: now } },
+      ],
+    };
+  }
+  return { status: key };
+};
+
+const countInviteStatuses = (invites = []) => {
+  const counts = {
+    all: invites.length,
+    PENDING: 0,
+    ACCEPTED: 0,
+    CANCELLED: 0,
+    DECLINED: 0,
+    EXPIRED: 0,
+  };
+  for (const invite of invites) {
+    const status = serializeInvite(invite).status;
+    if (counts[status] != null) counts[status] += 1;
+  }
+  return counts;
+};
+
 const buildMechanicEmployeeSignupUrl = (invite) => {
   const base = env.APP_PUBLIC_URL;
   if (!base || !invite?.token || !invite?.email) return null;
@@ -539,6 +576,70 @@ const serializeInvite = (invite, options = {}) => {
     if (signupUrl) out.signupUrl = signupUrl;
   }
   return out;
+};
+
+const RESEND_RATE_WINDOW_MS = 60 * 60 * 1000;
+const RESEND_RATE_MAX = 5;
+const resendAttempts = new Map();
+
+const assertResendRateLimit = (companyId, inviteId) => {
+  const key = `${companyId}:${inviteId}`;
+  const now = Date.now();
+  const recent = (resendAttempts.get(key) || []).filter((t) => now - t < RESEND_RATE_WINDOW_MS);
+  if (recent.length >= RESEND_RATE_MAX) {
+    throw new AppError(
+      "Too many resend attempts for this invite. Try again in an hour.",
+      429
+    );
+  }
+  recent.push(now);
+  resendAttempts.set(key, recent);
+};
+
+const buildMechanicEmployeeLoginUrl = (email) => {
+  if (!env.APP_PUBLIC_URL) return null;
+  return `${env.APP_PUBLIC_URL}/login?${new URLSearchParams({
+    next: "/mechanic/invite",
+    ...(email ? { email: `${email}` } : {}),
+  }).toString()}`;
+};
+
+/** Send invite email and optional in-app notification for existing independent mechanics. */
+const deliverCompanyInvite = async ({
+  invite,
+  companyUser,
+  existingAccount = false,
+  existingUserId = null,
+}) => {
+  const serialized = serializeInvite(invite, { includeSecrets: true });
+  const loginUrl = buildMechanicEmployeeLoginUrl(invite.email);
+  let emailSent = false;
+  try {
+    const mail = await sendCompanyInviteEmail({
+      to: invite.email,
+      signupUrl: serialized.signupUrl || null,
+      loginUrl,
+      existingAccount,
+      companyName: companyUser.companyProfile?.companyName || null,
+    });
+    emailSent = Boolean(mail?.sent);
+  } catch {
+    emailSent = false;
+  }
+
+  if (existingAccount && existingUserId) {
+    try {
+      await notifyCompanyInviteReceived(existingUserId, {
+        inviteId: invite._id,
+        companyId: companyUser._id,
+        companyName: companyUser.companyProfile?.companyName || null,
+      });
+    } catch {
+      /* non-blocking */
+    }
+  }
+
+  return { ...serialized, emailSent, existingAccount };
 };
 
 /** Human-readable specialty line items for company Team / profile UIs. */
@@ -872,7 +973,11 @@ export const getCompanyDashboard = async (companyUser) => {
       status: JOB_STATUS.COMPLETED,
     }),
     Job.countDocuments(unassignedFilter),
-    CompanyInvite.countDocuments({ company: companyUser._id, status: "PENDING" }),
+    CompanyInvite.countDocuments({
+      company: companyUser._id,
+      status: "PENDING",
+      expiresAt: { $gt: new Date() },
+    }),
     Job.find(unassignedFilter)
       .sort({ assignedAt: -1, createdAt: -1 })
       .limit(6)
@@ -1347,21 +1452,56 @@ export const assignMechanicToCompanyJob = async (jobId, employeeId, companyUser)
   };
 };
 
-export const getCompanyTeam = async (companyUser) => {
+export const getCompanyTeam = async (companyUser, query = {}) => {
   ensureCompanyUser(companyUser);
 
-  const [members, allInvites, activeJobsByMechanic, completedJobsByMechanic, pendingReviewCount] =
-    await Promise.all([
-      User.find({
-        role: ROLES.MECHANIC_EMPLOYEE,
-        "companyMembership.company": companyUser._id,
-        "companyMembership.status": "ACTIVE",
-      })
+  const membersPage = parsePage(query.membersPage);
+  const membersLimit = parseLimit(query.membersLimit);
+  const membersSkip = (membersPage - 1) * membersLimit;
+
+  const invitePage = parsePage(query.invitePage);
+  const inviteLimit = parseLimit(query.inviteLimit);
+  const inviteSkip = (invitePage - 1) * inviteLimit;
+  const inviteStatusKey = `${query.inviteStatus || "all"}`.toLowerCase();
+  const inviteStatusFilter = buildInviteStatusFilter(inviteStatusKey);
+
+  const memberFilter = {
+    role: ROLES.MECHANIC_EMPLOYEE,
+    "companyMembership.company": companyUser._id,
+    "companyMembership.status": "ACTIVE",
+  };
+  const inviteBaseFilter = { company: companyUser._id, ...inviteStatusFilter };
+
+  const [
+    members,
+    membersTotal,
+    inviteDocs,
+    invitesTotal,
+    allInvitesForCounts,
+    allMembersForStats,
+    activeJobsByMechanic,
+    completedJobsByMechanic,
+    pendingReviewCount,
+  ] = await Promise.all([
+      User.find(memberFilter)
         .sort({ createdAt: -1 })
+        .skip(membersSkip)
+        .limit(membersLimit)
         .lean(),
-      CompanyInvite.find({ company: companyUser._id })
+      User.countDocuments(memberFilter),
+      CompanyInvite.find(inviteBaseFilter)
         .sort({ createdAt: -1 })
-        .limit(100)
+        .skip(inviteSkip)
+        .limit(inviteLimit)
+        .lean(),
+      CompanyInvite.countDocuments(inviteBaseFilter),
+      CompanyInvite.find({ company: companyUser._id })
+        .select("status expiresAt acceptedAt cancelledAt createdAt updatedAt email")
+        .lean(),
+      User.find(memberFilter)
+        .select(
+          "mechanicProfile.availability mechanicProfile.stats.responseMinutesAvg mechanicProfile.rating mechanicProfile.displayName"
+        )
         .lean(),
       Job.aggregate([
         {
@@ -1398,8 +1538,11 @@ export const getCompanyTeam = async (companyUser) => {
       }),
     ]);
 
-  const invitations = allInvites.map((inv) => serializeInvite(inv, { includeSecrets: false }));
-  const pendingInvites = invitations.filter((inv) => inv.status === "PENDING");
+  const invitations = inviteDocs.map((inv) => serializeInvite(inv, { includeSecrets: false }));
+  const inviteCounts = countInviteStatuses(allInvitesForCounts);
+  const pendingInvites = allInvitesForCounts
+    .map((inv) => serializeInvite(inv, { includeSecrets: false }))
+    .filter((inv) => inv.status === "PENDING");
 
   const activeMap = new Map(
     activeJobsByMechanic.map((item) => [
@@ -1434,24 +1577,24 @@ export const getCompanyTeam = async (companyUser) => {
     );
   });
 
-  const ratingValues = serializedMembers
-    .map((m) => m.rating)
+  const ratingValues = allMembersForStats
+    .map((m) => readMechanicProfileRatingAverage(m))
     .filter((r) => Number.isFinite(Number(r)) && Number(r) > 0);
   const avgRating =
     ratingValues.length > 0
       ? Math.round((ratingValues.reduce((a, b) => a + Number(b), 0) / ratingValues.length) * 10) / 10
       : 0;
 
-  const responseValues = members
+  const responseValues = allMembersForStats
     .map((m) => m.mechanicProfile?.stats?.responseMinutesAvg)
     .filter((x) => Number.isFinite(Number(x)) && Number(x) > 0);
   const avgResponseMinutes = responseValues.length
     ? Math.round(responseValues.reduce((a, b) => a + Number(b), 0) / responseValues.length)
     : null;
 
-  const jobsCompletedTotal = serializedMembers.reduce((s, m) => s + (m.jobsCompleted || 0), 0);
-  const activeJobsTotal = serializedMembers.reduce((s, m) => s + (m.activeJobs || 0), 0);
-  const onlineNow = members.filter(
+  const jobsCompletedTotal = [...completedMap.values()].reduce((s, count) => s + (count || 0), 0);
+  const activeJobsTotal = [...activeMap.values()].reduce((s, item) => s + (item.count || 0), 0);
+  const onlineNow = allMembersForStats.filter(
     (m) => (m.mechanicProfile?.availability || MECHANIC_AVAILABILITY.OFFLINE) === MECHANIC_AVAILABILITY.ONLINE
   ).length;
 
@@ -1468,18 +1611,34 @@ export const getCompanyTeam = async (companyUser) => {
     meta: {
       pendingReviewCount,
       jobsNavBadgeCount: pendingReviewCount,
-      memberCount: serializedMembers.length,
-      pendingInviteCount: pendingInvites.length,
-      invitationCount: invitations.length,
+      memberCount: membersTotal,
+      pendingInviteCount: inviteCounts.PENDING,
+      invitationCount: inviteCounts.all,
       serviceRadiusMiles: companyUser.companyProfile?.serviceRadiusMiles ?? null,
       stats: {
-        memberCount: serializedMembers.length,
+        memberCount: membersTotal,
         avgRating,
         jobsCompletedTotal,
         activeJobsTotal,
         onlineNow,
         avgResponseMinutes,
       },
+    },
+    pagination: {
+      members: {
+        page: membersPage,
+        limit: membersLimit,
+        total: membersTotal,
+        totalPages: Math.ceil(membersTotal / membersLimit) || 1,
+      },
+      invitations: {
+        page: invitePage,
+        limit: inviteLimit,
+        total: invitesTotal,
+        totalPages: Math.ceil(invitesTotal / inviteLimit) || 1,
+        status: inviteStatusKey,
+      },
+      inviteCounts,
     },
   };
 };
@@ -1602,40 +1761,12 @@ export const createCompanyInvite = async (companyUser, payload = {}) => {
     expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
   });
 
-  const serialized = serializeInvite(invite, { includeSecrets: true });
-  const loginUrl = env.APP_PUBLIC_URL
-    ? `${env.APP_PUBLIC_URL}/login?${new URLSearchParams({
-        next: '/mechanic/invite',
-        ...(email ? { email } : {}),
-      }).toString()}`
-    : null;
-  let emailSent = false;
-  try {
-    const mail = await sendCompanyInviteEmail({
-      to: email,
-      signupUrl: serialized.signupUrl || null,
-      loginUrl,
-      existingAccount,
-      companyName: companyUser.companyProfile?.companyName || null,
-    });
-    emailSent = Boolean(mail?.sent);
-  } catch {
-    emailSent = false;
-  }
-
-  if (existingAccount && existingUser?._id) {
-    try {
-      await notifyCompanyInviteReceived(existingUser._id, {
-        inviteId: invite._id,
-        companyId: companyUser._id,
-        companyName: companyUser.companyProfile?.companyName || null,
-      });
-    } catch {
-      /* non-blocking */
-    }
-  }
-
-  return { ...serialized, emailSent, existingAccount };
+  return deliverCompanyInvite({
+    invite,
+    companyUser,
+    existingAccount,
+    existingUserId: existingAccount && existingUser?._id ? existingUser._id : null,
+  });
 };
 
 export const cancelCompanyInvite = async (inviteId, companyUser) => {
@@ -1671,6 +1802,95 @@ export const cancelCompanyInvite = async (inviteId, companyUser) => {
   }
 
   return serializeInvite(invite, { includeSecrets: false });
+};
+
+/** Public validation for mechanic employee signup links (no auth). */
+export const validateCompanyInviteToken = async ({ token, email }) => {
+  const normalizedEmail = `${email || ""}`.trim().toLowerCase();
+  const normalizedToken = `${token || ""}`.trim();
+  if (!normalizedToken || !normalizedEmail) {
+    return { valid: false, reason: "missing_params" };
+  }
+
+  const invite = await CompanyInvite.findOne({
+    token: normalizedToken,
+    email: normalizedEmail,
+  }).lean();
+
+  if (!invite) {
+    return { valid: false, reason: "not_found" };
+  }
+
+  const company = await User.findById(invite.company)
+    .select("companyProfile.companyName companyProfile.contactName")
+    .lean();
+
+  const companyName = company?.companyProfile?.companyName || "Company";
+  const companyContactName = company?.companyProfile?.contactName || null;
+  const rawStatus = invite.status || "PENDING";
+  const expired =
+    rawStatus === "PENDING" &&
+    invite.expiresAt &&
+    new Date(invite.expiresAt).getTime() <= Date.now();
+
+  const base = {
+    email: normalizedEmail,
+    companyName,
+    companyContactName,
+    expiresAt: invite.expiresAt,
+    status: expired ? "EXPIRED" : rawStatus,
+  };
+
+  if (rawStatus === "ACCEPTED") {
+    return { valid: false, reason: "already_accepted", ...base };
+  }
+  if (rawStatus === "CANCELLED") {
+    return { valid: false, reason: "cancelled", ...base };
+  }
+  if (rawStatus === "DECLINED") {
+    return { valid: false, reason: "declined", ...base };
+  }
+  if (expired) {
+    return { valid: false, reason: "expired", ...base };
+  }
+
+  const existingUser = await User.findOne({ email: normalizedEmail })
+    .select("role")
+    .lean();
+  const existingAccount = existingUser?.role === ROLES.MECHANIC;
+
+  return {
+    valid: true,
+    ...base,
+    existingAccount,
+    status: "PENDING",
+  };
+};
+
+/** Re-send invite email (and notification) for a pending non-expired invite. */
+export const resendCompanyInvite = async (inviteId, companyUser) => {
+  ensureCompanyUser(companyUser);
+  assertResendRateLimit(`${companyUser._id}`, `${inviteId}`);
+
+  const invite = await CompanyInvite.findOne({
+    _id: inviteId,
+    company: companyUser._id,
+    status: "PENDING",
+    expiresAt: { $gt: new Date() },
+  });
+  if (!invite) throw new AppError("Invite not found or expired", 404);
+
+  const existingUser = await User.findOne({ email: invite.email })
+    .select("role _id")
+    .lean();
+  const existingAccount = existingUser?.role === ROLES.MECHANIC;
+
+  return deliverCompanyInvite({
+    invite,
+    companyUser,
+    existingAccount,
+    existingUserId: existingAccount && existingUser?._id ? existingUser._id : null,
+  });
 };
 
 const serializeMechanicFacingInvite = (invite, companyDoc) => ({

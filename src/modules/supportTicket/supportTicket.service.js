@@ -4,7 +4,7 @@ import { createNotification } from "../notification/notification.service.js";
 import { User } from "../user/user.model.js";
 import { Job } from "../job/job.model.js";
 import { ROLES } from "../../constants/domain.js";
-import { resolveJobRef } from "../job/job.service.js";
+import { assertJobParticipantAccess, resolveJobRef } from "../job/job.service.js";
 
 const parsePage = (value) => {
   const n = Number(value);
@@ -69,11 +69,20 @@ const resolveJobForUser = async (user, jobRef) => {
   if (!raw) return { job: null, jobCode: null };
 
   const jobId = await resolveJobRef(raw);
-  const job = await Job.findById(jobId).select("_id jobCode fleet").lean();
+  const job = await Job.findById(jobId)
+    .select("_id jobCode fleet assignedMechanic assignedCompany")
+    .lean();
   if (!job) throw new AppError("Linked job not found", 404);
-  if (user.role === ROLES.FLEET && `${job.fleet}` !== `${user._id}`) {
-    throw new AppError("You can only link your own jobs", 403);
+
+  try {
+    assertJobParticipantAccess(job, user);
+  } catch (err) {
+    if (err instanceof AppError && err.statusCode === 403) {
+      throw new AppError("You can only link jobs you are part of", 403);
+    }
+    throw err;
   }
+
   return { job: job._id, jobCode: job.jobCode || null };
 };
 

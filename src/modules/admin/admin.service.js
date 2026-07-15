@@ -1355,6 +1355,9 @@ export const deleteAdminUser = async (userId, adminUser) => {
 };
 
 export const listAdminFleet = async (query = {}) => {
+  const page = parsePage(query.page);
+  const limit = parseLimit(query.limit);
+  const skip = (page - 1) * limit;
   const companyFilter = { role: ROLES.FLEET };
 
   if (query.status) {
@@ -1371,9 +1374,20 @@ export const listAdminFleet = async (query = {}) => {
     ];
   }
 
-  const fleets = await User.find(companyFilter)
-    .sort({ createdAt: -1 })
-    .lean();
+  const [fleets, total, statsRows] = await Promise.all([
+    User.find(companyFilter)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean(),
+    User.countDocuments(companyFilter),
+    Promise.all([
+      User.countDocuments({ role: ROLES.FLEET }),
+      Vehicle.countDocuments(),
+      Vehicle.countDocuments({ isActive: true }),
+      User.countDocuments({ role: ROLES.FLEET, status: USER_STATUS.SUSPENDED }),
+    ]),
+  ]);
 
   const fleetIds = fleets.map((fleet) => fleet._id);
   const vehicles = fleetIds.length
@@ -1397,15 +1411,21 @@ export const listAdminFleet = async (query = {}) => {
     )
   );
 
+  const [totalCompanies, totalFleet, activeTrucks, suspendedCompanies] = statsRows;
+
   return {
     items,
     stats: {
-      totalCompanies: fleets.length,
-      totalFleet: vehicles.length,
-      activeTrucks: vehicles.filter((vehicle) => vehicle.isActive).length,
-      suspendedCompanies: fleets.filter(
-        (fleet) => fleet.status === USER_STATUS.SUSPENDED
-      ).length,
+      totalCompanies,
+      totalFleet,
+      activeTrucks,
+      suspendedCompanies,
+    },
+    meta: {
+      page,
+      limit,
+      total,
+      totalPages: Math.ceil(total / limit) || 1,
     },
   };
 };
@@ -1546,6 +1566,9 @@ export const updateAdminFleetVehicle = async (
 };
 
 export const getAdminFinancialOverview = async (query = {}) => {
+  const page = parsePage(query.page);
+  const limit = parseLimit(query.limit);
+  const skip = (page - 1) * limit;
   const statusFilter = `${query.status || ""}`.trim().toUpperCase();
   const search = `${query.search || ""}`.trim();
   const invoiceFilter = {};
@@ -1559,12 +1582,15 @@ export const getAdminFinancialOverview = async (query = {}) => {
     invoiceFilter.$or = [{ invoiceNo: searchRegex }];
   }
 
-  const [invoices, summaryAgg] = await Promise.all([
+  const [invoices, total, summaryAgg] = await Promise.all([
     Invoice.find(invoiceFilter)
       .sort({ issuedAt: -1, createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
       .populate("fleet", "email fleetProfile.companyName")
       .populate("job", "title jobCode")
       .lean(),
+    Invoice.countDocuments(invoiceFilter),
     Invoice.aggregate([
       {
         $group: {
@@ -1618,6 +1644,12 @@ export const getAdminFinancialOverview = async (query = {}) => {
       status: invoice.status === "PAID" ? "PAID" : invoice.status === "ISSUED" ? "PENDING" : invoice.status,
       date: invoice.paidAt || invoice.issuedAt,
     })),
+    meta: {
+      page,
+      limit,
+      total,
+      totalPages: Math.ceil(total / limit) || 1,
+    },
   };
 };
 

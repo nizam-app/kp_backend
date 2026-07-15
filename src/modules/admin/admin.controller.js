@@ -194,7 +194,11 @@ export const adminFleetController = async (req, res) => {
   const result = await listAdminFleet(req.query);
   return sendResponse(res, {
     message: "Admin fleet fetched",
-    data: result,
+    data: {
+      items: result.items,
+      stats: result.stats,
+    },
+    meta: result.meta,
   });
 };
 
@@ -247,9 +251,11 @@ export const updateAdminFleetVehicleController = async (req, res) => {
 
 export const adminFinancialController = async (req, res) => {
   const result = await getAdminFinancialOverview(req.query);
+  const { meta, ...data } = result;
   return sendResponse(res, {
     message: "Admin financial overview fetched",
-    data: result,
+    data,
+    meta,
   });
 };
 

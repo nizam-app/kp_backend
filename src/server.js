@@ -17,6 +17,18 @@ const start = async () => {
   const host = `${env.HOST || ""}`.trim() || "0.0.0.0";
   server = httpServer.listen(env.PORT, host, () => {
     console.log(`Server running on ${host}:${env.PORT} (${env.NODE_ENV})`);
+    if (env.NODE_ENV === "production") {
+      if (!env.APP_PUBLIC_URL) {
+        console.warn(
+          "APP_PUBLIC_URL is not set — company invite signup/login links will not work"
+        );
+      }
+      if (!env.RESEND_API_KEY || !env.EMAIL_FROM) {
+        console.warn(
+          "RESEND_API_KEY or EMAIL_FROM is not set — transactional invite emails will not be sent"
+        );
+      }
+    }
   });
 };
 
