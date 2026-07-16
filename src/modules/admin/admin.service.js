@@ -20,10 +20,43 @@ import { Promotion } from "../promotion/promotion.model.js";
 import { Review } from "../review/review.model.js";
 import { AuditLog } from "../auditLog/auditLog.model.js";
 import { JobEvent } from "../jobEvent/jobEvent.model.js";
+import { EarningTransaction } from "../earning/earningTransaction.model.js";
 import { ChatMessage } from "../chat/chat.model.js";
 import { sendJobMessage } from "../chat/chat.service.js";
 import { calculateJobVat } from "../../utils/vat.js";
 import { removeUserAccount } from "../user/user.service.js";
+import {
+  companyEarningsNet,
+  companyEarningsPlatformFee,
+} from "../../utils/companyEarningsMath.js";
+
+const PLATFORM_FEE_PERCENT = 12;
+
+const relativeTimeLabel = (dateValue) => {
+  if (!dateValue) return null;
+  const ms = Date.now() - new Date(dateValue).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return "just now";
+  const mins = Math.floor(ms / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins} min ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs} hour${hrs === 1 ? "" : "s"} ago`;
+  const days = Math.floor(hrs / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
+};
+
+const pctDelta = (current, previous) => {
+  const cur = Number(current) || 0;
+  const prev = Number(previous) || 0;
+  if (prev === 0) return cur > 0 ? 100 : null;
+  return Math.round(((cur - prev) / prev) * 1000) / 10;
+};
+
+const trendPayload = (current, previous) => ({
+  value: Number(current) || 0,
+  previous: Number(previous) || 0,
+  deltaPct: pctDelta(current, previous),
+});
 
 const serviceRequestBucketFromJobStatus = (status) => {
   if ([JOB_STATUS.COMPLETED].includes(status)) return "COMPLETED";
@@ -115,10 +148,14 @@ const normalizeAdminEmail = (value) => `${value || ""}`.trim().toLowerCase();
 
 const mapAdminRole = (value) => {
   const normalized = `${value || ""}`.trim().toUpperCase();
-  if (["COMPANY", "COMPANIES", ROLES.FLEET].includes(normalized)) return ROLES.FLEET;
-  if (["TECHNICIAN", "TECHNICIANS", ROLES.MECHANIC].includes(normalized))
+  if (["FLEET", "FLEETS"].includes(normalized)) return ROLES.FLEET;
+  if (["COMPANY", "COMPANIES"].includes(normalized)) return ROLES.COMPANY;
+  if (["TECHNICIAN", "TECHNICIANS", "MECHANIC", "MECHANICS"].includes(normalized))
     return ROLES.MECHANIC;
-  if (["ADMIN", "ADMINS", ROLES.ADMIN].includes(normalized)) return ROLES.ADMIN;
+  if (["ADMIN", "ADMINS"].includes(normalized)) return ROLES.ADMIN;
+  if ([ROLES.FLEET, ROLES.COMPANY, ROLES.MECHANIC, ROLES.ADMIN].includes(normalized)) {
+    return normalized;
+  }
   return normalized;
 };
 
@@ -158,24 +195,60 @@ const serializeMechanicReviewItem = (user) => ({
   updatedAt: user.updatedAt,
 });
 
-const serializeDashboardJob = (job) => ({
-  _id: job._id,
-  requestId: job.jobCode,
-  truck:
-    [job.vehicle?.make, job.vehicle?.model, job.vehicle?.registration]
-      .filter(Boolean)
-      .join(" - ") || job.title,
-  issue: job.completionSummary || job.description || job.title,
-  status: serviceRequestBucketFromJobStatus(job.status),
-  rawStatus: job.status,
-  time:
-    job.createdAt || job.postedAt
-      ? `${Math.max(
-          Math.round((Date.now() - new Date(job.createdAt || job.postedAt).getTime()) / 3600000),
-          0
-        )} hours ago`
-      : null,
-});
+const serializeDashboardJob = (job) => {
+  const created = job.createdAt || job.postedAt;
+  return {
+    _id: job._id,
+    requestId: job.jobCode,
+    jobCode: job.jobCode,
+    companyName: job.fleet?.fleetProfile?.companyName || null,
+    mechanicName:
+      job.assignedMechanic?.mechanicProfile?.displayName ||
+      job.assignedMechanic?.email ||
+      null,
+    locationText: job.location?.address || null,
+    issueCategory: job.issueSubtype || job.issueType || null,
+    issueType: job.issueType || null,
+    amount: job.finalAmount ?? job.acceptedAmount ?? job.estimatedPayout ?? null,
+    currency: job.currency || "GBP",
+    truck:
+      [job.vehicle?.make, job.vehicle?.model, job.vehicle?.registration]
+        .filter(Boolean)
+        .join(" - ") || job.title,
+    issue: job.completionSummary || job.description || job.title,
+    status: serviceRequestBucketFromJobStatus(job.status),
+    rawStatus: job.status,
+    time: relativeTimeLabel(created),
+    postedAt: created || null,
+  };
+};
+
+const serializeDashboardActivity = (event) => {
+  const jobCode = event.job?.jobCode || null;
+  const title = event.job?.title || null;
+  const actorName =
+    event.actor?.fleetProfile?.companyName ||
+    event.actor?.mechanicProfile?.displayName ||
+    event.actor?.email ||
+    null;
+  const type = `${event.type || "EVENT"}`.replace(/_/g, " ");
+  const statusBit =
+    event.fromStatus || event.toStatus
+      ? `${event.fromStatus || "—"}${event.toStatus ? ` → ${event.toStatus}` : ""}`
+      : null;
+  const msg = [jobCode, event.note || type].filter(Boolean).join(" — ");
+  return {
+    id: String(event._id),
+    type: event.type || "EVENT",
+    msg: msg || type,
+    sub: [actorName, title, statusBit].filter(Boolean).join(" · ") || "Platform",
+    time: relativeTimeLabel(event.createdAt),
+    createdAt: event.createdAt || null,
+    jobId: event.job?._id ? String(event.job._id) : null,
+    jobCode,
+    to: jobCode ? `/admin/jobs?job=${encodeURIComponent(jobCode)}` : "/admin/jobs",
+  };
+};
 
 const serializeServiceRequest = (job) => {
   const bucket = serviceRequestBucketFromJobStatus(job.status);
@@ -248,38 +321,88 @@ const serializeServiceRequestDetail = (job) => ({
 const serializeAdminUser = (user) => {
   const isFleet = user.role === ROLES.FLEET;
   const isMechanic = user.role === ROLES.MECHANIC;
+  const isMechanicEmployee = user.role === ROLES.MECHANIC_EMPLOYEE;
+  const isMechanicLike = isMechanic || isMechanicEmployee;
+  const isCompany = user.role === ROLES.COMPANY;
+  const mp = user.mechanicProfile || {};
+  const cp = user.companyProfile || {};
+  const fp = user.fleetProfile || {};
   return {
     _id: user._id,
-    name:
-      user.fleetProfile?.companyName ||
-      user.mechanicProfile?.displayName ||
-      user.email,
+    name: fp.companyName || cp.companyName || mp.displayName || user.email,
     email: user.email,
-    phone:
-      user.fleetProfile?.phone ||
-      user.mechanicProfile?.phone ||
-      user.adminProfile?.phoneNumber ||
-      null,
-    role: isFleet ? "COMPANY" : isMechanic ? "TECHNICIAN" : user.role,
+    phone: fp.phone || cp.phone || mp.phone || user.adminProfile?.phoneNumber || null,
+    role: isFleet
+      ? "FLEET"
+      : isMechanicEmployee
+      ? "MECHANIC_EMPLOYEE"
+      : isMechanic
+      ? "MECHANIC"
+      : isCompany
+      ? "COMPANY"
+      : user.role,
+    mechanicType: isMechanicEmployee
+      ? "EMPLOYEE"
+      : isMechanic
+      ? "INDEPENDENT"
+      : null,
     status: user.status,
     joinDate: user.createdAt,
-    company: user.fleetProfile?.companyName || user.mechanicProfile?.businessName || null,
+    company: fp.companyName || cp.companyName || mp.businessName || null,
+    employerCompanyId: user.companyMembership?.company || null,
+    employerCompanyName: null,
+    jobTitle: user.companyMembership?.jobTitle || null,
+    employeeDisplayRef: user.companyMembership?.employeeDisplayRef || null,
+    membershipStatus: user.companyMembership?.status || null,
+    membershipJoinedAt: user.companyMembership?.joinedAt || null,
+    location:
+      mp.baseLocationText ||
+      cp.baseLocationText ||
+      fp.billingAddress ||
+      null,
+    billingAddress: cp.billingAddress || fp.billingAddress || null,
+    basePostcode: mp.basePostcode || null,
+    contactRole: cp.contactRole || fp.contactRole || null,
+    regNumber: cp.regNumber || fp.regNumber || null,
+    vatNumber: cp.vatNumber || fp.vatNumber || mp.vatNumber || null,
+    teamSize: cp.teamSize ?? fp.fleetSize ?? null,
+    profileCompleted: cp.profileCompleted ?? mp.profileCompleted ?? null,
+    profileMetrics: cp.profileMetricsOverride || null,
+    verificationStatus: mp.verification?.status || null,
+    availability: mp.availability || null,
+    businessType: mp.businessType || null,
+    businessName: mp.businessName || null,
+    hourlyRate: mp.hourlyRate ?? null,
+    emergencyRate: mp.emergencyRate ?? null,
+    callOutFee: mp.callOutFee ?? null,
+    serviceRadiusMiles: mp.serviceRadiusMiles ?? cp.serviceRadiusMiles ?? null,
+    rating: mp.rating?.average ?? cp.profileMetricsOverride?.avgRating ?? null,
+    ratingCount: mp.rating?.count ?? 0,
+    skills: mp.skills || [],
+    earnings: null,
+    currency: "GBP",
+    contactName: fp.contactName || cp.contactName || null,
     memberCount: 0,
     activity: isFleet
       ? {
           kind: "trucks",
           value: 0,
         }
-      : isMechanic
+      : isMechanicLike
       ? {
           kind: "jobs",
-          value: user.mechanicProfile?.stats?.jobsDone ?? 0,
+          value: mp.stats?.jobsDone ?? 0,
+        }
+      : isCompany
+      ? {
+          kind: "members",
+          value: 0,
         }
       : null,
   };
 };
 
-const serializeFleetManagementItem = (fleet, vehicles = []) => ({
+const serializeFleetManagementItem = (fleet, vehicles = [], metrics = {}) => ({
   _id: fleet._id,
   companyName: fleet.fleetProfile?.companyName || fleet.email,
   companyStatus: fleet.status,
@@ -288,6 +411,13 @@ const serializeFleetManagementItem = (fleet, vehicles = []) => ({
     email: fleet.email,
     phone: fleet.fleetProfile?.phone || null,
   },
+  locationText: fleet.fleetProfile?.billingAddress || null,
+  createdAt: fleet.createdAt || null,
+  joinedAt: fleet.createdAt || null,
+  jobCount: Number(metrics.jobCount) || 0,
+  paidSpend: Number(metrics.paidSpend) || 0,
+  lastJobAt: metrics.lastJobAt || null,
+  currency: metrics.currency || "GBP",
   counts: {
     totalTrucks: vehicles.length,
     activeTrucks: vehicles.filter((vehicle) => vehicle.isActive).length,
@@ -390,7 +520,10 @@ const serializeDispute = (dispute) => ({
 });
 
 const findMechanicById = async (userId) => {
-  const user = await User.findOne({ _id: userId, role: ROLES.MECHANIC });
+  const user = await User.findOne({
+    _id: userId,
+    role: { $in: [ROLES.MECHANIC, ROLES.MECHANIC_EMPLOYEE] },
+  });
   if (!user) throw new AppError("Mechanic not found", 404);
   return user;
 };
@@ -444,6 +577,7 @@ export const listMechanicReviewQueue = async (query = {}) => {
 
 export const getAdminDashboard = async () => {
   const now = new Date();
+  const generatedAt = now.toISOString();
   const seriesStart = new Date(now.getFullYear(), now.getMonth() - 5, 1);
   const months = Array.from({ length: 6 }, (_, index) => {
     const date = new Date(now.getFullYear(), now.getMonth() - (5 - index), 1);
@@ -454,48 +588,133 @@ export const getAdminDashboard = async () => {
     };
   });
 
-  const [paidInvoicesAgg, activeUsersCount, serviceRequestsCount, fleetVehicleCount, jobStatusAgg, revenueAgg, recentJobs] =
-    await Promise.all([
-      Invoice.aggregate([
-        { $match: { status: "PAID" } },
-        { $group: { _id: null, totalRevenue: { $sum: "$totalAmount" } } },
-      ]),
-      User.countDocuments({
-        role: { $in: [ROLES.FLEET, ROLES.MECHANIC] },
-        status: USER_STATUS.ACTIVE,
-      }),
-      Job.countDocuments({}),
-      Vehicle.countDocuments({ isActive: true }),
-      Job.aggregate([
-        {
-          $group: {
-            _id: "$status",
-            count: { $sum: 1 },
-          },
+  const dayMs = 24 * 60 * 60 * 1000;
+  const periodStart = new Date(now.getTime() - 30 * dayMs);
+  const prevStart = new Date(now.getTime() - 60 * dayMs);
+
+  const [
+    paidInvoicesAgg,
+    platformFeeAgg,
+    fleetActive,
+    mechanicActive,
+    companyActive,
+    serviceRequestsCount,
+    fleetVehicleCount,
+    jobStatusAgg,
+    revenueAgg,
+    recentJobs,
+    openSupportCount,
+    openDisputeCount,
+    pendingReviewCount,
+    recentEvents,
+    gmvCurrentAgg,
+    gmvPreviousAgg,
+    feeCurrentAgg,
+    feePreviousAgg,
+    jobsCreatedCurrent,
+    jobsCreatedPrevious,
+    jobsCompletedCurrent,
+    jobsCompletedPrevious,
+  ] = await Promise.all([
+    Invoice.aggregate([
+      { $match: { status: "PAID" } },
+      { $group: { _id: null, totalRevenue: { $sum: "$totalAmount" } } },
+    ]),
+    EarningTransaction.aggregate([
+      { $group: { _id: null, platformCommission: { $sum: "$platformFee" } } },
+    ]),
+    User.countDocuments({ role: ROLES.FLEET, status: USER_STATUS.ACTIVE }),
+    User.countDocuments({ role: ROLES.MECHANIC, status: USER_STATUS.ACTIVE }),
+    User.countDocuments({ role: ROLES.COMPANY, status: USER_STATUS.ACTIVE }),
+    Job.countDocuments({}),
+    Vehicle.countDocuments({ isActive: true }),
+    Job.aggregate([
+      {
+        $group: {
+          _id: "$status",
+          count: { $sum: 1 },
         },
-      ]),
-      Invoice.aggregate([
-        {
-          $match: {
-            paidAt: { $gte: seriesStart },
-            status: "PAID",
-          },
+      },
+    ]),
+    Invoice.aggregate([
+      {
+        $match: {
+          paidAt: { $gte: seriesStart },
+          status: "PAID",
         },
-        {
-          $group: {
-            _id: {
-              year: { $year: "$paidAt" },
-              month: { $month: "$paidAt" },
-            },
-            total: { $sum: "$totalAmount" },
+      },
+      {
+        $group: {
+          _id: {
+            year: { $year: "$paidAt" },
+            month: { $month: "$paidAt" },
           },
+          total: { $sum: "$totalAmount" },
         },
-      ]),
-      Job.find({})
-        .sort({ createdAt: -1 })
-        .limit(8)
-        .lean(),
-    ]);
+      },
+    ]),
+    Job.find({})
+      .sort({ createdAt: -1 })
+      .limit(8)
+      .populate("fleet", "email fleetProfile.companyName fleetProfile.contactName fleetProfile.phone")
+      .populate("assignedMechanic", "email mechanicProfile.displayName mechanicProfile.phone")
+      .lean(),
+    SupportTicket.countDocuments({ status: "OPEN" }),
+    Dispute.countDocuments({ status: { $in: ["OPEN", "IN_REVIEW"] } }),
+    User.countDocuments({
+      role: ROLES.MECHANIC,
+      status: USER_STATUS.PENDING_REVIEW,
+    }),
+    JobEvent.find({})
+      .sort({ createdAt: -1 })
+      .limit(12)
+      .populate("job", "jobCode title")
+      .populate(
+        "actor",
+        "email fleetProfile.companyName mechanicProfile.displayName"
+      )
+      .lean(),
+    Invoice.aggregate([
+      {
+        $match: {
+          status: "PAID",
+          paidAt: { $gte: periodStart, $lte: now },
+        },
+      },
+      { $group: { _id: null, total: { $sum: "$totalAmount" } } },
+    ]),
+    Invoice.aggregate([
+      {
+        $match: {
+          status: "PAID",
+          paidAt: { $gte: prevStart, $lt: periodStart },
+        },
+      },
+      { $group: { _id: null, total: { $sum: "$totalAmount" } } },
+    ]),
+    EarningTransaction.aggregate([
+      {
+        $match: { paidAt: { $gte: periodStart, $lte: now } },
+      },
+      { $group: { _id: null, total: { $sum: "$platformFee" } } },
+    ]),
+    EarningTransaction.aggregate([
+      {
+        $match: { paidAt: { $gte: prevStart, $lt: periodStart } },
+      },
+      { $group: { _id: null, total: { $sum: "$platformFee" } } },
+    ]),
+    Job.countDocuments({ createdAt: { $gte: periodStart, $lte: now } }),
+    Job.countDocuments({ createdAt: { $gte: prevStart, $lt: periodStart } }),
+    Job.countDocuments({
+      status: JOB_STATUS.COMPLETED,
+      updatedAt: { $gte: periodStart, $lte: now },
+    }),
+    Job.countDocuments({
+      status: JOB_STATUS.COMPLETED,
+      updatedAt: { $gte: prevStart, $lt: periodStart },
+    }),
+  ]);
 
   const revenueMap = new Map(
     revenueAgg.map((entry) => [`${entry._id.year}-${entry._id.month}`, entry.total])
@@ -518,12 +737,84 @@ export const getAdminDashboard = async () => {
     statusDistributionBase[bucket] += item.count;
   }
 
+  const gmvPaid = paidInvoicesAgg[0]?.totalRevenue || 0;
+  const platformCommission = platformFeeAgg[0]?.platformCommission || 0;
+  const activeUsersByRole = {
+    fleet: fleetActive,
+    mechanic: mechanicActive,
+    company: companyActive,
+  };
+  const activeUsers =
+    activeUsersByRole.fleet + activeUsersByRole.mechanic + activeUsersByRole.company;
+
+  const awaitingAction = statusDistributionBase.PENDING;
+  const activeJobs = statusDistributionBase.IN_PROGRESS;
+
+  const attention = [];
+  if (awaitingAction > 0) {
+    attention.push({
+      id: "pending-jobs",
+      priority: awaitingAction > 5 ? "HIGH" : "MEDIUM",
+      msg: `${awaitingAction} jobs awaiting action`,
+      desc: "Review posted and quoting jobs on the platform.",
+      action: "View Jobs",
+      to: "/admin/jobs?status=PENDING",
+    });
+  }
+  if (openSupportCount > 0) {
+    attention.push({
+      id: "open-support",
+      priority: openSupportCount > 3 ? "HIGH" : "MEDIUM",
+      msg: `${openSupportCount} open support ticket${openSupportCount === 1 ? "" : "s"}`,
+      desc: "Respond to fleet and mechanic support requests.",
+      action: "Support Inbox",
+      to: "/admin/support",
+    });
+  }
+  if (openDisputeCount > 0) {
+    attention.push({
+      id: "open-disputes",
+      priority: "HIGH",
+      msg: `${openDisputeCount} open dispute${openDisputeCount === 1 ? "" : "s"}`,
+      desc: "Investigate and resolve payment or job disputes.",
+      action: "View Disputes",
+      to: "/admin/disputes",
+    });
+  }
+  if (pendingReviewCount > 0) {
+    attention.push({
+      id: "mechanic-review",
+      priority: pendingReviewCount > 5 ? "HIGH" : "MEDIUM",
+      msg: `${pendingReviewCount} mechanic${pendingReviewCount === 1 ? "" : "s"} pending review`,
+      desc: "Approve or reject mechanic verification submissions.",
+      action: "Review Mechanics",
+      to: "/admin/mechanics",
+    });
+  }
+
   return {
+    generatedAt,
     cards: {
-      totalRevenue: paidInvoicesAgg[0]?.totalRevenue || 0,
-      activeUsers: activeUsersCount,
+      gmvPaid,
+      totalRevenue: gmvPaid,
+      platformCommission,
+      platformFeePercent: PLATFORM_FEE_PERCENT,
+      activeUsers,
+      activeUsersByRole,
       serviceRequests: serviceRequestsCount,
       fleetSize: fleetVehicleCount,
+      activeJobs,
+      awaitingAction,
+      completedJobs: statusDistributionBase.COMPLETED,
+    },
+    trends: {
+      gmvPaid: trendPayload(gmvCurrentAgg[0]?.total || 0, gmvPreviousAgg[0]?.total || 0),
+      platformCommission: trendPayload(
+        feeCurrentAgg[0]?.total || 0,
+        feePreviousAgg[0]?.total || 0
+      ),
+      serviceRequests: trendPayload(jobsCreatedCurrent, jobsCreatedPrevious),
+      completedJobs: trendPayload(jobsCompletedCurrent, jobsCompletedPrevious),
     },
     revenueOverview: overview,
     serviceStatusDistribution: [
@@ -533,6 +824,8 @@ export const getAdminDashboard = async () => {
       { label: "Cancelled", value: statusDistributionBase.CANCELLED },
     ],
     recentServiceRequests: recentJobs.map(serializeDashboardJob),
+    attention,
+    activity: recentEvents.map(serializeDashboardActivity),
   };
 };
 
@@ -554,13 +847,17 @@ export const listAdminServiceRequests = async (query = {}) => {
           JOB_STATUS.EN_ROUTE,
           JOB_STATUS.ON_SITE,
           JOB_STATUS.IN_PROGRESS,
-          JOB_STATUS.AWAITING_APPROVAL,
         ],
       };
+    } else if (status === "AWAITING_APPROVAL") {
+      filter.status = JOB_STATUS.AWAITING_APPROVAL;
     } else if (status === "COMPLETED") {
       filter.status = JOB_STATUS.COMPLETED;
     } else if (status === "CANCELLED") {
       filter.status = JOB_STATUS.CANCELLED;
+    } else if (status === "DISPUTED") {
+      // No JOB_STATUS.DISPUTED yet — force empty until disputes are joined to jobs
+      filter._id = { $in: [] };
     }
   }
 
@@ -586,6 +883,10 @@ export const listAdminServiceRequests = async (query = {}) => {
 
   if (query.mechanicId) {
     filter.assignedMechanic = `${query.mechanicId}`.trim();
+  }
+
+  if (query.companyId) {
+    filter.assignedCompany = `${query.companyId}`.trim();
   }
 
   const invoiceEligible =
@@ -633,12 +934,22 @@ export const listAdminServiceRequests = async (query = {}) => {
     pending: 0,
     inProgress: 0,
     completed: 0,
+    awaitingApproval: 0,
   };
 
   for (const item of allStatusAgg) {
+    if (item._id === JOB_STATUS.AWAITING_APPROVAL) {
+      counters.awaitingApproval += item.count;
+    }
     const bucket = serviceRequestBucketFromJobStatus(item._id);
     if (bucket === "PENDING") counters.pending += item.count;
-    if (bucket === "IN_PROGRESS") counters.inProgress += item.count;
+    // Active excludes awaiting-approval so it matches the Active tab filter
+    if (
+      bucket === "IN_PROGRESS" &&
+      item._id !== JOB_STATUS.AWAITING_APPROVAL
+    ) {
+      counters.inProgress += item.count;
+    }
     if (bucket === "COMPLETED") counters.completed += item.count;
   }
 
@@ -905,6 +1216,7 @@ const serializeAdminUserDetail = (user, extras = {}) => ({
   ...serializeAdminUser(user),
   fleetProfile: user.fleetProfile || null,
   mechanicProfile: user.mechanicProfile || null,
+  companyProfile: user.companyProfile || null,
   adminProfile: user.adminProfile || null,
   companyMembership: user.companyMembership || null,
   ...extras,
@@ -937,20 +1249,37 @@ export const listAdminUsers = async (query = {}) => {
   const roleFilter = parseRoleFilter(query.role);
   const statusFilter = parseStatus(query.status);
 
-  if (roleFilter === "COMPANIES" || roleFilter === "COMPANY") {
+  if (roleFilter === "FLEETS" || roleFilter === "FLEET") {
     filter.role = ROLES.FLEET;
-  } else if (roleFilter === "TECHNICIANS" || roleFilter === "TECHNICIAN") {
-    filter.role = ROLES.MECHANIC;
+  } else if (roleFilter === "COMPANIES" || roleFilter === "COMPANY") {
+    filter.role = ROLES.COMPANY;
+  } else if (
+    roleFilter === "TECHNICIANS" ||
+    roleFilter === "TECHNICIAN" ||
+    roleFilter === "MECHANICS" ||
+    roleFilter === "MECHANIC"
+  ) {
+    filter.role = { $in: [ROLES.MECHANIC, ROLES.MECHANIC_EMPLOYEE] };
   } else if (roleFilter === "ADMINS" || roleFilter === "ADMIN") {
     filter.role = ROLES.ADMIN;
   } else if (roleFilter === "DRIVERS" || roleFilter === "DRIVER") {
     filter.role = "__NO_DRIVER_ROLE__";
   }
 
-  if (statusFilter === "PENDING") {
-    filter.status = { $in: [USER_STATUS.PENDING, USER_STATUS.PENDING_REVIEW] };
+  if (statusFilter === "PENDING" || statusFilter === "PENDING_REVIEW") {
+    filter.status = USER_STATUS.PENDING_REVIEW;
   } else if (statusFilter && statusFilter !== "ALL") {
     filter.status = statusFilter;
+  }
+
+  const employerId = `${query.employerId || query.employer || ""}`.trim();
+  if (employerId) {
+    filter["companyMembership.company"] = employerId;
+  }
+
+  const exactUserId = `${query.id || query.userId || query.companyId || ""}`.trim();
+  if (exactUserId) {
+    filter._id = exactUserId;
   }
 
   if (query.search) {
@@ -959,24 +1288,95 @@ export const listAdminUsers = async (query = {}) => {
       { email: searchRegex },
       { "fleetProfile.companyName": searchRegex },
       { "fleetProfile.contactName": searchRegex },
+      { "companyProfile.companyName": searchRegex },
+      { "companyProfile.contactName": searchRegex },
       { "mechanicProfile.displayName": searchRegex },
       { "mechanicProfile.businessName": searchRegex },
       { "fleetProfile.phone": searchRegex },
+      { "companyProfile.phone": searchRegex },
       { "mechanicProfile.phone": searchRegex },
     ];
   }
 
-  const [users, total, totalCompanies, totalMembers, activeTechnicians] = await Promise.all([
+  const mechanicRoleFilter = { $in: [ROLES.MECHANIC, ROLES.MECHANIC_EMPLOYEE] };
+  const isMechanicList =
+    filter.role &&
+    typeof filter.role === "object" &&
+    Array.isArray(filter.role.$in) &&
+    filter.role.$in.includes(ROLES.MECHANIC);
+
+  const [
+    users,
+    total,
+    totalFleets,
+    totalCompanies,
+    totalMembers,
+    activeTechnicians,
+    mechanicTotal,
+    mechanicActive,
+    mechanicPending,
+    mechanicSuspended,
+    mechanicBlocked,
+    companyActive,
+    companyPending,
+    companySuspended,
+    companyBlocked,
+  ] = await Promise.all([
     User.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
     User.countDocuments(filter),
     User.countDocuments({ role: ROLES.FLEET }),
-    User.countDocuments({ role: { $in: [ROLES.FLEET, ROLES.MECHANIC] } }),
-    User.countDocuments({ role: ROLES.MECHANIC, status: USER_STATUS.ACTIVE }),
+    User.countDocuments({ role: ROLES.COMPANY }),
+    User.countDocuments({
+      role: { $in: [ROLES.FLEET, ROLES.MECHANIC, ROLES.MECHANIC_EMPLOYEE, ROLES.COMPANY] },
+    }),
+    User.countDocuments({ role: mechanicRoleFilter, status: USER_STATUS.ACTIVE }),
+    User.countDocuments({ role: mechanicRoleFilter }),
+    User.countDocuments({ role: mechanicRoleFilter, status: USER_STATUS.ACTIVE }),
+    User.countDocuments({ role: mechanicRoleFilter, status: USER_STATUS.PENDING_REVIEW }),
+    User.countDocuments({ role: mechanicRoleFilter, status: USER_STATUS.SUSPENDED }),
+    User.countDocuments({ role: mechanicRoleFilter, status: USER_STATUS.BLOCKED }),
+    User.countDocuments({ role: ROLES.COMPANY, status: USER_STATUS.ACTIVE }),
+    User.countDocuments({ role: ROLES.COMPANY, status: USER_STATUS.PENDING_REVIEW }),
+    User.countDocuments({ role: ROLES.COMPANY, status: USER_STATUS.SUSPENDED }),
+    User.countDocuments({ role: ROLES.COMPANY, status: USER_STATUS.BLOCKED }),
   ]);
 
   const fleetIds = users
     .filter((user) => user.role === ROLES.FLEET)
     .map((user) => user._id);
+
+  const companyIds = users
+    .filter((user) => user.role === ROLES.COMPANY)
+    .map((user) => user._id);
+
+  const mechanicIds = users
+    .filter(
+      (user) =>
+        user.role === ROLES.MECHANIC || user.role === ROLES.MECHANIC_EMPLOYEE
+    )
+    .map((user) => user._id);
+
+  const employerIds = [
+    ...new Set(
+      users
+        .map((user) => user.companyMembership?.company)
+        .filter(Boolean)
+        .map((id) => id.toString())
+    ),
+  ];
+
+  const employers = employerIds.length
+    ? await User.find({ _id: { $in: employerIds } })
+        .select("email companyProfile.companyName")
+        .lean()
+    : [];
+
+  const employerNameMap = new Map(
+    employers.map((org) => [
+      org._id.toString(),
+      org.companyProfile?.companyName || org.email || null,
+    ])
+  );
 
   const vehicleCountsAgg = fleetIds.length
     ? await Vehicle.aggregate([
@@ -998,11 +1398,11 @@ export const listAdminUsers = async (query = {}) => {
     vehicleCountsAgg.map((entry) => [entry._id.toString(), entry.count])
   );
 
-  const memberCountsAgg = fleetIds.length
+  const memberCountsAgg = [...fleetIds, ...companyIds].length
     ? await User.aggregate([
         {
           $match: {
-            "companyMembership.company": { $in: fleetIds },
+            "companyMembership.company": { $in: [...fleetIds, ...companyIds] },
             "companyMembership.status": "ACTIVE",
           },
         },
@@ -1019,6 +1419,26 @@ export const listAdminUsers = async (query = {}) => {
     memberCountsAgg.map((entry) => [entry._id.toString(), entry.count])
   );
 
+  const earningsAgg = mechanicIds.length
+    ? await EarningTransaction.aggregate([
+        { $match: { mechanic: { $in: mechanicIds } } },
+        {
+          $group: {
+            _id: "$mechanic",
+            netAmount: { $sum: "$netAmount" },
+            currency: { $first: "$currency" },
+          },
+        },
+      ])
+    : [];
+
+  const earningsMap = new Map(
+    earningsAgg.map((entry) => [
+      entry._id.toString(),
+      { netAmount: entry.netAmount, currency: entry.currency || "GBP" },
+    ])
+  );
+
   const items = users.map((user) => {
     const item = serializeAdminUser(user);
     if (user.role === ROLES.FLEET) {
@@ -1028,8 +1448,54 @@ export const listAdminUsers = async (query = {}) => {
         value: vehicleCountMap.get(user._id.toString()) || 0,
       };
     }
+    if (user.role === ROLES.COMPANY) {
+      item.memberCount = memberCountMap.get(user._id.toString()) || 0;
+      item.activity = {
+        kind: "members",
+        value: item.memberCount,
+      };
+    }
+    if (
+      user.role === ROLES.MECHANIC ||
+      user.role === ROLES.MECHANIC_EMPLOYEE
+    ) {
+      const earn = earningsMap.get(user._id.toString());
+      item.earnings = earn ? Number(earn.netAmount) || 0 : 0;
+      item.currency = earn?.currency || "GBP";
+      const employerId = user.companyMembership?.company?.toString?.() ||
+        (user.companyMembership?.company
+          ? String(user.companyMembership.company)
+          : null);
+      if (employerId) {
+        item.employerCompanyName = employerNameMap.get(employerId) || null;
+        if (!item.company || item.company === item.businessName) {
+          item.company = item.employerCompanyName || item.company;
+        }
+      }
+    }
     return item;
   });
+
+  const mechanicStats = isMechanicList
+    ? {
+        total: mechanicTotal,
+        active: mechanicActive,
+        pendingReview: mechanicPending,
+        suspended: mechanicSuspended,
+        blocked: mechanicBlocked,
+      }
+    : null;
+
+  const companyStats =
+    filter.role === ROLES.COMPANY
+      ? {
+          total: totalCompanies,
+          active: companyActive,
+          pendingReview: companyPending,
+          suspended: companySuspended,
+          blocked: companyBlocked,
+        }
+      : null;
 
   return {
     items,
@@ -1040,10 +1506,22 @@ export const listAdminUsers = async (query = {}) => {
       totalPages: Math.ceil(total / limit) || 1,
     },
     stats: {
-      totalCompanies,
+      totalCompanies: totalFleets,
+      totalServiceCompanies: totalCompanies,
       totalMembers,
       activeTechnicians,
       activeDrivers: 0,
+      total: isMechanicList
+        ? mechanicStats.total
+        : filter.role === ROLES.COMPANY
+        ? companyStats.total
+        : total,
+      active: mechanicStats?.active ?? companyStats?.active,
+      pendingReview: mechanicStats?.pendingReview ?? companyStats?.pendingReview,
+      suspended: mechanicStats?.suspended ?? companyStats?.suspended,
+      blocked: mechanicStats?.blocked ?? companyStats?.blocked,
+      ...(mechanicStats || {}),
+      ...(companyStats || {}),
     },
   };
 };
@@ -1053,7 +1531,7 @@ export const getAdminUserById = async (userId) => {
   if (!user) throw new AppError("User not found", 404);
 
   let memberCount = 0;
-  if (user.role === ROLES.FLEET) {
+  if (user.role === ROLES.FLEET || user.role === ROLES.COMPANY) {
     memberCount = await User.countDocuments({
       "companyMembership.company": user._id,
       "companyMembership.status": "ACTIVE",
@@ -1064,23 +1542,27 @@ export const getAdminUserById = async (userId) => {
 };
 
 export const listAdminUserMembers = async (userId) => {
-  const company = await User.findById(userId).lean();
-  if (!company) throw new AppError("User not found", 404);
-  if (company.role !== ROLES.FLEET) {
-    throw new AppError("Members are only available for company accounts", 400);
+  const org = await User.findById(userId).lean();
+  if (!org) throw new AppError("User not found", 404);
+  if (![ROLES.FLEET, ROLES.COMPANY].includes(org.role)) {
+    throw new AppError("Members are only available for fleet or company accounts", 400);
   }
 
   const members = await User.find({
-    "companyMembership.company": company._id,
+    "companyMembership.company": org._id,
   })
     .sort({ "companyMembership.joinedAt": -1, createdAt: -1 })
     .lean();
 
   return {
     company: {
-      _id: company._id,
-      companyName: company.fleetProfile?.companyName || company.email,
-      email: company.email,
+      _id: org._id,
+      companyName:
+        org.companyProfile?.companyName ||
+        org.fleetProfile?.companyName ||
+        org.email,
+      email: org.email,
+      role: org.role,
     },
     items: members.map(serializeAdminUserMember),
     stats: {
@@ -1097,8 +1579,8 @@ export const listAdminUserMembers = async (userId) => {
 
 export const createAdminUserOrCompany = async (payload = {}, adminUser) => {
   const role = mapAdminRole(payload.role || payload.entityType);
-  if (![ROLES.FLEET, ROLES.MECHANIC, ROLES.ADMIN].includes(role)) {
-    throw new AppError("role must be FLEET, MECHANIC, or ADMIN", 400);
+  if (![ROLES.FLEET, ROLES.MECHANIC, ROLES.ADMIN, ROLES.COMPANY].includes(role)) {
+    throw new AppError("role must be FLEET, MECHANIC, COMPANY, or ADMIN", 400);
   }
 
   const email = normalizeAdminEmail(payload.email);
@@ -1125,6 +1607,22 @@ export const createAdminUserOrCompany = async (payload = {}, adminUser) => {
       vatNumber: payload.vatNumber,
       fleetSize: payload.fleetSize,
       billingAddress: payload.billingAddress,
+    };
+  }
+
+  if (role === ROLES.COMPANY) {
+    userData.companyProfile = {
+      companyName: payload.companyName,
+      contactName: payload.contactName || payload.fullName,
+      contactRole: payload.contactRole,
+      phone: payload.phone,
+      regNumber: payload.regNumber,
+      vatNumber: payload.vatNumber,
+      billingAddress: payload.billingAddress,
+      baseLocationText: payload.baseLocationText || payload.billingAddress,
+      serviceRadiusMiles: payload.serviceRadiusMiles,
+      teamSize: payload.teamSize,
+      profileCompleted: true,
     };
   }
 
@@ -1213,6 +1711,26 @@ export const updateAdminUser = async (userId, payload = {}, adminUser) => {
           vatNumber: payload.vatNumber,
           fleetSize: payload.fleetSize,
           billingAddress: payload.billingAddress,
+        }).filter(([, value]) => value !== undefined)
+      ),
+    };
+  }
+
+  if (user.role === ROLES.COMPANY) {
+    user.companyProfile = {
+      ...(user.companyProfile || {}),
+      ...Object.fromEntries(
+        Object.entries({
+          companyName: payload.companyName,
+          contactName: payload.contactName,
+          contactRole: payload.contactRole,
+          phone: payload.phone,
+          regNumber: payload.regNumber,
+          vatNumber: payload.vatNumber,
+          billingAddress: payload.billingAddress,
+          baseLocationText: payload.baseLocationText,
+          serviceRadiusMiles: payload.serviceRadiusMiles,
+          teamSize: payload.teamSize,
         }).filter(([, value]) => value !== undefined)
       ),
     };
@@ -1361,7 +1879,10 @@ export const listAdminFleet = async (query = {}) => {
   const companyFilter = { role: ROLES.FLEET };
 
   if (query.status) {
-    companyFilter.status = `${query.status}`.trim().toUpperCase();
+    let status = `${query.status}`.trim().toUpperCase();
+    if (status === "PENDING") status = USER_STATUS.PENDING_REVIEW;
+    if (status === "INACTIVE") status = USER_STATUS.BLOCKED;
+    companyFilter.status = status;
   }
 
   if (query.search) {
@@ -1383,18 +1904,52 @@ export const listAdminFleet = async (query = {}) => {
     User.countDocuments(companyFilter),
     Promise.all([
       User.countDocuments({ role: ROLES.FLEET }),
+      User.countDocuments({ role: ROLES.FLEET, status: USER_STATUS.ACTIVE }),
+      User.countDocuments({ role: ROLES.FLEET, status: USER_STATUS.PENDING_REVIEW }),
+      User.countDocuments({ role: ROLES.FLEET, status: USER_STATUS.SUSPENDED }),
+      User.countDocuments({ role: ROLES.FLEET, status: USER_STATUS.BLOCKED }),
       Vehicle.countDocuments(),
       Vehicle.countDocuments({ isActive: true }),
-      User.countDocuments({ role: ROLES.FLEET, status: USER_STATUS.SUSPENDED }),
     ]),
   ]);
 
   const fleetIds = fleets.map((fleet) => fleet._id);
-  const vehicles = fleetIds.length
-    ? await Vehicle.find({ fleet: { $in: fleetIds } })
-        .sort({ createdAt: -1 })
-        .lean()
-    : [];
+
+  const [vehicles, jobAgg, spendAgg] = await Promise.all([
+    fleetIds.length
+      ? Vehicle.find({ fleet: { $in: fleetIds } })
+          .sort({ createdAt: -1 })
+          .lean()
+      : Promise.resolve([]),
+    fleetIds.length
+      ? Job.aggregate([
+          { $match: { fleet: { $in: fleetIds } } },
+          {
+            $group: {
+              _id: "$fleet",
+              jobCount: { $sum: 1 },
+              lastJobAt: { $max: { $ifNull: ["$postedAt", "$createdAt"] } },
+            },
+          },
+        ])
+      : Promise.resolve([]),
+    fleetIds.length
+      ? Invoice.aggregate([
+          {
+            $match: {
+              fleet: { $in: fleetIds },
+              status: "PAID",
+            },
+          },
+          {
+            $group: {
+              _id: "$fleet",
+              paidSpend: { $sum: "$totalAmount" },
+            },
+          },
+        ])
+      : Promise.resolve([]),
+  ]);
 
   const vehiclesByFleet = new Map();
   for (const vehicle of vehicles) {
@@ -1404,22 +1959,50 @@ export const listAdminFleet = async (query = {}) => {
     vehiclesByFleet.set(key, list);
   }
 
-  const items = fleets.map((fleet) =>
-    serializeFleetManagementItem(
-      fleet,
-      vehiclesByFleet.get(fleet._id.toString()) || []
-    )
+  const jobMetricsByFleet = new Map(
+    jobAgg.map((row) => [
+      row._id.toString(),
+      { jobCount: row.jobCount, lastJobAt: row.lastJobAt },
+    ])
+  );
+  const spendByFleet = new Map(
+    spendAgg.map((row) => [row._id.toString(), row.paidSpend])
   );
 
-  const [totalCompanies, totalFleet, activeTrucks, suspendedCompanies] = statsRows;
+  const items = fleets.map((fleet) => {
+    const id = fleet._id.toString();
+    const jobMeta = jobMetricsByFleet.get(id) || {};
+    return serializeFleetManagementItem(
+      fleet,
+      vehiclesByFleet.get(id) || [],
+      {
+        jobCount: jobMeta.jobCount || 0,
+        lastJobAt: jobMeta.lastJobAt || null,
+        paidSpend: spendByFleet.get(id) || 0,
+      }
+    );
+  });
+
+  const [
+    totalCompanies,
+    activeCompanies,
+    pendingCompanies,
+    suspendedCompanies,
+    blockedCompanies,
+    totalFleet,
+    activeTrucks,
+  ] = statsRows;
 
   return {
     items,
     stats: {
       totalCompanies,
+      activeCompanies,
+      pendingCompanies,
+      suspendedCompanies,
+      blockedCompanies,
       totalFleet,
       activeTrucks,
-      suspendedCompanies,
     },
     meta: {
       page,
@@ -1567,19 +2150,50 @@ export const updateAdminFleetVehicle = async (
 
 export const getAdminFinancialOverview = async (query = {}) => {
   const page = parsePage(query.page);
-  const limit = parseLimit(query.limit);
+  const exportAll =
+    query.exportAll === true ||
+    `${query.exportAll || ""}`.trim().toLowerCase() === "true";
+  const limit = exportAll
+    ? Math.min(Math.max(Math.floor(Number(query.limit) || 5000), 1), 5000)
+    : parseLimit(query.limit);
   const skip = (page - 1) * limit;
-  const statusFilter = `${query.status || ""}`.trim().toUpperCase();
+  let statusFilter = `${query.status || ""}`.trim().toUpperCase();
+  // UI aliases → invoice enum
+  if (statusFilter === "PENDING") statusFilter = "ISSUED";
+  if (statusFilter === "HELD") statusFilter = "AUTHORIZED";
+
   const search = `${query.search || ""}`.trim();
+  const fleetId = `${query.fleetId || query.fleet || ""}`.trim();
   const invoiceFilter = {};
 
   if (statusFilter) {
     invoiceFilter.status = statusFilter;
   }
 
+  if (fleetId) {
+    invoiceFilter.fleet = fleetId;
+  }
+
   if (search) {
     const searchRegex = safeRegex(search);
-    invoiceFilter.$or = [{ invoiceNo: searchRegex }];
+    const matchingFleetIds = await User.find({
+      role: ROLES.FLEET,
+      $or: [
+        { email: searchRegex },
+        { "fleetProfile.companyName": searchRegex },
+      ],
+    }).distinct("_id");
+    const searchOr = [
+      { invoiceNo: searchRegex },
+      { "billedToSnapshot.companyName": searchRegex },
+      ...(matchingFleetIds.length ? [{ fleet: { $in: matchingFleetIds } }] : []),
+    ];
+    if (invoiceFilter.fleet) {
+      invoiceFilter.$and = [{ fleet: invoiceFilter.fleet }, { $or: searchOr }];
+      delete invoiceFilter.fleet;
+    } else {
+      invoiceFilter.$or = searchOr;
+    }
   }
 
   const [invoices, total, summaryAgg] = await Promise.all([
@@ -1589,16 +2203,36 @@ export const getAdminFinancialOverview = async (query = {}) => {
       .limit(limit)
       .populate("fleet", "email fleetProfile.companyName")
       .populate("job", "title jobCode")
+      .populate("mechanic", "email mechanicProfile.displayName")
       .lean(),
     Invoice.countDocuments(invoiceFilter),
     Invoice.aggregate([
       {
         $group: {
           _id: null,
-          totalRevenue: { $sum: "$totalAmount" },
+          totalRevenue: {
+            $sum: {
+              $cond: [{ $eq: ["$status", "PAID"] }, "$totalAmount", 0],
+            },
+          },
+          paidSubtotal: {
+            $sum: {
+              $cond: [{ $eq: ["$status", "PAID"] }, "$subtotal", 0],
+            },
+          },
           pendingPayments: {
             $sum: {
               $cond: [{ $eq: ["$status", "ISSUED"] }, "$totalAmount", 0],
+            },
+          },
+          heldPayments: {
+            $sum: {
+              $cond: [{ $eq: ["$status", "AUTHORIZED"] }, "$totalAmount", 0],
+            },
+          },
+          failedPayments: {
+            $sum: {
+              $cond: [{ $eq: ["$status", "FAILED"] }, "$totalAmount", 0],
             },
           },
           overdueAmount: {
@@ -1626,24 +2260,56 @@ export const getAdminFinancialOverview = async (query = {}) => {
     ]),
   ]);
 
+  const paidSubtotal = summaryAgg[0]?.paidSubtotal || 0;
+  const platformCommission = companyEarningsPlatformFee(paidSubtotal);
+
   return {
     cards: {
       totalRevenue: summaryAgg[0]?.totalRevenue || 0,
+      platformCommission,
       pendingPayments: summaryAgg[0]?.pendingPayments || 0,
+      heldPayments: summaryAgg[0]?.heldPayments || 0,
+      failedPayments: summaryAgg[0]?.failedPayments || 0,
       overdueAmount: summaryAgg[0]?.overdueAmount || 0,
       totalInvoices: summaryAgg[0]?.totalInvoices || 0,
+      platformFeePercent: PLATFORM_FEE_PERCENT,
     },
-    items: invoices.map((invoice) => ({
-      _id: invoice._id,
-      invoiceNo: invoice.invoiceNo,
-      company: invoice.fleet?.fleetProfile?.companyName || invoice.fleet?.email || null,
-      service: invoice.job?.title || invoice.job?.jobCode || null,
-      amount: invoice.totalAmount,
-      currency: invoice.currency,
-      paymentMethod: "Stored Method",
-      status: invoice.status === "PAID" ? "PAID" : invoice.status === "ISSUED" ? "PENDING" : invoice.status,
-      date: invoice.paidAt || invoice.issuedAt,
-    })),
+    items: invoices.map((invoice) => {
+      const subtotal = Number(invoice.subtotal) || 0;
+      const platformFee = companyEarningsPlatformFee(subtotal);
+      const mechanicPayout = companyEarningsNet(subtotal);
+      const mechanicName =
+        invoice.mechanic?.mechanicProfile?.displayName ||
+        invoice.mechanicSnapshot?.displayName ||
+        invoice.mechanic?.email ||
+        null;
+      const displayStatus =
+        invoice.status === "PAID"
+          ? "PAID"
+          : invoice.status === "ISSUED"
+            ? "PENDING"
+            : invoice.status === "AUTHORIZED"
+              ? "HELD"
+              : invoice.status;
+
+      return {
+        _id: invoice._id,
+        invoiceNo: invoice.invoiceNo,
+        company: invoice.fleet?.fleetProfile?.companyName || invoice.fleet?.email || null,
+        service: invoice.job?.title || invoice.job?.jobCode || null,
+        jobCode: invoice.job?.jobCode || null,
+        mechanic: mechanicName,
+        amount: invoice.totalAmount,
+        subtotal,
+        platformFee,
+        mechanicPayout,
+        currency: invoice.currency,
+        stripeRef: invoice.payment?.stripePaymentIntentId || null,
+        paymentMethod: invoice.payment?.provider || null,
+        status: displayStatus,
+        date: invoice.paidAt || invoice.issuedAt,
+      };
+    }),
     meta: {
       page,
       limit,
@@ -1803,7 +2469,13 @@ export const createAdminFinancialInvoice = async (payload = {}, adminUser) => {
 
 export const exportAdminFinancialOverview = async (query = {}) => {
   const format = `${query.format || "CSV"}`.trim().toUpperCase();
-  const overview = await getAdminFinancialOverview(query);
+  // Export all matching rows (capped), not just the current UI page
+  const overview = await getAdminFinancialOverview({
+    ...query,
+    page: 1,
+    limit: 5000,
+    exportAll: true,
+  });
   return {
     format,
     generatedAt: new Date(),
@@ -1811,7 +2483,7 @@ export const exportAdminFinancialOverview = async (query = {}) => {
       status: query.status || null,
       search: query.search || null,
     },
-    summary: overview.summary,
+    cards: overview.cards,
     count: overview.items.length,
     items: overview.items,
     downloadUrl: null,

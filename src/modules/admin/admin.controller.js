@@ -281,14 +281,29 @@ export const exportAdminFinancialController = async (req, res) => {
     };
 
     const rows = [
-      ["Invoice No", "Company", "Service", "Amount", "Currency", "Payment Method", "Status", "Date"],
+      [
+        "Invoice No",
+        "Company",
+        "Mechanic",
+        "Service",
+        "Amount",
+        "Platform Fee",
+        "Mechanic Payout",
+        "Currency",
+        "Stripe Ref",
+        "Status",
+        "Date",
+      ],
       ...(result.items || []).map((item) => [
         item.invoiceNo,
         item.company,
+        item.mechanic,
         item.service,
         item.amount,
+        item.platformFee,
+        item.mechanicPayout,
         item.currency,
-        item.paymentMethod,
+        item.stripeRef,
         item.status,
         item.date,
       ]),
