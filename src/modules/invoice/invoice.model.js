@@ -24,6 +24,8 @@ const invoiceSchema = new Schema(
     vatApplied: { type: Boolean, default: false },
     totalAmount: { type: Number, required: true, min: 0 },
     currency: { type: String, trim: true, default: "GBP" },
+    /** Snapshot of platform fee % at invoice creation (e.g. 12). */
+    platformFeePercent: { type: Number, min: 0, max: 100 },
     status: {
       type: String,
       enum: ["DRAFT", "ISSUED", "AUTHORIZED", "PAID", "FAILED", "REFUNDED", "VOID"],

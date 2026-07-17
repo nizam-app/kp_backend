@@ -19,6 +19,8 @@ import {
   sendPasswordResetEmail,
 } from "../email/email.service.js";
 import { notifyCompanyInviteResolved } from "../notification/jobQuoteNotification.service.js";
+import { notifyAdminsSafely } from "../notification/adminNotification.service.js";
+import { ADMIN_NOTIFICATION_EVENTS } from "../notification/adminNotificationEvents.js";
 import { env } from "../../config/env.js";
 const sanitizeUser = (userDoc) => userDoc.toObject();
 const hashToken = (token) =>
@@ -245,6 +247,19 @@ export const registerUser = async (payload = {}) => {
     } catch {
       /* non-blocking */
     }
+  }
+
+  if (role === ROLES.MECHANIC) {
+    await notifyAdminsSafely({
+      eventKey: ADMIN_NOTIFICATION_EVENTS.MECHANIC_REGISTERED,
+      dedupeKey: `mechanic-registered:${user._id}`,
+      title: "New mechanic registration",
+      body: `${user.mechanicProfile?.displayName || user.email} registered and is pending review.`,
+      data: {
+        userId: user._id.toString(),
+        screen: "ADMIN_MECHANIC_REVIEW",
+      },
+    });
   }
 
   const { accessToken, refreshToken } = await issueAuthTokens(user);

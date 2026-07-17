@@ -14,6 +14,8 @@ const earningTransactionSchema = new Schema(
     },
     grossAmount: { type: Number, required: true, min: 0 },
     platformFee: { type: Number, default: 0, min: 0 },
+    /** Snapshot of platform fee % when the earning was created (e.g. 12). */
+    platformFeePercent: { type: Number, min: 0, max: 100 },
     netAmount: { type: Number, required: true, min: 0 },
     currency: { type: String, trim: true, default: "GBP" },
     paidAt: { type: Date, default: Date.now, index: true },

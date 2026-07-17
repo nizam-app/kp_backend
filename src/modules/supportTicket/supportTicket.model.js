@@ -47,8 +47,9 @@ const supportTicketSchema = new Schema(
   { timestamps: true }
 );
 
-supportTicketSchema.index({ user: 1, createdAt: -1 });
-supportTicketSchema.index({ status: 1, createdAt: -1 });
+supportTicketSchema.index({ updatedAt: -1, createdAt: -1 });
+supportTicketSchema.index({ user: 1, updatedAt: -1, createdAt: -1 });
+supportTicketSchema.index({ status: 1, updatedAt: -1, createdAt: -1 });
 
 export const SUPPORT_TICKET_CATEGORIES = SUPPORT_CATEGORIES;
 export const SUPPORT_TICKET_STATUSES = SUPPORT_STATUSES;

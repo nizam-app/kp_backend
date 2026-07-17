@@ -260,7 +260,7 @@ export const listSupportTickets = async (user, query = {}) => {
 
   const [rawItems, total] = await Promise.all([
     SupportTicket.find(filter)
-      .sort({ createdAt: -1 })
+      .sort({ updatedAt: -1, createdAt: -1 })
       .skip(skip)
       .limit(limit)
       .lean(),
@@ -303,9 +303,12 @@ export const updateSupportTicket = async (user, ticketId, payload = {}) => {
     if (["RESOLVED", "CLOSED"].includes(nextStatus)) {
       ticket.resolvedAt = ticket.resolvedAt || new Date();
     }
-    if (nextStatus === "OPEN") {
+    // Reopening (OPEN or IN_PROGRESS) clears the resolved timestamp
+    if (["OPEN", "IN_PROGRESS"].includes(nextStatus)) {
       ticket.resolvedAt = undefined;
-      if (!isAdmin) ticket.resolution = undefined;
+    }
+    if (nextStatus === "OPEN" && !isAdmin) {
+      ticket.resolution = undefined;
     }
   }
 
@@ -370,6 +373,27 @@ export const addSupportTicketReply = async (user, ticketId, payload = {}) => {
     throw new AppError("Only admins can create internal replies", 403);
   }
 
+  // Resolved/closed tickets are read-only for customers; admins may only
+  // add internal notes unless the reply also reopens the ticket.
+  const isFinalized = ["RESOLVED", "CLOSED"].includes(ticket.status);
+  if (isFinalized) {
+    const reopeningStatus = ["OPEN", "IN_PROGRESS"].includes(
+      `${payload.status || ""}`.trim().toUpperCase()
+    );
+    if (!isAdmin) {
+      throw new AppError(
+        "This ticket is closed. Open a new ticket if you need more help.",
+        400
+      );
+    }
+    if (!internal && !reopeningStatus) {
+      throw new AppError(
+        "Ticket is resolved/closed — reopen it to reply to the customer, or save an internal note.",
+        400
+      );
+    }
+  }
+
   ticket.replies.push({
     sender: user._id,
     role: user.role,
@@ -403,7 +427,7 @@ export const addSupportTicketReply = async (user, ticketId, payload = {}) => {
   if (["RESOLVED", "CLOSED"].includes(ticket.status) && !ticket.resolvedAt) {
     ticket.resolvedAt = new Date();
   }
-  if (ticket.status === "OPEN") {
+  if (["OPEN", "IN_PROGRESS"].includes(ticket.status)) {
     ticket.resolvedAt = undefined;
   }
 
@@ -415,7 +439,9 @@ export const addSupportTicketReply = async (user, ticketId, payload = {}) => {
 
   const refLabel = ticket.ticketRef || ticket._id.toString().slice(-6);
 
-  if (isAdmin) {
+  if (isAdmin && internal) {
+    // Internal notes must never reach the customer.
+  } else if (isAdmin) {
     await notifyUsers([ticket.user], {
       type: "SUPPORT_TICKET_REPLY",
       title: `Support replied on ${refLabel}`,

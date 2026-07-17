@@ -17,6 +17,39 @@ const getResend = () => {
   return resendClient;
 };
 
+const escapeHtml = (value) =>
+  `${value || ""}`
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+
+export const sendAdminAlertEmail = async ({ to, subject, title, body }) => {
+  const resend = getResend();
+  if (!resend) return { sent: false, reason: "email_not_configured" };
+  if (!to) return { sent: false, reason: "missing_recipient" };
+
+  const safeTitle = escapeHtml(title || subject || "TruckFix admin alert");
+  const safeBody = escapeHtml(body).replace(/\n/g, "<br/>");
+  const { error } = await resend.emails.send({
+    from: env.EMAIL_FROM,
+    to: [to],
+    subject: subject || title || "TruckFix admin alert",
+    text: `${title || subject || "TruckFix admin alert"}\n\n${body || ""}`,
+    html: `
+      <div style="font-family:system-ui,sans-serif;max-width:560px;">
+        <h2>${safeTitle}</h2>
+        <p>${safeBody}</p>
+        <p style="margin-top:24px;color:#999;font-size:12px;">TruckFix Admin</p>
+      </div>
+    `,
+  });
+
+  if (error) throw new Error(error.message || "Resend send failed");
+  return { sent: true };
+};
+
 /** Web / deep-link URL where the client reads `token` and calls POST /auth/reset-password */
 export const buildPasswordResetUrl = (resetToken) => {
   const base = (env.PASSWORD_RESET_URL || env.APP_PUBLIC_URL || "").trim().replace(

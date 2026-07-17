@@ -20,6 +20,7 @@ import {
   countCompanyFeedJobsPostedSince,
 } from "../job/job.service.js";
 import { companyEarningsBreakdown } from "../../utils/companyEarningsMath.js";
+import { computePlatformFeeNet } from "../../utils/platformFee.js";
 import { readMechanicProfileRatingAverage, resolveMechanicRatingForInvoiceContext } from "../../utils/mechanicRating.js";
 import { listOwnerQuotesPaginated, countOwnerQuotesByStatus } from "../quote/quote.service.js";
 import { env } from "../../config/env.js";
@@ -2126,7 +2127,7 @@ export const getCompanyEarningsSummary = async (companyUser) => {
           },
         ]);
         const grossAmount = agg[0]?.gross || 0;
-        const netAmount = Math.max(Math.round(grossAmount * 0.88 * 100) / 100, 0);
+        const { netAmount, platformFeePercent } = computePlatformFeeNet(grossAmount);
         const isCurrentMonth = b.monthIndex === now.getMonth() && b.year === now.getFullYear();
         return {
           label: b.label,
@@ -2134,7 +2135,7 @@ export const getCompanyEarningsSummary = async (companyUser) => {
           month: b.monthIndex + 1,
           grossAmount,
           netAmount,
-          platformFeeRate: 0.12,
+          platformFeeRate: platformFeePercent / 100,
           isCurrentMonth,
         };
       })
@@ -2151,9 +2152,9 @@ export const getCompanyEarningsSummary = async (companyUser) => {
   const monthGross = monthAgg[0]?.gross || 0;
   const monthCompletedJobs = monthAgg[0]?.count || 0;
   const allTimeGross = allTimeAgg[0]?.gross || 0;
-  const monthNet = Math.max(Math.round(monthGross * 0.88 * 100) / 100, 0);
-  const monthPlatformFee = Math.max(Math.round((monthGross - monthNet) * 100) / 100, 0);
-  const allTimeNet = Math.max(Math.round(allTimeGross * 0.88 * 100) / 100, 0);
+  const monthNet = computePlatformFeeNet(monthGross).netAmount;
+  const monthPlatformFee = computePlatformFeeNet(monthGross).platformFee;
+  const allTimeNet = computePlatformFeeNet(allTimeGross).netAmount;
 
   const monthShort = now.toLocaleString("en-GB", { month: "short" });
   const monthKeyUpper = monthShort.toUpperCase();

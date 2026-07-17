@@ -4,6 +4,10 @@ import { Invoice } from "../invoice/invoice.model.js";
 import { Job } from "../job/job.model.js";
 import { User } from "../user/user.model.js";
 import { Review } from "../review/review.model.js";
+import {
+  computePlatformFeeNet,
+  getPlatformFeePercent,
+} from "../../utils/platformFee.js";
 
 const parsePage = (value) => {
   const n = Number(value);
@@ -115,10 +119,13 @@ const resolveEarningGrossFromSources = (tx, invoice = null, job = null) => {
 };
 
 const computeEarningFeeNet = (gross) => {
-  const g = roundMoney(gross);
-  const platformFee = roundMoney(g * 0.12);
-  const netAmount = Math.max(roundMoney(g - platformFee), 0);
-  return { grossAmount: g, platformFee, netAmount };
+  const breakdown = computePlatformFeeNet(gross);
+  return {
+    grossAmount: breakdown.grossAmount,
+    platformFee: breakdown.platformFee,
+    netAmount: breakdown.netAmount,
+    platformFeePercent: breakdown.platformFeePercent,
+  };
 };
 
 /** Persist invoice-aligned amounts for this mechanic before aggregates / lists. */
@@ -147,7 +154,7 @@ const reconcileMechanicEarningsWithInvoices = async (mechanicId) => {
     const inv = invByJob.get(String(tx.job));
     const job = jobById.get(String(tx.job));
     const gross = resolveEarningGrossFromSources(tx, inv, job);
-    const { grossAmount, platformFee, netAmount } = computeEarningFeeNet(gross);
+    const { grossAmount, platformFee, netAmount, platformFeePercent } = computeEarningFeeNet(gross);
     if (
       Math.abs(Number(tx.grossAmount) - grossAmount) > 0.02 ||
       Math.abs(Number(tx.netAmount) - netAmount) > 0.02
@@ -155,7 +162,7 @@ const reconcileMechanicEarningsWithInvoices = async (mechanicId) => {
       ops.push({
         updateOne: {
           filter: { _id: tx._id },
-          update: { $set: { grossAmount, platformFee, netAmount } },
+          update: { $set: { grossAmount, platformFee, platformFeePercent, netAmount } },
         },
       });
     }
@@ -272,7 +279,7 @@ export const getEarningsSummary = async (user) => {
 
   return {
     meta: {
-      platformFeePercent: 12,
+      platformFeePercent: getPlatformFeePercent(),
       currency,
       monthlyChartFootnote: "12% platform fee already deducted from net figures.",
     },
@@ -309,7 +316,7 @@ export const getEarningsSummary = async (user) => {
           : "Net since you started",
       },
       /** Convenience for UIs that label “before / after fee” like the mechanic earnings screen. */
-      platformFeePercent: 12,
+      platformFeePercent: getPlatformFeePercent(),
     },
     monthlyNetSeries,
   };
@@ -445,7 +452,7 @@ export const listEarningJobs = async (user, query = {}) => {
         grossAmount: gross,
         platformFee: fee,
         netAmount: net,
-        platformFeePercent: 12,
+        platformFeePercent: getPlatformFeePercent(),
         currency: cur,
         paidAt,
         notes: item.notes || null,
@@ -497,7 +504,7 @@ export const listEarningJobs = async (user, query = {}) => {
           netLabel: moneyLabel(net, cur),
           breakdown: {
             grossAmount: gross,
-            platformFeePercent: 12,
+            platformFeePercent: getPlatformFeePercent(),
             platformFeeAmount: fee,
             netAmount: net,
             currency: cur,
@@ -535,7 +542,7 @@ export const getPayoutInfo = async (user) => {
   const mp = fresh?.mechanicProfile || {};
 
   return {
-    platformFeePercent: 12,
+    platformFeePercent: getPlatformFeePercent(),
     currency: "GBP",
     stripe: {
       connectAccountId: mp.stripeConnectAccountId || null,
@@ -609,7 +616,7 @@ export const getEarningsStatement = async (user, query = {}) => {
       end,
     },
     meta: {
-      platformFeePercent: 12,
+      platformFeePercent: getPlatformFeePercent(),
       currency: cur,
     },
     currency: cur,
@@ -644,7 +651,7 @@ export const getEarningsStatement = async (user, query = {}) => {
         grossAmount: gross,
         platformFee: fee,
         netAmount: net,
-        platformFeePercent: 12,
+        platformFeePercent: getPlatformFeePercent(),
         currency: t.currency || cur,
         review: serializeEarningReview(rev),
         invoice: serializeInvoiceForEarnings(inv, t.currency || cur),

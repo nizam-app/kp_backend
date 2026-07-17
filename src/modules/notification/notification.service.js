@@ -25,6 +25,7 @@ const serializeNotification = (notification) => {
   return {
     _id: notification._id,
     type: notification.type,
+    eventKey: notification.eventKey || null,
     title: notification.title,
     body: notification.body,
     data,
@@ -48,7 +49,9 @@ const serializeDeviceToken = (token) => ({
 
 export const createNotification = async (payload = {}) => {
   const notification = await Notification.create(payload);
-  emitNotificationCreated(notification);
+  if (notification.channels?.inApp !== false) {
+    emitNotificationCreated(notification);
+  }
   sendPushForPersistedNotification(notification).catch((err) => {
     console.error("[push] sendPushForPersistedNotification:", err?.message || err);
   });
@@ -60,8 +63,22 @@ export const listNotifications = async (user, query = {}) => {
   const limit = parseLimit(query.limit);
   const skip = (page - 1) * limit;
 
-  const filter = { user: user._id };
+  const filter = {
+    user: user._id,
+    "channels.inApp": { $ne: false },
+  };
   if (`${query.unreadOnly}` === "true") filter.isRead = false;
+
+  const category = `${query.category || ""}`.trim().toLowerCase();
+  if (category === "support") {
+    filter.type = /SUPPORT/i;
+  } else if (category === "jobs") {
+    filter.type = /JOB_|QUOTE_/i;
+  } else if (category === "messages") {
+    filter.type = /CHAT_/i;
+  } else if (category === "other") {
+    filter.type = { $not: /SUPPORT|JOB_|QUOTE_|CHAT_/i };
+  }
 
   const [items, total, unreadCount] = await Promise.all([
     Notification.find(filter)
@@ -70,7 +87,11 @@ export const listNotifications = async (user, query = {}) => {
       .limit(limit)
       .lean(),
     Notification.countDocuments(filter),
-    Notification.countDocuments({ user: user._id, isRead: false }),
+    Notification.countDocuments({
+      user: user._id,
+      isRead: false,
+      "channels.inApp": { $ne: false },
+    }),
   ]);
 
   return {

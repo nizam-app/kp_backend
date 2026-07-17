@@ -16,7 +16,7 @@ import {
   deleteAdminServiceRequestController,sendAdminServiceRequestMessageController,
   resetAdminUserPasswordController,sendAdminUserMessageController,
   markAdminNotificationReadController,markAllAdminNotificationsReadController,removeAdminNotificationController,
-  exportAdminFinancialController,exportAdminReportsController,
+  exportAdminFinancialController,exportAdminReportsController,exportAdminAuditLogsController,
   updateAdminPromotionController,updateAdminReviewController,updateAdminServiceCatalogController,updateAdminDisputeController,
   updateAdminFleetController,
   updateAdminFleetVehicleController,
@@ -29,13 +29,37 @@ import {
   deleteAdminReviewController,
   uploadAdminProfilePhotoController,
 } from "./admin.controller.js";
+import {
+  installAdminAuditFallback,
+  runAdminAuditContext,
+} from "./admin.service.js";
+import {
+  createAdminJobCategoryController,
+  deleteAdminJobCategoryController,
+  listAdminJobCategoriesController,
+  updateAdminJobCategoryController,
+} from "../jobCategory/jobCategory.controller.js";
+import {
+  gdprEraseUserDataController,
+  gdprExportUserDataController,
+  gdprRetentionPolicyController,
+} from "../gdpr/gdpr.controller.js";
 
 const router = Router();
 
 router.use(catchAsync(protect));
 router.use(catchAsync(requireActive));
 router.use(catchAsync(authorize(ROLES.ADMIN)));
-
+router.use((req, res, next) => {
+  const forwarded = req.headers["x-forwarded-for"];
+  const ip =
+    (typeof forwarded === "string" && forwarded.split(",")[0].trim()) ||
+    req.ip ||
+    req.socket?.remoteAddress ||
+    null;
+  runAdminAuditContext({ ipAddress: ip, auditWritten: false }, next);
+});
+router.use(installAdminAuditFallback);
 router.get("/dashboard", catchAsync(adminDashboardController));
 router.get("/service-requests", catchAsync(adminServiceRequestsController));
 router.get("/service-requests/:jobId", catchAsync(adminServiceRequestByIdController));
@@ -64,6 +88,10 @@ router.get("/live-tracking", catchAsync(adminLiveTrackingController));
 router.get("/reports", catchAsync(adminReportsController));
 router.get("/reports/export", catchAsync(exportAdminReportsController));
 router.get("/audit-log", catchAsync(adminAuditLogsController));
+router.get("/audit-log/export", catchAsync(exportAdminAuditLogsController));
+router.get("/gdpr/retention-policy", catchAsync(gdprRetentionPolicyController));
+router.get("/gdpr/users/:userId/export", catchAsync(gdprExportUserDataController));
+router.post("/gdpr/users/:userId/erase", catchAsync(gdprEraseUserDataController));
 router.get("/settings", catchAsync(adminSettingsController));
 router.post(
   "/settings/profile-photo",
@@ -87,6 +115,16 @@ router.post("/service-catalog", catchAsync(createAdminServiceCatalogController))
 router.patch(
   "/service-catalog/:serviceId",
   catchAsync(updateAdminServiceCatalogController)
+);
+router.get("/job-categories", catchAsync(listAdminJobCategoriesController));
+router.post("/job-categories", catchAsync(createAdminJobCategoryController));
+router.patch(
+  "/job-categories/:categoryId",
+  catchAsync(updateAdminJobCategoryController)
+);
+router.delete(
+  "/job-categories/:categoryId",
+  catchAsync(deleteAdminJobCategoryController)
 );
 router.get("/promotions", catchAsync(adminPromotionsController));
 router.post("/promotions", catchAsync(createAdminPromotionController));

@@ -1,7 +1,12 @@
 /**
- * Single source of truth for company “earnings” (12% platform fee on job bill).
- * Used by company earnings list/summary and company-facing invoice breakdowns.
+ * Company “earnings” helpers — platform fee on job bill (ex-VAT gross).
+ * Fee percent comes from PlatformSettings cache (default 12%).
  */
+import {
+  computePlatformFee,
+  computePlatformFeeNet,
+  getPlatformFeePercent,
+} from "./platformFee.js";
 
 export const companyEarningsGross = (job, invoice = null) => {
   const fromJob = Number(job?.finalAmount ?? job?.acceptedAmount ?? job?.estimatedPayout ?? 0);
@@ -11,24 +16,21 @@ export const companyEarningsGross = (job, invoice = null) => {
   return 0;
 };
 
-export const companyEarningsPlatformFee = (gross) =>
-  Math.round(Math.max(Number(gross) || 0, 0) * 0.12 * 100) / 100;
+export const companyEarningsPlatformFee = (gross) => computePlatformFee(gross);
 
 export const companyEarningsNet = (gross) => {
-  const g = Math.max(Number(gross) || 0, 0);
-  const fee = companyEarningsPlatformFee(g);
-  return Math.max(Math.round((g - fee) * 100) / 100, 0);
+  const { netAmount } = computePlatformFeeNet(gross);
+  return netAmount;
 };
 
 export const companyEarningsBreakdown = (job, invoice = null) => {
   const grossAmount = companyEarningsGross(job, invoice);
-  const platformFeeAmount = companyEarningsPlatformFee(grossAmount);
-  const netAmount = companyEarningsNet(grossAmount);
+  const breakdown = computePlatformFeeNet(grossAmount);
   return {
-    platformFeePercent: 12,
-    grossAmount,
-    platformFeeAmount,
-    netAmount,
+    platformFeePercent: breakdown.platformFeePercent || getPlatformFeePercent(),
+    grossAmount: breakdown.grossAmount,
+    platformFeeAmount: breakdown.platformFee,
+    netAmount: breakdown.netAmount,
     currency: job?.currency || invoice?.currency || "GBP",
   };
 };

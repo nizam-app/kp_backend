@@ -1,3 +1,5 @@
+import { getStandardVatRate } from "./platformFee.js";
+
 export const UK_STANDARD_VAT_RATE = 0.2;
 
 const roundMoney = (value) => Math.round((Number(value) || 0) * 100) / 100;
@@ -25,6 +27,7 @@ const supplierProfileForJob = (job) => {
 export const resolveJobVatPolicy = (job) => {
   const supplier = supplierProfileForJob(job);
   const vatRegistered = supplier.profile.vatRegistered === true;
+  const rate = getStandardVatRate() || UK_STANDARD_VAT_RATE;
 
   return {
     supplierType: supplier.type,
@@ -37,7 +40,7 @@ export const resolveJobVatPolicy = (job) => {
       null,
     vatRegistered,
     vatNumber: vatRegistered ? supplier.profile.vatNumber || null : null,
-    vatRate: vatRegistered ? UK_STANDARD_VAT_RATE : 0,
+    vatRate: vatRegistered ? rate : 0,
   };
 };
 

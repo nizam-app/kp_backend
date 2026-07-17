@@ -4,6 +4,8 @@ import { Job } from "../job/job.model.js";
 import { Invoice } from "../invoice/invoice.model.js";
 import { ROLES } from "../../constants/domain.js";
 import { createNotification } from "../notification/notification.service.js";
+import { notifyAdminsSafely } from "../notification/adminNotification.service.js";
+import { ADMIN_NOTIFICATION_EVENTS } from "../notification/adminNotificationEvents.js";
 
 const parsePage = (value) => {
   const n = Number(value);
@@ -134,6 +136,19 @@ export const createFleetDispute = async (fleetUser, payload = {}) => {
       },
     });
   }
+
+  await notifyAdminsSafely({
+    eventKey: ADMIN_NOTIFICATION_EVENTS.DISPUTE_OPENED,
+    dedupeKey: `dispute-opened:${dispute._id}`,
+    title: `New dispute: ${title}`,
+    body: `${dispute.customerName || fleetUser.email} opened a ${dispute.priority.toLowerCase()} priority dispute.`,
+    data: {
+      disputeId: dispute._id.toString(),
+      jobId: job?._id?.toString?.() || null,
+      invoiceId: invoice?._id?.toString?.() || null,
+      screen: "ADMIN_DISPUTE",
+    },
+  });
 
   const populated = await Dispute.findById(dispute._id)
     .populate("company", "fleetProfile.companyName")

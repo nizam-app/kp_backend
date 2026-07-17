@@ -524,8 +524,42 @@ export const adminAuditLogsController = async (req, res) => {
   const result = await listAdminAuditLogs(req.query);
   return sendResponse(res, {
     message: "Admin audit logs fetched",
-    data: result,
+    data: { items: result.items, stats: result.stats },
+    meta: result.meta,
   });
+};
+
+export const exportAdminAuditLogsController = async (req, res) => {
+  const result = await listAdminAuditLogs({
+    ...req.query,
+    page: 1,
+    limit: Math.min(Number(req.query.limit) || 1000, 2000),
+  });
+
+  const escapeCsv = (value) => {
+    if (value === null || value === undefined) return "";
+    const raw = String(value);
+    if (/[",\n\r]/.test(raw)) return `"${raw.replace(/"/g, '""')}"`;
+    return raw;
+  };
+
+  const rows = [
+    ["When", "Admin", "Action", "Target", "Category", "IP"],
+    ...(result.items || []).map((item) => [
+      item.createdAt ? new Date(item.createdAt).toISOString() : "",
+      item.userLabel || "",
+      item.action || "",
+      item.target || "",
+      item.category || "",
+      item.ipAddress || "",
+    ]),
+  ];
+
+  const csv = rows.map((row) => row.map(escapeCsv).join(",")).join("\n");
+  const filename = `admin-audit-log-${new Date().toISOString().slice(0, 10)}.csv`;
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+  return res.status(200).send(csv);
 };
 
 export const adminReportsController = async (req, res) => {
@@ -552,44 +586,67 @@ export const exportAdminReportsController = async (req, res) => {
     const report = result.report || {};
     const rows = [];
     rows.push(["Report Type", report.reportType || ""]);
+    rows.push(["Period", report.period || ""]);
+    rows.push(["Platform Fee %", report.platformFeePercent ?? ""]);
     rows.push(["Generated At", new Date(result.generatedAt).toISOString()]);
     rows.push([]);
 
     // Summary
     rows.push(["Summary"]);
     rows.push(["Total Revenue", report.summary?.totalRevenue ?? 0]);
+    rows.push(["Total Commission", report.summary?.totalCommission ?? 0]);
     rows.push(["Total Services", report.summary?.totalServices ?? 0]);
     rows.push(["Active Companies", report.summary?.activeCompanies ?? 0]);
     rows.push(["Avg Service Value", report.summary?.avgServiceValue ?? 0]);
+    rows.push([
+      "Revenue Delta %",
+      report.summary?.trends?.revenue?.deltaPct ?? "",
+    ]);
+    rows.push([
+      "Commission Delta %",
+      report.summary?.trends?.commission?.deltaPct ?? "",
+    ]);
+    rows.push([
+      "Services Delta %",
+      report.summary?.trends?.services?.deltaPct ?? "",
+    ]);
     rows.push([]);
 
     // Monthly trend
     rows.push(["Monthly Revenue Trend"]);
-    rows.push(["Month", "Revenue", "Services"]);
+    rows.push(["Month", "Revenue", "Commission", "Services"]);
     for (const item of report.monthlyRevenueTrend || []) {
-      rows.push([item.month, item.revenue, item.services]);
+      rows.push([item.month, item.revenue, item.commission ?? 0, item.services]);
     }
     rows.push([]);
 
-    // Top services
-    rows.push(["Top Services"]);
-    rows.push(["Service", "Count", "Revenue"]);
-    for (const item of report.topServices || []) {
-      rows.push([item.name, item.count, item.revenue]);
+    // Jobs by area
+    rows.push(["Jobs by Area"]);
+    rows.push(["Area", "Jobs"]);
+    for (const item of report.jobsByArea || []) {
+      rows.push([item.area, item.jobs]);
+    }
+    rows.push([]);
+
+    // Breakdown types
+    rows.push(["Breakdown Types"]);
+    rows.push(["Type", "Count", "Percent"]);
+    for (const item of report.breakdownTypes || report.topServices || []) {
+      rows.push([item.name, item.count, item.percent ?? ""]);
     }
     rows.push([]);
 
     // Top companies
     rows.push(["Top Companies"]);
-    rows.push(["Company", "Services", "Revenue"]);
+    rows.push(["Company", "Services", "Revenue", "Vehicles"]);
     for (const item of report.topCompanies || []) {
-      rows.push([item.companyName, item.services, item.revenue]);
+      rows.push([item.companyName, item.services, item.revenue, item.vehicles ?? 0]);
     }
     rows.push([]);
 
     // Mechanic performance
     rows.push(["Mechanic Performance"]);
-    rows.push(["Mechanic", "Services", "Rating", "Revenue"]);
+    rows.push(["Mechanic", "Services", "Rating", "Net Earnings"]);
     for (const item of report.mechanicPerformance || []) {
       rows.push([item.mechanicName, item.services, item.rating, item.revenue]);
     }

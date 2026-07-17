@@ -1,4 +1,5 @@
 import AppError from "../../utils/AppError.js";
+import { AsyncLocalStorage } from "async_hooks";
 import {
   JOB_STATUS,
   MECHANIC_VERIFICATION_STATUS,
@@ -29,8 +30,17 @@ import {
   companyEarningsNet,
   companyEarningsPlatformFee,
 } from "../../utils/companyEarningsMath.js";
-
-const PLATFORM_FEE_PERCENT = 12;
+import {
+  serializePlatformCommercial,
+  updatePlatformCommercialSettings,
+  getPlatformFeePercent,
+} from "../../utils/platformFee.js";
+import { env } from "../../config/env.js";
+import {
+  ADMIN_NOTIFICATION_EVENTS,
+  normalizeAdminNotificationPreferences,
+} from "../notification/adminNotificationEvents.js";
+import { deriveAdminAuditDescriptor } from "./adminAudit.util.js";
 
 const relativeTimeLabel = (dateValue) => {
   if (!dateValue) return null;
@@ -95,16 +105,8 @@ const parseRoleFilter = (value) => `${value || ""}`.trim().toUpperCase();
 const parsePriority = (value) => `${value || ""}`.trim().toUpperCase();
 const parseStatus = (value) => `${value || ""}`.trim().toUpperCase();
 
-const supportPriorityFromTicket = (ticket) => {
-  const text = `${ticket.subject || ""} ${ticket.message || ""}`.toLowerCase();
-  if (text.includes("urgent") || text.includes("payment") || text.includes("invoice")) {
-    return "HIGH";
-  }
-  if (text.includes("cannot") || text.includes("issue") || text.includes("problem")) {
-    return "MEDIUM";
-  }
-  return "LOW";
-};
+const SUPPORT_USER_POPULATE =
+  "email role fleetProfile.companyName mechanicProfile.displayName companyProfile.companyName";
 
 const supportStatusTone = (status) => {
   const map = {
@@ -130,17 +132,50 @@ const parseLimit = (value) => {
 const getAdminActorLabel = (adminUser) =>
   adminUser?.adminProfile?.fullName || adminUser?.email || "Admin";
 
-const writeAuditLog = async (adminUser, action, target, category) => {
+/** Request-scoped audit metadata (IP) for admin mutation logging. */
+export const adminAuditContext = new AsyncLocalStorage();
+
+export const runAdminAuditContext = (ctx, next) => adminAuditContext.run(ctx, next);
+
+export const writeAuditLog = async (adminUser, action, target, category, ipAddress) => {
   try {
+    const store = adminAuditContext.getStore();
+    const storeIp = store?.ipAddress;
+    const ip = ipAddress || storeIp;
     await AuditLog.create({
       userLabel: getAdminActorLabel(adminUser),
       action,
       target,
       category,
+      ...(ip ? { ipAddress: `${ip}`.split(",")[0].trim() } : {}),
     });
+    if (store) store.auditWritten = true;
   } catch {
     // Audit logging should not block primary admin actions.
   }
+};
+
+export const installAdminAuditFallback = (req, res, next) => {
+  const context = adminAuditContext.getStore() || {};
+  res.once("finish", () => {
+    if (res.statusCode >= 400 || context.auditWritten) return;
+    const descriptor = deriveAdminAuditDescriptor({
+      method: req.method,
+      routePath: req.route?.path || req.path,
+      params: req.params,
+      body: req.body,
+    });
+    if (!descriptor) return;
+    context.auditWritten = true;
+    void writeAuditLog(
+      req.user,
+      descriptor.action,
+      descriptor.target,
+      descriptor.category,
+      context.ipAddress
+    );
+  });
+  next();
 };
 
 const normalizeRegistration = (value) => `${value || ""}`.trim().toUpperCase();
@@ -329,7 +364,12 @@ const serializeAdminUser = (user) => {
   const fp = user.fleetProfile || {};
   return {
     _id: user._id,
-    name: fp.companyName || cp.companyName || mp.displayName || user.email,
+    name:
+      fp.companyName ||
+      cp.companyName ||
+      mp.displayName ||
+      user.adminProfile?.fullName ||
+      user.email,
     email: user.email,
     phone: fp.phone || cp.phone || mp.phone || user.adminProfile?.phoneNumber || null,
     role: isFleet
@@ -433,7 +473,6 @@ const serializeFleetManagementItem = (fleet, vehicles = [], metrics = {}) => ({
 });
 
 const serializeSupportTicketForAdmin = (ticket) => {
-  const priority = supportPriorityFromTicket(ticket);
   const replies =
     ticket.replies?.map((reply) => ({
       _id: reply._id,
@@ -447,6 +486,7 @@ const serializeSupportTicketForAdmin = (ticket) => {
             email: reply.sender.email || null,
             displayName:
               reply.sender.fleetProfile?.companyName ||
+              reply.sender.companyProfile?.companyName ||
               reply.sender.mechanicProfile?.displayName ||
               reply.sender.adminProfile?.displayName ||
               null,
@@ -466,12 +506,15 @@ const serializeSupportTicketForAdmin = (ticket) => {
       label: ticket.status.replace(/_/g, " "),
       tone: supportStatusTone(ticket.status),
     },
-    priority,
     user: ticket.user
       ? {
           _id: ticket.user._id || ticket.user,
           email: ticket.user.email || null,
-          companyName: ticket.user.fleetProfile?.companyName || null,
+          role: ticket.user.role || null,
+          companyName:
+            ticket.user.fleetProfile?.companyName ||
+            ticket.user.companyProfile?.companyName ||
+            null,
           displayName: ticket.user.mechanicProfile?.displayName || null,
         }
       : null,
@@ -798,7 +841,7 @@ export const getAdminDashboard = async () => {
       gmvPaid,
       totalRevenue: gmvPaid,
       platformCommission,
-      platformFeePercent: PLATFORM_FEE_PERCENT,
+      platformFeePercent: getPlatformFeePercent(),
       activeUsers,
       activeUsersByRole,
       serviceRequests: serviceRequestsCount,
@@ -1292,6 +1335,7 @@ export const listAdminUsers = async (query = {}) => {
       { "companyProfile.contactName": searchRegex },
       { "mechanicProfile.displayName": searchRegex },
       { "mechanicProfile.businessName": searchRegex },
+      { "adminProfile.fullName": searchRegex },
       { "fleetProfile.phone": searchRegex },
       { "companyProfile.phone": searchRegex },
       { "mechanicProfile.phone": searchRegex },
@@ -2272,7 +2316,7 @@ export const getAdminFinancialOverview = async (query = {}) => {
       failedPayments: summaryAgg[0]?.failedPayments || 0,
       overdueAmount: summaryAgg[0]?.overdueAmount || 0,
       totalInvoices: summaryAgg[0]?.totalInvoices || 0,
-      platformFeePercent: PLATFORM_FEE_PERCENT,
+      platformFeePercent: getPlatformFeePercent(),
     },
     items: invoices.map((invoice) => {
       const subtotal = Number(invoice.subtotal) || 0;
@@ -2649,49 +2693,66 @@ export const listAdminSupportTickets = async (query = {}) => {
     filter.status = `${query.status}`.trim().toUpperCase();
   }
 
-  const priority = parsePriority(query.priority);
   const search = `${query.search || ""}`.trim();
-
-  const [tickets, total, allTickets] = await Promise.all([
-    SupportTicket.find(filter)
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit)
-      .populate("user", "email fleetProfile.companyName mechanicProfile.displayName")
-      .populate("assignedTo", "email")
-      .populate("replies.sender", "email role fleetProfile.companyName mechanicProfile.displayName adminProfile.displayName")
-      .lean(),
-    SupportTicket.countDocuments(filter),
-    SupportTicket.find({})
-      .populate("user", "email fleetProfile.companyName mechanicProfile.displayName")
-      .lean(),
-  ]);
-
-  let items = tickets;
   if (search) {
     const searchRegex = safeRegex(search);
-    items = items.filter(
-      (ticket) =>
-        searchRegex.test(ticket.subject) ||
-        searchRegex.test(ticket.message) ||
-        searchRegex.test(ticket.user?.email || "") ||
-        searchRegex.test(ticket.user?.fleetProfile?.companyName || "") ||
-        searchRegex.test(ticket.user?.mechanicProfile?.displayName || "")
-    );
-  }
-  if (priority) {
-    items = items.filter((ticket) => supportPriorityFromTicket(ticket) === priority);
+    const matchingUserIds = await User.find({
+      $or: [
+        { email: searchRegex },
+        { "fleetProfile.companyName": searchRegex },
+        { "mechanicProfile.displayName": searchRegex },
+        { "companyProfile.companyName": searchRegex },
+      ],
+    }).distinct("_id");
+    const searchOr = [
+      { subject: searchRegex },
+      { message: searchRegex },
+      { ticketRef: searchRegex },
+      ...(matchingUserIds.length ? [{ user: { $in: matchingUserIds } }] : []),
+    ];
+    if (filter.status) {
+      filter.$and = [{ status: filter.status }, { $or: searchOr }];
+      delete filter.status;
+    } else {
+      filter.$or = searchOr;
+    }
   }
 
-  items = await Promise.all(items.map((ticket) => reconcileSupportTicketIfNeeded(ticket)));
+  const [tickets, total, statusAgg] = await Promise.all([
+    SupportTicket.find(filter)
+      .sort({ updatedAt: -1, createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .populate("user", SUPPORT_USER_POPULATE)
+      .populate("assignedTo", "email")
+      .populate(
+        "replies.sender",
+        "email role fleetProfile.companyName companyProfile.companyName mechanicProfile.displayName adminProfile.displayName"
+      )
+      .lean(),
+    SupportTicket.countDocuments(filter),
+    SupportTicket.aggregate([
+      {
+        $group: {
+          _id: "$status",
+          count: { $sum: 1 },
+        },
+      },
+    ]),
+  ]);
+
+  const items = await Promise.all(
+    tickets.map((ticket) => reconcileSupportTicketIfNeeded(ticket))
+  );
+
+  const statusCounts = Object.fromEntries(
+    statusAgg.map((row) => [row._id, row.count])
+  );
 
   const stats = {
-    open: allTickets.filter((ticket) => ticket.status === "OPEN").length,
-    inProgress: allTickets.filter((ticket) => ticket.status === "IN_PROGRESS").length,
-    resolved: allTickets.filter((ticket) => ticket.status === "RESOLVED").length,
-    highPriority: allTickets.filter(
-      (ticket) => supportPriorityFromTicket(ticket) === "HIGH"
-    ).length,
+    open: statusCounts.OPEN || 0,
+    inProgress: statusCounts.IN_PROGRESS || 0,
+    resolved: statusCounts.RESOLVED || 0,
   };
 
   return {
@@ -2711,9 +2772,12 @@ export const getAdminSupportTicketById = async (ticketId) => {
     "../supportTicket/supportTicket.service.js"
   );
   let ticket = await SupportTicket.findById(ticketId)
-    .populate("user", "email fleetProfile.companyName mechanicProfile.displayName")
+    .populate("user", SUPPORT_USER_POPULATE)
     .populate("assignedTo", "email")
-    .populate("replies.sender", "email role fleetProfile.companyName mechanicProfile.displayName adminProfile.displayName")
+    .populate(
+      "replies.sender",
+      "email role fleetProfile.companyName companyProfile.companyName mechanicProfile.displayName adminProfile.displayName"
+    )
     .lean();
   if (!ticket) throw new AppError("Support ticket not found", 404);
   ticket = await reconcileSupportTicketIfNeeded(ticket);
@@ -3134,6 +3198,9 @@ export const deleteAdminReview = async (reviewId) => {
 };
 
 export const listAdminAuditLogs = async (query = {}) => {
+  const page = parsePage(query.page);
+  const limit = parseLimit(query.limit);
+  const skip = (page - 1) * limit;
   const filter = {};
   if (query.category) filter.category = safeRegex(query.category);
   if (query.search) {
@@ -3147,44 +3214,187 @@ export const listAdminAuditLogs = async (query = {}) => {
     ];
   }
 
-  const items = await AuditLog.find(filter).sort({ createdAt: -1 }).limit(100).lean();
-  const today = new Date().toDateString();
-  const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+  const [items, total, todayCount, weekCount, distinctAdmins] = await Promise.all([
+    AuditLog.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+    AuditLog.countDocuments(filter),
+    AuditLog.countDocuments({
+      ...filter,
+      createdAt: {
+        $gte: new Date(new Date().setHours(0, 0, 0, 0)),
+      },
+    }),
+    AuditLog.countDocuments({
+      ...filter,
+      createdAt: { $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) },
+    }),
+    AuditLog.distinct("userLabel", filter),
+  ]);
 
   return {
     items,
     stats: {
-      totalActions: items.length,
-      today: items.filter((item) => new Date(item.createdAt).toDateString() === today).length,
-      thisWeek: items.filter((item) => new Date(item.createdAt) >= weekAgo).length,
-      activeAdmins: new Set(items.map((item) => item.userLabel)).size,
+      totalActions: total,
+      today: todayCount,
+      thisWeek: weekCount,
+      activeAdmins: distinctAdmins.length,
+    },
+    meta: {
+      page,
+      limit,
+      total,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
     },
   };
 };
 
+const REPORT_PERIOD_MONTHS = { "1M": 1, "3M": 3, "6M": 6, "1Y": 12 };
+
+const parseReportPeriod = (value) => {
+  const key = `${value || "6M"}`.trim().toUpperCase();
+  return REPORT_PERIOD_MONTHS[key] ? key : "6M";
+};
+
+/** Last comma-separated address segment ≈ city/postcode area; empty → Unknown. */
+const jobAreaExpr = {
+  $let: {
+    vars: {
+      raw: {
+        $trim: {
+          input: {
+            $arrayElemAt: [
+              { $split: [{ $ifNull: ["$location.address", ""] }, ","] },
+              -1,
+            ],
+          },
+        },
+      },
+    },
+    in: {
+      $cond: [
+        { $or: [{ $eq: ["$$raw", ""] }, { $eq: ["$$raw", null] }] },
+        "Unknown",
+        "$$raw",
+      ],
+    },
+  },
+};
+
 export const getAdminReports = async (query = {}) => {
   const reportType = `${query.type || "REVENUE"}`.trim().toUpperCase();
+  const period = parseReportPeriod(query.period);
+  const monthCount = REPORT_PERIOD_MONTHS[period];
+  const now = new Date();
 
-  const [invoiceAgg, jobsAgg, topCompaniesAgg, mechanicAgg, serviceAgg] = await Promise.all([
+  const months = Array.from({ length: monthCount }, (_, index) => {
+    const date = new Date(now.getFullYear(), now.getMonth() - (monthCount - 1 - index), 1);
+    return {
+      year: date.getFullYear(),
+      month: date.getMonth() + 1,
+      label: formatMonthLabel(date),
+    };
+  });
+
+  const rangeStart = new Date(now.getFullYear(), now.getMonth() - (monthCount - 1), 1);
+  const prevStart = new Date(now.getFullYear(), now.getMonth() - (2 * monthCount - 1), 1);
+
+  const paidMatch = (from, to) => ({
+    status: "PAID",
+    paidAt: { $gte: from, $lte: to },
+  });
+
+  const [
+    revenueCurrentAgg,
+    revenuePreviousAgg,
+    commissionCurrentAgg,
+    commissionPreviousAgg,
+    jobsCurrent,
+    jobsPrevious,
+    avgCurrentAgg,
+    avgPreviousAgg,
+    monthlyRevenueAgg,
+    monthlyCommissionAgg,
+    monthlyJobsAgg,
+    jobsByAreaAgg,
+    breakdownAgg,
+    topCompaniesAgg,
+    mechanicEarnAgg,
+    activeCompanies,
+  ] = await Promise.all([
     Invoice.aggregate([
+      { $match: paidMatch(rangeStart, now) },
+      { $group: { _id: null, total: { $sum: "$totalAmount" } } },
+    ]),
+    Invoice.aggregate([
+      { $match: paidMatch(prevStart, new Date(rangeStart.getTime() - 1)) },
+      { $group: { _id: null, total: { $sum: "$totalAmount" } } },
+    ]),
+    EarningTransaction.aggregate([
+      { $match: { paidAt: { $gte: rangeStart, $lte: now } } },
+      { $group: { _id: null, total: { $sum: "$platformFee" } } },
+    ]),
+    EarningTransaction.aggregate([
+      { $match: { paidAt: { $gte: prevStart, $lt: rangeStart } } },
+      { $group: { _id: null, total: { $sum: "$platformFee" } } },
+    ]),
+    Job.countDocuments({ createdAt: { $gte: rangeStart, $lte: now } }),
+    Job.countDocuments({ createdAt: { $gte: prevStart, $lt: rangeStart } }),
+    Invoice.aggregate([
+      { $match: paidMatch(rangeStart, now) },
+      { $group: { _id: null, avg: { $avg: "$totalAmount" } } },
+    ]),
+    Invoice.aggregate([
+      { $match: paidMatch(prevStart, new Date(rangeStart.getTime() - 1)) },
+      { $group: { _id: null, avg: { $avg: "$totalAmount" } } },
+    ]),
+    Invoice.aggregate([
+      { $match: paidMatch(rangeStart, now) },
       {
         $group: {
-          _id: null,
-          totalRevenue: { $sum: "$totalAmount" },
-          totalInvoices: { $sum: 1 },
-          avgServiceValue: { $avg: "$totalAmount" },
+          _id: { year: { $year: "$paidAt" }, month: { $month: "$paidAt" } },
+          revenue: { $sum: "$totalAmount" },
+        },
+      },
+    ]),
+    EarningTransaction.aggregate([
+      { $match: { paidAt: { $gte: rangeStart, $lte: now } } },
+      {
+        $group: {
+          _id: { year: { $year: "$paidAt" }, month: { $month: "$paidAt" } },
+          commission: { $sum: "$platformFee" },
         },
       },
     ]),
     Job.aggregate([
+      { $match: { createdAt: { $gte: rangeStart, $lte: now } } },
       {
         $group: {
-          _id: null,
-          totalServices: { $sum: 1 },
+          _id: { year: { $year: "$createdAt" }, month: { $month: "$createdAt" } },
+          services: { $sum: 1 },
         },
       },
     ]),
+    Job.aggregate([
+      { $match: { createdAt: { $gte: rangeStart, $lte: now } } },
+      { $addFields: { area: jobAreaExpr } },
+      { $group: { _id: "$area", jobs: { $sum: 1 } } },
+      { $sort: { jobs: -1 } },
+      { $limit: 8 },
+    ]),
+    Job.aggregate([
+      { $match: { createdAt: { $gte: rangeStart, $lte: now } } },
+      {
+        $group: {
+          _id: {
+            $ifNull: ["$issueSubtype", { $ifNull: ["$issueType", "Other"] }],
+          },
+          count: { $sum: 1 },
+        },
+      },
+      { $sort: { count: -1 } },
+      { $limit: 6 },
+    ]),
     Invoice.aggregate([
+      { $match: paidMatch(rangeStart, now) },
       {
         $group: {
           _id: "$fleet",
@@ -3195,53 +3405,156 @@ export const getAdminReports = async (query = {}) => {
       { $sort: { revenue: -1 } },
       { $limit: 5 },
     ]),
-    User.find({ role: ROLES.MECHANIC })
-      .sort({ "mechanicProfile.stats.jobsDone": -1 })
-      .limit(5)
-      .lean(),
-    ServiceCatalog.find({}).sort({ bookingsCount: -1 }).limit(5).lean(),
+    EarningTransaction.aggregate([
+      { $match: { paidAt: { $gte: rangeStart, $lte: now } } },
+      {
+        $group: {
+          _id: "$mechanic",
+          revenue: { $sum: "$netAmount" },
+          jobs: { $addToSet: "$job" },
+        },
+      },
+      {
+        $project: {
+          revenue: 1,
+          services: { $size: "$jobs" },
+        },
+      },
+      { $sort: { revenue: -1 } },
+      { $limit: 5 },
+    ]),
+    User.countDocuments({ role: ROLES.FLEET, status: USER_STATUS.ACTIVE }),
   ]);
 
+  const totalRevenue = revenueCurrentAgg[0]?.total || 0;
+  const totalCommission = commissionCurrentAgg[0]?.total || 0;
+  const avgServiceValue =
+    Math.round((avgCurrentAgg[0]?.avg || 0) * 100) / 100;
+  const prevAvg =
+    Math.round((avgPreviousAgg[0]?.avg || 0) * 100) / 100;
+
+  const revenueMap = new Map(
+    monthlyRevenueAgg.map((e) => [`${e._id.year}-${e._id.month}`, e.revenue])
+  );
+  const commissionMap = new Map(
+    monthlyCommissionAgg.map((e) => [
+      `${e._id.year}-${e._id.month}`,
+      e.commission,
+    ])
+  );
+  const jobsMap = new Map(
+    monthlyJobsAgg.map((e) => [`${e._id.year}-${e._id.month}`, e.services])
+  );
+
+  const monthlyRevenueTrend = months.map((m) => {
+    const key = `${m.year}-${m.month}`;
+    return {
+      month: m.label,
+      revenue: revenueMap.get(key) || 0,
+      commission: commissionMap.get(key) || 0,
+      services: jobsMap.get(key) || 0,
+    };
+  });
+
+  const breakdownTotal = breakdownAgg.reduce((s, i) => s + (i.count || 0), 0) || 0;
+  const breakdownTypes = breakdownAgg.map((item) => {
+    const count = item.count || 0;
+    const percent =
+      breakdownTotal > 0
+        ? Math.round((count / breakdownTotal) * 1000) / 10
+        : 0;
+    return {
+      name: item._id || "Other",
+      count,
+      percent,
+    };
+  });
+
   const topCompanyIds = topCompaniesAgg.map((item) => item._id).filter(Boolean);
-  const topCompanies = topCompanyIds.length
-    ? await User.find({ _id: { $in: topCompanyIds } })
-        .select("fleetProfile.companyName email")
+  const [topCompanyUsers, vehicleCountsAgg] = await Promise.all([
+    topCompanyIds.length
+      ? User.find({ _id: { $in: topCompanyIds } })
+          .select("fleetProfile.companyName email")
+          .lean()
+      : Promise.resolve([]),
+    topCompanyIds.length
+      ? Vehicle.aggregate([
+          { $match: { fleet: { $in: topCompanyIds }, isActive: true } },
+          { $group: { _id: "$fleet", count: { $sum: 1 } } },
+        ])
+      : Promise.resolve([]),
+  ]);
+  const topCompanyMap = new Map(
+    topCompanyUsers.map((item) => [item._id.toString(), item])
+  );
+  const vehicleCountMap = new Map(
+    vehicleCountsAgg.map((entry) => [entry._id.toString(), entry.count])
+  );
+
+  const mechanicIds = mechanicEarnAgg.map((item) => item._id).filter(Boolean);
+  const mechanicUsers = mechanicIds.length
+    ? await User.find({ _id: { $in: mechanicIds } })
+        .select("email mechanicProfile.displayName mechanicProfile.rating")
         .lean()
     : [];
-  const topCompanyMap = new Map(topCompanies.map((item) => [item._id.toString(), item]));
+  const mechanicMap = new Map(
+    mechanicUsers.map((item) => [item._id.toString(), item])
+  );
 
   return {
     reportType,
+    period,
+    platformFeePercent: getPlatformFeePercent(),
     summary: {
-      totalRevenue: invoiceAgg[0]?.totalRevenue || 0,
-      totalServices: jobsAgg[0]?.totalServices || 0,
-      activeCompanies: await User.countDocuments({ role: ROLES.FLEET, status: USER_STATUS.ACTIVE }),
-      avgServiceValue: Math.round((invoiceAgg[0]?.avgServiceValue || 0) * 100) / 100,
+      totalRevenue,
+      totalCommission,
+      totalServices: jobsCurrent,
+      activeCompanies,
+      avgServiceValue,
+      trends: {
+        revenue: trendPayload(totalRevenue, revenuePreviousAgg[0]?.total || 0),
+        commission: trendPayload(
+          totalCommission,
+          commissionPreviousAgg[0]?.total || 0
+        ),
+        services: trendPayload(jobsCurrent, jobsPrevious),
+        avgServiceValue: trendPayload(avgServiceValue, prevAvg),
+      },
     },
-    monthlyRevenueTrend: ["Jan", "Feb", "Mar"].map((month, index) => ({
-      month,
-      revenue: [45000, 52000, 48000][index],
-      services: [125, 148, 132][index],
+    monthlyRevenueTrend,
+    jobsByArea: jobsByAreaAgg.map((item) => ({
+      area: item._id || "Unknown",
+      jobs: item.jobs || 0,
     })),
-    topServices: serviceAgg.map((item) => ({
+    breakdownTypes,
+    // Alias for older CSV / callers expecting topServices shape
+    topServices: breakdownTypes.map((item) => ({
       name: item.name,
-      count: item.bookingsCount,
-      revenue: item.basePrice * item.bookingsCount,
+      count: item.count,
+      percent: item.percent,
     })),
-    topCompanies: topCompaniesAgg.map((item) => ({
-      companyName:
-        topCompanyMap.get(item._id?.toString?.() || "")?.fleetProfile?.companyName ||
-        topCompanyMap.get(item._id?.toString?.() || "")?.email ||
-        "Unknown Company",
-      services: item.count,
-      revenue: item.revenue,
-    })),
-    mechanicPerformance: mechanicAgg.map((item) => ({
-      mechanicName: item.mechanicProfile?.displayName || item.email,
-      services: item.mechanicProfile?.stats?.jobsDone || 0,
-      rating: item.mechanicProfile?.rating?.average || 0,
-      revenue: 0,
-    })),
+    topCompanies: topCompaniesAgg.map((item) => {
+      const id = item._id?.toString?.() || "";
+      const user = topCompanyMap.get(id);
+      return {
+        companyName:
+          user?.fleetProfile?.companyName || user?.email || "Unknown Company",
+        services: item.count,
+        revenue: item.revenue,
+        vehicles: vehicleCountMap.get(id) || 0,
+      };
+    }),
+    mechanicPerformance: mechanicEarnAgg.map((item) => {
+      const id = item._id?.toString?.() || "";
+      const user = mechanicMap.get(id);
+      return {
+        mechanicName:
+          user?.mechanicProfile?.displayName || user?.email || "Unknown",
+        services: item.services || 0,
+        rating: user?.mechanicProfile?.rating?.average || 0,
+        revenue: item.revenue || 0,
+      };
+    }),
     exportFormat: `${query.format || "PDF"}`.trim().toUpperCase(),
   };
 };
@@ -3259,6 +3572,8 @@ export const exportAdminReports = async (query = {}) => {
 export const getAdminSettings = async (adminUser) => {
   const freshAdmin = await User.findById(adminUser._id).lean();
   if (!freshAdmin) throw new AppError("Admin not found", 404);
+
+  const platform = await serializePlatformCommercial();
 
   return {
     profile: {
@@ -3278,9 +3593,40 @@ export const getAdminSettings = async (adminUser) => {
         freshAdmin.adminSettings?.notificationsEnabled ?? true,
       securityAlertsEnabled:
         freshAdmin.adminSettings?.securityAlertsEnabled ?? true,
+      notificationPreferences: normalizeAdminNotificationPreferences(
+        freshAdmin.adminSettings?.notificationPreferences,
+        {
+          securityAlertsEnabled:
+            freshAdmin.adminSettings?.securityAlertsEnabled ?? true,
+        }
+      ),
       regionalFormat: freshAdmin.adminSettings?.regionalFormat || "en-GB",
       billingEmail: freshAdmin.adminSettings?.billingEmail || freshAdmin.email,
       privacyMode: freshAdmin.adminSettings?.privacyMode || "STANDARD",
+    },
+    platform: {
+      platformFeePercent: platform.platformFeePercent,
+      standardVatRate: platform.standardVatRate,
+      standardVatPercent: platform.standardVatPercent,
+      /** Payment-policy knobs — not yet enforced by workers. */
+      autoReleaseHours: null,
+      requireFleetApproval: true,
+      disputeHoldEnabled: false,
+      paymentPolicyStatus: "COMING_SOON",
+    },
+    security: {
+      twoFactorAvailable: false,
+      twoFactorRequired: false,
+      accessTokenTtl: env.JWT_EXPIRES_IN || "7d",
+      refreshTokenTtl: env.JWT_REFRESH_EXPIRES_IN || "30d",
+      idleTimeoutHours: null,
+      auditLogging: "admin_mutations",
+      auditLoggingNote:
+        "Every successful state-changing admin API request is recorded; read-only views are not audited.",
+      ipAllowlistEnabled: false,
+      gdprExportAvailable: true,
+      gdprErasureAvailable: true,
+      dataRetentionPolicyAvailable: true,
     },
   };
 };
@@ -3339,6 +3685,61 @@ export const updateAdminSettings = async (adminUser, payload = {}) => {
   if (payload.preferences?.securityAlertsEnabled !== undefined) {
     admin.adminSettings.securityAlertsEnabled = Boolean(
       payload.preferences.securityAlertsEnabled
+    );
+  }
+  if (payload.preferences?.notificationPreferences !== undefined) {
+    const normalized = normalizeAdminNotificationPreferences(
+      payload.preferences.notificationPreferences,
+      {
+        securityAlertsEnabled:
+          admin.adminSettings.securityAlertsEnabled ?? true,
+      }
+    );
+    admin.adminSettings.notificationPreferences = normalized;
+    admin.adminSettings.securityAlertsEnabled =
+      normalized[ADMIN_NOTIFICATION_EVENTS.SYSTEM_HEALTH].push;
+  } else if (payload.preferences?.securityAlertsEnabled !== undefined) {
+    const normalized = normalizeAdminNotificationPreferences(
+      admin.adminSettings.notificationPreferences,
+      {
+        securityAlertsEnabled: admin.adminSettings.securityAlertsEnabled,
+      }
+    );
+    normalized[ADMIN_NOTIFICATION_EVENTS.SYSTEM_HEALTH].push =
+      admin.adminSettings.securityAlertsEnabled;
+    admin.adminSettings.notificationPreferences = normalized;
+  }
+
+  if (payload.platform) {
+    const feeIn =
+      payload.platform.platformFeePercent ?? payload.platform.commissionRate;
+    const vatIn =
+      payload.platform.standardVatRate ??
+      payload.platform.vatRate ??
+      (payload.platform.standardVatPercent != null
+        ? Number(payload.platform.standardVatPercent) / 100
+        : undefined);
+
+    if (feeIn !== undefined) {
+      const n = Number(feeIn);
+      if (!Number.isFinite(n) || n < 0 || n > 100) {
+        throw new AppError("platformFeePercent must be between 0 and 100", 400);
+      }
+    }
+    if (vatIn !== undefined) {
+      const n = Number(vatIn);
+      const fraction = n > 1 ? n / 100 : n;
+      if (!Number.isFinite(fraction) || fraction < 0 || fraction > 1) {
+        throw new AppError("standardVatRate must be between 0 and 1 (or 0–100 as percent)", 400);
+      }
+    }
+
+    await updatePlatformCommercialSettings(
+      {
+        ...(feeIn !== undefined ? { platformFeePercent: feeIn } : {}),
+        ...(vatIn !== undefined ? { standardVatRate: vatIn } : {}),
+      },
+      adminUser
     );
   }
 

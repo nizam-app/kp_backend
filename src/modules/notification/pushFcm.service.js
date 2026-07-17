@@ -9,6 +9,7 @@ import {
   buildNotificationNavigation,
   flattenNavigationForPush,
 } from "./notificationNavigation.util.js";
+import { normalizeAdminNotificationPreferences } from "./adminNotificationEvents.js";
 
 /** Maps in-app notification `type` to `user.preferences.notifications` key (mechanic / fleet / company). */
 const NOTIFICATION_TYPE_TO_PREFERENCE_KEY = {
@@ -108,10 +109,17 @@ function tryInitFirebase() {
   return false;
 }
 
-export function shouldSendPushToUser(user, notificationType) {
+export function shouldSendPushToUser(user, notificationType, eventKey) {
   if (!user) return false;
   if (user.role === ROLES.ADMIN) {
     if (user.adminSettings?.notificationsEnabled === false) return false;
+    if (eventKey) {
+      const preferences = normalizeAdminNotificationPreferences(
+        user.adminSettings?.notificationPreferences,
+        { securityAlertsEnabled: user.adminSettings?.securityAlertsEnabled }
+      );
+      if (preferences[eventKey]?.push === false) return false;
+    }
     return true;
   }
   if (user.preferences?.pushEnabled === false) return false;
@@ -144,6 +152,7 @@ const truncate = (s, max) => {
  * @param {import("mongoose").Document} notification — persisted Notification doc
  */
 export async function sendPushForPersistedNotification(notification) {
+  if (notification.channels?.push === false) return;
   if (!isPushConfigured() || !tryInitFirebase()) return;
 
   const userId = notification.user?._id || notification.user;
@@ -153,7 +162,7 @@ export async function sendPushForPersistedNotification(notification) {
     .select("role preferences adminSettings")
     .lean();
 
-  if (!shouldSendPushToUser(user, notification.type)) return;
+  if (!shouldSendPushToUser(user, notification.type, notification.eventKey)) return;
 
   const tokenDocs = await DeviceToken.find({ user: userId, isActive: true })
     .select("token")

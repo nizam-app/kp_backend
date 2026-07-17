@@ -15,6 +15,7 @@ import {
   slugifyJobCategoryKey,
 } from "../../constants/domain.js";
 import mongoose from "mongoose";
+import { resolveCanonicalJobCategory } from "../jobCategory/jobCategory.service.js";
 import {
   Job,
   JOB_ATTACHMENT_CATEGORIES,
@@ -36,6 +37,11 @@ import {
 import { getProfileCompletionSummary } from "../user/user.service.js";
 import { readMechanicProfileRatingAverage } from "../../utils/mechanicRating.js";
 import { calculateJobVat } from "../../utils/vat.js";
+import {
+  computePlatformFee,
+  computePlatformFeeNet,
+  getPlatformFeePercent,
+} from "../../utils/platformFee.js";
 import { assertValidOptionalPhone } from "../../utils/phone.js";
 import { resolveQuoteDisplayLifecycle } from "../../utils/quoteDisplayLifecycle.js";
 import {
@@ -43,6 +49,8 @@ import {
   notifyJobCompleted,
   notifyJobStatusChanged,
 } from "../notification/jobQuoteNotification.service.js";
+import { notifyAdminsSafely } from "../notification/adminNotification.service.js";
+import { ADMIN_NOTIFICATION_EVENTS } from "../notification/adminNotificationEvents.js";
 import {
   emitJobEvent,
   emitJobLocationPing,
@@ -282,14 +290,24 @@ const normalizeTyreSide = (raw) => {
   return undefined;
 };
 
-const resolveIssueClassification = (payload = {}) => {
-  const rawInput = payload.issueSubtype ?? payload.jobCategory ?? "";
+const resolveIssueClassification = async (payload = {}) => {
+  const rawInput =
+    payload.jobCategoryKey ?? payload.issueSubtype ?? payload.jobCategory ?? "";
   const trimmed = `${rawInput}`.trim();
   const slug = trimmed ? slugifyJobCategoryKey(trimmed) : null;
+  const canonicalCategory = trimmed
+    ? await resolveCanonicalJobCategory(trimmed)
+    : null;
+
+  if (payload.jobCategoryKey !== undefined && !canonicalCategory) {
+    throw new AppError("Invalid or inactive job category", 400);
+  }
+
   const mappedFromCategory =
-    slug && Object.prototype.hasOwnProperty.call(JOB_CATEGORY_SUBTYPE_TO_ISSUE_TYPE, slug)
+    canonicalCategory?.issueType ??
+    (slug && Object.prototype.hasOwnProperty.call(JOB_CATEGORY_SUBTYPE_TO_ISSUE_TYPE, slug)
       ? JOB_CATEGORY_SUBTYPE_TO_ISSUE_TYPE[slug]
-      : undefined;
+      : undefined);
 
   let issueType = payload.issueType ? `${payload.issueType}`.trim().toUpperCase() : undefined;
 
@@ -304,7 +322,9 @@ const resolveIssueClassification = (payload = {}) => {
   }
 
   let issueSubtype;
-  if (trimmed) {
+  if (canonicalCategory) {
+    issueSubtype = canonicalCategory.key;
+  } else if (trimmed) {
     issueSubtype =
       mappedFromCategory !== undefined ? slug : (slug || trimmed).slice(0, 120);
   }
@@ -599,7 +619,8 @@ const computeFleetPaymentBox = ({ job, defaultPaymentMethod, invoice = null }) =
     billExVat = Number(job.acceptedAmount ?? job.finalAmount ?? 0) || 0;
   }
 
-  const platformFee = billExVat > 0 ? round2(billExVat * 0.12) : 0;
+  const feePercent = getPlatformFeePercent();
+  const platformFee = billExVat > 0 ? computePlatformFee(billExVat, feePercent) : 0;
   const mechanicNet = billExVat > 0 ? round2(billExVat - platformFee) : 0;
 
   let vatApplied = false;
@@ -635,6 +656,7 @@ const computeFleetPaymentBox = ({ job, defaultPaymentMethod, invoice = null }) =
     billExVat: billExVat || null,
     platformFee: billExVat > 0 ? platformFee : null,
     mechanicNet: billExVat > 0 ? mechanicNet : null,
+    platformFeePercent: billExVat > 0 ? feePercent : null,
     /** @deprecated Prefer chargedToFleet */
     totalPayable: chargedToFleet,
     chargedToFleet,
@@ -747,7 +769,8 @@ const buildJobApprovalPaymentContext = async ({
       ? round2(Number(billExVatInput))
       : resolveApprovalBillExVat(job, lineItems);
   const vat = calculateJobVat(job, subtotal);
-  const platformFee = round2(subtotal * 0.12);
+  const feePercent = getPlatformFeePercent();
+  const platformFee = computePlatformFee(subtotal, feePercent);
   /** Mechanic payout is on ex-VAT work total (same as EarningTransaction). */
   const mechanicNetAmount = Math.max(round2(subtotal - platformFee), 0);
 
@@ -758,6 +781,7 @@ const buildJobApprovalPaymentContext = async ({
     vatRate: vat.vatRate,
     vatApplied: vat.vatRegistered,
     platformFee,
+    platformFeePercent: feePercent,
     mechanicNetAmount,
   };
 
@@ -1496,10 +1520,14 @@ const upsertFinancialRecordsForCompletedJob = async (job, paymentContext = {}) =
 
   const vat = calculateJobVat(job, chargedSubtotal);
   const { subtotal, vatAmount, totalAmount } = vat;
+  const feePercent =
+    paymentContext.platformFeePercent != null
+      ? Number(paymentContext.platformFeePercent)
+      : getPlatformFeePercent();
   const platformFee =
     paymentContext.platformFee != null
       ? round2(Number(paymentContext.platformFee))
-      : round2(subtotal * 0.12);
+      : computePlatformFee(subtotal, feePercent);
   const netAmount =
     paymentContext.mechanicNetAmount != null
       ? Math.max(round2(Number(paymentContext.mechanicNetAmount)), 0)
@@ -1525,6 +1553,7 @@ const upsertFinancialRecordsForCompletedJob = async (job, paymentContext = {}) =
       vatApplied: vat.vatRegistered,
       totalAmount,
       currency: job.currency || "GBP",
+      platformFeePercent: feePercent,
       status: invoiceStatus,
       issuedAt: paidAt,
       paidAt: invoiceStatus === "PAID" ? paidAt : undefined,
@@ -1567,6 +1596,7 @@ const upsertFinancialRecordsForCompletedJob = async (job, paymentContext = {}) =
     invoice.vatApplied = vat.vatRegistered;
     invoice.totalAmount = totalAmount;
     invoice.currency = job.currency || invoice.currency || "GBP";
+    invoice.platformFeePercent = feePercent;
     invoice.status = invoiceStatus;
     invoice.paidAt = invoiceStatus === "PAID" ? paidAt : undefined;
     invoice.issuedAt = invoice.issuedAt || paidAt;
@@ -1626,6 +1656,7 @@ const upsertFinancialRecordsForCompletedJob = async (job, paymentContext = {}) =
         $set: {
           grossAmount: subtotal,
           platformFee,
+          platformFeePercent: feePercent,
           netAmount,
           currency: job.currency || "GBP",
           paidAt,
@@ -1697,7 +1728,7 @@ export const createJob = async (payload, fleetUser) => {
   }
 
   const scheduling = normalizeAvailabilityWindow(payload);
-  const { issueType, issueSubtype } = resolveIssueClassification(payload);
+  const { issueType, issueSubtype } = await resolveIssueClassification(payload);
 
   const job = await Job.create({
     jobCode: await generateJobCode(),
@@ -1747,6 +1778,19 @@ export const createJob = async (payload, fleetUser) => {
   emitJobStatusChanged(job, {
     previousStatus: null,
     changedBy: toObjectIdString(fleetUser._id),
+  });
+
+  await notifyAdminsSafely({
+    eventKey: ADMIN_NOTIFICATION_EVENTS.JOB_POSTED,
+    dedupeKey: `job-posted:${job._id}`,
+    title: `New job posted: ${job.jobCode}`,
+    body: `${fleetUser.fleetProfile?.companyName || fleetUser.email} posted ${job.title}.`,
+    data: {
+      jobId: job._id.toString(),
+      jobCode: job.jobCode,
+      fleetId: fleetUser._id.toString(),
+      screen: "ADMIN_JOB",
+    },
   });
 
   return job;
@@ -1824,9 +1868,10 @@ export const updateJob = async (jobId, fleetUser, payload = {}) => {
   if (
     next.issueType !== undefined ||
     next.issueSubtype !== undefined ||
-    next.jobCategory !== undefined
+    next.jobCategory !== undefined ||
+    next.jobCategoryKey !== undefined
   ) {
-    const { issueType, issueSubtype } = resolveIssueClassification(next);
+    const { issueType, issueSubtype } = await resolveIssueClassification(next);
     job.issueType = issueType;
     job.issueSubtype = issueSubtype || undefined;
   }

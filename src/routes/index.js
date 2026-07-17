@@ -18,6 +18,7 @@ import companyRouter from "../modules/company/company.router.js";
 import invitePublicRouter from "../modules/company/invitePublic.router.js";
 import feedPresetRouter from "../modules/feedPreset/feedPreset.router.js";
 import mediaRouter from "../modules/media/media.router.js";
+import jobCategoryRouter from "../modules/jobCategory/jobCategory.router.js";
 
 const router = Router();
 
@@ -40,5 +41,6 @@ router.use("/company", companyRouter);
 router.use("/public", invitePublicRouter);
 router.use("/feed-presets", feedPresetRouter);
 router.use("/media", mediaRouter);
+router.use("/job-categories", jobCategoryRouter);
 
 export default router;

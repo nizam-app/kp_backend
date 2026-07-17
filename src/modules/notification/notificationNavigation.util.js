@@ -88,6 +88,17 @@ export const buildNotificationNavigation = (type, data = {}) => {
       };
     }
     default:
+      if (d.screen) {
+        const { screen, ...params } = d;
+        return {
+          screen: `${screen}`,
+          params: Object.fromEntries(
+            Object.entries(params)
+              .filter(([, value]) => value !== null && value !== undefined)
+              .map(([key, value]) => [key, `${value}`])
+          ),
+        };
+      }
       return null;
   }
 };

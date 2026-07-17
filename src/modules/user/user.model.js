@@ -180,6 +180,7 @@ const adminSettingsSchema = new Schema(
     language: { type: String, trim: true, default: "English" },
     notificationsEnabled: { type: Boolean, default: true },
     securityAlertsEnabled: { type: Boolean, default: true },
+    notificationPreferences: { type: Schema.Types.Mixed, default: {} },
     regionalFormat: { type: String, trim: true, default: "en-GB" },
     billingEmail: { type: String, trim: true, lowercase: true },
     privacyMode: { type: String, trim: true, default: "STANDARD" },

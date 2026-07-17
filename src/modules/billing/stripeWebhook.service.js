@@ -3,6 +3,12 @@ import { Invoice } from "../invoice/invoice.model.js";
 import { Job } from "../job/job.model.js";
 import { JobEvent } from "../jobEvent/jobEvent.model.js";
 import { EarningTransaction } from "../earning/earningTransaction.model.js";
+import {
+  computePlatformFeeNet,
+  getPlatformFeePercent,
+} from "../../utils/platformFee.js";
+import { notifyAdminsSafely } from "../notification/adminNotification.service.js";
+import { ADMIN_NOTIFICATION_EVENTS } from "../notification/adminNotificationEvents.js";
 
 const invoiceStatusFromPaymentIntent = (status) => {
   switch (`${status || ""}`) {
@@ -52,8 +58,14 @@ const syncEarningForInvoice = async (invoice, { shouldBePaid }) => {
   if (!invoice?.mechanic || !invoice?.job) return null;
 
   const grossAmount = roundAmount(invoice.subtotal);
-  const platformFee = roundAmount(grossAmount * 0.12);
-  const netAmount = Math.max(roundAmount(grossAmount - platformFee), 0);
+  const feePercent =
+    invoice.platformFeePercent != null
+      ? Number(invoice.platformFeePercent)
+      : getPlatformFeePercent();
+  const { platformFee, netAmount, platformFeePercent } = computePlatformFeeNet(
+    grossAmount,
+    feePercent
+  );
 
   if (!shouldBePaid) {
     await EarningTransaction.deleteOne({
@@ -69,6 +81,7 @@ const syncEarningForInvoice = async (invoice, { shouldBePaid }) => {
       $set: {
         grossAmount,
         platformFee,
+        platformFeePercent,
         netAmount,
         currency: invoice.currency || "GBP",
         paidAt: invoice.paidAt || new Date(),
@@ -107,6 +120,7 @@ export const applyPaymentIntentToInvoice = async (paymentIntent) => {
   }
 
   const statusMap = invoiceStatusFromPaymentIntent(paymentIntent.status);
+  const previousPaymentStatus = invoice.payment?.status;
   const paidAt =
     statusMap.markPaid && paymentIntent.created
       ? new Date(Number(paymentIntent.created) * 1000)
@@ -149,6 +163,26 @@ export const applyPaymentIntentToInvoice = async (paymentIntent) => {
       invoiceStatus: statusMap.invoiceStatus,
     },
   });
+
+  if (
+    statusMap.invoiceStatus === "FAILED" &&
+    previousPaymentStatus !== statusMap.paymentStatus
+  ) {
+    await notifyAdminsSafely({
+      eventKey: ADMIN_NOTIFICATION_EVENTS.PAYMENT_FAILED,
+      dedupeKey: `payment-failed:${paymentIntent.id || invoice._id}:${statusMap.paymentStatus}`,
+      title: `Payment failed for invoice ${invoice.invoiceNo || invoice._id}`,
+      body:
+        invoice.payment?.lastError ||
+        `Stripe payment ${paymentIntent.id || ""} requires a new payment method.`,
+      data: {
+        invoiceId: invoice._id.toString(),
+        jobId: invoice.job?.toString?.() || null,
+        paymentIntentId: paymentIntent.id || null,
+        screen: "ADMIN_PAYMENT",
+      },
+    });
+  }
 
   return {
     ok: true,
