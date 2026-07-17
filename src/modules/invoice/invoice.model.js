@@ -55,6 +55,7 @@ const invoiceSchema = new Schema(
       stripePaymentIntentId: { type: String, trim: true },
       stripeClientSecret: { type: String, trim: true },
       lastError: { type: String, trim: true },
+      disputeStatus: { type: String, trim: true },
       authorizedAmount: { type: Number, min: 0 },
       capturedAmount: { type: Number, min: 0 },
       updatedAt: Date,

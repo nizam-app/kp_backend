@@ -181,6 +181,11 @@ const jobSchema = new Schema(
      * Used when fleet approves so the paid Invoice line items match the completion UI.
      */
     completionInvoice: { type: Schema.Types.Mixed, default: undefined },
+    /** Short-lived atomic lock preventing concurrent approval charges. */
+    approvalPaymentLock: {
+      token: { type: String, trim: true },
+      expiresAt: Date,
+    },
     tracking: {
       latestMechanicLocation: journeyLocationSchema,
       etaMinutes: { type: Number, min: 0 },

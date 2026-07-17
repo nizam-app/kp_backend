@@ -785,16 +785,20 @@ const buildJobApprovalPaymentContext = async ({
     mechanicNetAmount,
   };
 
-  const defaultContext = {
-    provider: "MANUAL",
-    invoiceStatus: "PAID",
-    paymentStatus: "SUCCEEDED",
-    paidAt: new Date(),
-    ...moneyMeta,
-  };
-
   const methodId = `${paymentMethodId || ""}`.trim();
-  if (!methodId) return defaultContext;
+  if (!methodId) {
+    throw new AppError(
+      "A saved card is required to approve and pay. Add a card under Billing, then approve with that card.",
+      400
+    );
+  }
+
+  if (!getStripePublicConfig().enabled) {
+    throw new AppError(
+      "Online card payment is unavailable: Stripe is not configured on the server.",
+      503
+    );
+  }
 
   const paymentMethod = await PaymentMethod.findOne({
     _id: methodId,
@@ -808,10 +812,6 @@ const buildJobApprovalPaymentContext = async ({
 
   if (paymentMethod.provider !== "STRIPE") {
     throw new AppError("A Stripe card payment method is required for online payment", 400);
-  }
-
-  if (!getStripePublicConfig().enabled) {
-    throw new AppError("Stripe is not configured on the server", 503);
   }
 
   const totalAmount = vat.totalAmount;
@@ -829,6 +829,9 @@ const buildJobApprovalPaymentContext = async ({
     paymentMethodId: paymentMethod.providerMethodId,
     mechanicConnectAccountId,
     mechanicNetAmount: mechanicConnectAccountId ? mechanicNetAmount : null,
+    // Keyed by job + card: a double-click reuses the same PaymentIntent (no
+    // double charge), while retrying with a different card starts a new one.
+    idempotencyKey: `job:${job._id}:approval:${methodId}`,
     metadata: {
       jobId: job._id.toString(),
       fleetId: toObjectIdString(job.fleet),
@@ -844,7 +847,17 @@ const buildJobApprovalPaymentContext = async ({
     },
   });
 
-  const mapped = mapStripePaymentIntentStatus(paymentIntent.status);
+  // Off-session confirmation of a 3D Secure card fails with code
+  // "authentication_required" and resets the intent to requires_payment_method.
+  // Treat that as an actionable 3DS step (not a hard decline) so the client can
+  // re-confirm on-session with the same card and complete authentication.
+  const needsAuthentication =
+    paymentIntent.status === "requires_action" ||
+    paymentIntent.next_action != null ||
+    paymentIntent.last_payment_error?.code === "authentication_required";
+  const mapped = needsAuthentication
+    ? { invoiceStatus: "ISSUED", paymentStatus: "REQUIRES_ACTION", paid: false }
+    : mapStripePaymentIntentStatus(paymentIntent.status);
   return {
     provider: "STRIPE",
     invoiceStatus: mapped.invoiceStatus,
@@ -853,7 +866,9 @@ const buildJobApprovalPaymentContext = async ({
     stripePaymentMethodId: paymentMethod.providerMethodId,
     stripePaymentIntentId: paymentIntent.id,
     stripeClientSecret: paymentIntent.client_secret || null,
-    lastError: paymentIntent.last_payment_error?.message || null,
+    lastError: needsAuthentication
+      ? null
+      : paymentIntent.last_payment_error?.message || null,
     paidAt: mapped.paid ? new Date() : undefined,
     ...moneyMeta,
   };
@@ -873,13 +888,16 @@ const assertStripePaymentSucceeded = (paymentContext, { required = false } = {})
 
   const paymentErrorData = {
     stripePaymentIntentId: paymentContext.stripePaymentIntentId || null,
+    stripePaymentMethodId: paymentContext.stripePaymentMethodId || null,
     clientSecret: paymentContext.stripeClientSecret || null,
     paymentStatus: paymentContext.paymentStatus || null,
+    invoiceId: paymentContext.invoiceId ? `${paymentContext.invoiceId}` : null,
+    requiresAction: paymentContext.paymentStatus === "REQUIRES_ACTION",
   };
 
   if (paymentContext.paymentStatus === "REQUIRES_ACTION") {
     throw new AppError(
-      "Card payment requires authentication (3D Secure). Complete verification, then POST /billing/stripe/payment-intents/:id/sync.",
+      "Card payment requires authentication (3D Secure). Complete verification, then confirm the payment.",
       402,
       paymentErrorData
     );
@@ -893,6 +911,115 @@ const assertStripePaymentSucceeded = (paymentContext, { required = false } = {})
   );
 };
 
+/**
+ * Settle an approval payment.
+ * - SUCCEEDED: mark the job completed, write invoice + earning, emit events.
+ * - Not yet paid (3DS / processing / failed): persist the invoice attempt row
+ *   so the sync/webhook path can reconcile, keep the job AWAITING_APPROVAL,
+ *   and throw a structured 402 the client can drive to completion.
+ */
+const settleApprovalPayment = async ({
+  job,
+  fromStatus,
+  actorUser,
+  paymentContext,
+  eventExtras = {},
+  breakdown = null,
+}) => {
+  if (paymentContext.paymentStatus === "SUCCEEDED") {
+    await markJobCompletedAfterApproval(job, {}, breakdown || null);
+    return finalizeApprovedJobCompletion({
+      job,
+      fromStatus,
+      actorUser,
+      paymentContext,
+      eventExtras,
+    });
+  }
+
+  // Not paid yet — persist an invoice attempt row so 3DS confirmation / webhook
+  // can find and finalize it, then surface the actionable 402 to the client.
+  const financials = await upsertFinancialRecordsForCompletedJob(job, paymentContext);
+  assertStripePaymentSucceeded(
+    { ...paymentContext, invoiceId: financials.invoice?._id || null },
+    { required: true }
+  );
+  return { job, invoice: financials.invoice, earningTransaction: null };
+};
+
+const acquireApprovalPaymentLock = async (jobId) => {
+  const token = crypto.randomUUID();
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + 5 * 60 * 1000);
+  const result = await Job.updateOne(
+    {
+      _id: jobId,
+      status: JOB_STATUS.AWAITING_APPROVAL,
+      $or: [
+        { "approvalPaymentLock.token": { $exists: false } },
+        { "approvalPaymentLock.expiresAt": { $lte: now } },
+      ],
+    },
+    { $set: { approvalPaymentLock: { token, expiresAt } } }
+  );
+  if (result.modifiedCount !== 1) {
+    throw new AppError(
+      "This job payment is already being processed. Wait for it to finish before retrying.",
+      409
+    );
+  }
+  return token;
+};
+
+const releaseApprovalPaymentLock = (jobId, token) =>
+  Job.updateOne(
+    { _id: jobId, "approvalPaymentLock.token": token },
+    { $unset: { approvalPaymentLock: 1 } }
+  );
+
+const shouldHoldApprovalPaymentLock = (err) =>
+  err?.statusCode === 402 &&
+  ["REQUIRES_ACTION", "PROCESSING"].includes(err?.data?.paymentStatus);
+
+/**
+ * Finalize a job whose payment was confirmed asynchronously (3DS sync or
+ * Stripe webhook). Idempotent: only transitions a job still awaiting approval.
+ */
+export const completeJobOnConfirmedPayment = async (jobId, { paymentStatus } = {}) => {
+  const job = await Job.findById(jobId)
+    .populate("fleet", "fleetProfile")
+    .populate("assignedCompany", "companyProfile")
+    .populate("assignedMechanic", "mechanicProfile");
+  if (!job || job.status !== JOB_STATUS.AWAITING_APPROVAL) return null;
+
+  const fromStatus = job.status;
+  job.status = JOB_STATUS.COMPLETED;
+  job.completedAt = new Date();
+  job.approvalPaymentLock = undefined;
+  await job.save();
+
+  await createJobEvent({
+    jobId: job._id,
+    actorId: job.fleet?._id || job.fleet,
+    type: "JOB_COMPLETED",
+    fromStatus,
+    toStatus: JOB_STATUS.COMPLETED,
+    payload: { paymentStatus: paymentStatus || "SUCCEEDED", confirmedAsync: true },
+  });
+
+  emitJobStatusChanged(job, {
+    previousStatus: fromStatus,
+    changedBy: toObjectIdString(job.fleet?._id || job.fleet),
+    paymentStatus: paymentStatus || "SUCCEEDED",
+  });
+
+  await notifyJobCompleted(job, {
+    approvedByCompany: Boolean(job.assignedCompany),
+  });
+
+  return job;
+};
+
 const markJobCompletedAfterApproval = async (job, payload = {}, breakdown = null) => {
   if (breakdown) {
     job.finalAmount = breakdown.subtotal;
@@ -901,6 +1028,7 @@ const markJobCompletedAfterApproval = async (job, payload = {}, breakdown = null
   }
   job.status = JOB_STATUS.COMPLETED;
   job.completedAt = new Date();
+  job.approvalPaymentLock = undefined;
   await job.save();
 };
 
@@ -1181,6 +1309,14 @@ const serializeJobDetail = async (job, viewer) => {
           lineItems: invoiceDoc.lineItems || [],
           billedToSnapshot: invoiceDoc.billedToSnapshot || null,
           mechanicSnapshot: invoiceDoc.mechanicSnapshot || null,
+          payment: invoiceDoc.payment
+            ? {
+                provider: invoiceDoc.payment.provider,
+                status: invoiceDoc.payment.status,
+                stripePaymentIntentId: invoiceDoc.payment.stripePaymentIntentId,
+                disputeStatus: invoiceDoc.payment.disputeStatus,
+              }
+            : null,
         }
       : null,
     jobSummary: buildJobSummaryForDetail(job, statusTimes),
@@ -2775,32 +2911,33 @@ export const approveJobCompletion = async (jobId, fleetUser, payload = {}) => {
     job.acceptedAmount = acceptedAmountSnapshot;
   }
 
-  const paymentContext = await buildJobApprovalPaymentContext({
-    job,
-    payerUser: fleetUser,
-    paymentMethodId: payload.paymentMethodId,
-    billExVat,
-    lineItems: completionLines,
-  });
-
-  assertStripePaymentSucceeded(paymentContext, {
-    required: Boolean(`${payload.paymentMethodId || ""}`.trim()),
-  });
-
-  // Persist finalAmount only — quote stays frozen; empty payload avoids re-applying body.finalAmount.
-  await markJobCompletedAfterApproval(job, {});
-
-  return finalizeApprovedJobCompletion({
-    job,
-    fromStatus,
-    actorUser: fleetUser,
-    paymentContext: {
-      ...paymentContext,
+  const lockToken = await acquireApprovalPaymentLock(job._id);
+  try {
+    const paymentContext = {
+      ...(await buildJobApprovalPaymentContext({
+        job,
+        payerUser: fleetUser,
+        paymentMethodId: payload.paymentMethodId,
+        billExVat,
+        lineItems: completionLines,
+      })),
       billExVat,
       ...(completionLines?.length ? { lineItems: completionLines } : {}),
-    },
-    eventExtras: { paymentMethodId: payload.paymentMethodId },
-  });
+    };
+
+    return await settleApprovalPayment({
+      job,
+      fromStatus,
+      actorUser: fleetUser,
+      paymentContext,
+      eventExtras: { paymentMethodId: payload.paymentMethodId },
+    });
+  } catch (err) {
+    if (!shouldHoldApprovalPaymentLock(err)) {
+      await releaseApprovalPaymentLock(job._id, lockToken);
+    }
+    throw err;
+  }
 };
 
 /**
@@ -2851,30 +2988,35 @@ export const approveJobCompletionAsCompany = async (jobId, companyUser, payload 
     job.acceptedAmount = acceptedAmountSnapshot;
   }
 
-  const paymentContext = await buildJobApprovalPaymentContext({
-    job,
-    payerUser: companyUser,
-    paymentMethodId,
-    billExVat,
-    lineItems: completionLines,
-    metadata: { companyId: companyUser._id.toString(), approvedByCompany: "true" },
-  });
-
-  assertStripePaymentSucceeded(paymentContext, { required: true });
-
-  await markJobCompletedAfterApproval(job, {}, breakdown || null);
-
-  return finalizeApprovedJobCompletion({
-    job,
-    fromStatus,
-    actorUser: companyUser,
-    paymentContext: {
-      ...paymentContext,
+  const lockToken = await acquireApprovalPaymentLock(job._id);
+  try {
+    const paymentContext = {
+      ...(await buildJobApprovalPaymentContext({
+        job,
+        payerUser: companyUser,
+        paymentMethodId,
+        billExVat,
+        lineItems: completionLines,
+        metadata: { companyId: companyUser._id.toString(), approvedByCompany: "true" },
+      })),
       billExVat,
       ...(completionLines?.length ? { lineItems: completionLines } : {}),
-    },
-    eventExtras: { approvedByCompany: true, paymentMethodId },
-  });
+    };
+
+    return await settleApprovalPayment({
+      job,
+      fromStatus,
+      actorUser: companyUser,
+      paymentContext,
+      eventExtras: { approvedByCompany: true, paymentMethodId },
+      breakdown: breakdown || null,
+    });
+  } catch (err) {
+    if (!shouldHoldApprovalPaymentLock(err)) {
+      await releaseApprovalPaymentLock(job._id, lockToken);
+    }
+    throw err;
+  }
 };
 
 export const cancelJob = async (jobId, fleetUser, payload = {}) => {

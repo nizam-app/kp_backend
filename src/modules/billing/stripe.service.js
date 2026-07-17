@@ -2,6 +2,7 @@ import crypto from "crypto";
 import { env } from "../../config/env.js";
 import AppError from "../../utils/AppError.js";
 import { User } from "../user/user.model.js";
+import { isWebhookTimestampExpired } from "./stripePaymentStatus.js";
 
 const STRIPE_API_BASE = "https://api.stripe.com/v1";
 
@@ -29,12 +30,21 @@ const appendFormValue = (searchParams, key, value) => {
   searchParams.append(key, `${value}`);
 };
 
-const stripeRequest = async (path, { method = "GET", body } = {}) => {
+const stripeRequest = async (path, { method = "GET", body, idempotencyKey } = {}) => {
   ensureStripeConfigured();
 
   const headers = {
     Authorization: `Bearer ${env.STRIPE_SECRET_KEY}`,
   };
+  if (env.STRIPE_API_VERSION) {
+    headers["Stripe-Version"] = env.STRIPE_API_VERSION;
+  }
+
+  // Idempotency-Key makes retried/concurrent POSTs return the same resource
+  // instead of creating a duplicate charge.
+  if (idempotencyKey) {
+    headers["Idempotency-Key"] = `${idempotencyKey}`;
+  }
 
   const requestInit = { method, headers };
 
@@ -49,9 +59,12 @@ const stripeRequest = async (path, { method = "GET", body } = {}) => {
   const json = await response.json();
 
   if (!response.ok) {
+    // Preserve the raw Stripe error so callers can recover flows such as
+    // off-session authentication_required (which carries a payment_intent).
     throw new AppError(
       json?.error?.message || "Stripe request failed",
-      response.status >= 400 && response.status < 500 ? 400 : 502
+      response.status >= 400 && response.status < 500 ? 400 : 502,
+      { stripeError: json?.error || null }
     );
   }
 
@@ -151,6 +164,11 @@ export const attachStripePaymentMethodToCustomer = async ({
     body: { customer: customerId },
   });
 
+export const detachStripePaymentMethod = async (paymentMethodId) =>
+  stripeRequest(`/payment_methods/${paymentMethodId}/detach`, {
+    method: "POST",
+  });
+
 export const createStripePaymentIntent = async ({
   amount,
   currency = "GBP",
@@ -159,6 +177,7 @@ export const createStripePaymentIntent = async ({
   metadata = {},
   mechanicConnectAccountId = null,
   mechanicNetAmount = null,
+  idempotencyKey = null,
 }) => {
   const amountInMinor = Math.round(Number(amount || 0) * 100);
   if (!Number.isFinite(amountInMinor) || amountInMinor <= 0) {
@@ -187,10 +206,22 @@ export const createStripePaymentIntent = async ({
     };
   }
 
-  return stripeRequest("/payment_intents", {
-    method: "POST",
-    body,
-  });
+  try {
+    return await stripeRequest("/payment_intents", {
+      method: "POST",
+      body,
+      idempotencyKey: idempotencyKey || undefined,
+    });
+  } catch (err) {
+    // Off-session cards that need 3D Secure fail creation with an error that
+    // still carries the PaymentIntent. Surface it so callers can drive the
+    // requires_action / client authentication flow instead of a generic 400.
+    const recoveredIntent = err?.data?.stripeError?.payment_intent;
+    if (recoveredIntent?.id) {
+      return recoveredIntent;
+    }
+    throw err;
+  }
 };
 
 const syncMechanicStripeConnectStatus = async (userId, account) => {
@@ -356,6 +387,15 @@ export const constructStripeWebhookEvent = (rawBody, signatureHeader) => {
     !crypto.timingSafeEqual(expectedBuffer, actualBuffer)
   ) {
     throw new AppError("Stripe signature verification failed", 400);
+  }
+
+  // Replay protection: reject events whose signature timestamp is outside the
+  // tolerance window (default 5 minutes, matching Stripe's own SDK default).
+  const toleranceSeconds = Number(env.STRIPE_WEBHOOK_TOLERANCE_SECONDS || 300);
+  const timestampSeconds = Number(timestamp);
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  if (isWebhookTimestampExpired(timestampSeconds, nowSeconds, toleranceSeconds)) {
+    throw new AppError("Stripe webhook timestamp outside tolerance", 400);
   }
 
   return JSON.parse(payloadBuffer.toString("utf8"));

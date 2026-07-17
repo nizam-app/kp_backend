@@ -33,6 +33,10 @@ export const env = {
   STRIPE_SECRET_KEY: process.env.STRIPE_SECRET_KEY || "",
   STRIPE_PUBLISHABLE_KEY: process.env.STRIPE_PUBLISHABLE_KEY || "",
   STRIPE_WEBHOOK_SECRET: process.env.STRIPE_WEBHOOK_SECRET || "",
+  /** Pin to the API version selected for this Stripe account. */
+  STRIPE_API_VERSION: process.env.STRIPE_API_VERSION || "",
+  /** Replay-protection window (seconds) for Stripe webhook signature timestamps. */
+  STRIPE_WEBHOOK_TOLERANCE_SECONDS: process.env.STRIPE_WEBHOOK_TOLERANCE_SECONDS || "300",
   /** Optional; required only for POST /api/v1/media/profile-image */
   CLOUDINARY_URL: process.env.CLOUDINARY_URL || "",
   CLOUDINARY_CLOUD_NAME: process.env.CLOUDINARY_CLOUD_NAME || "",

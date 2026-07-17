@@ -3,37 +3,18 @@ import { Invoice } from "../invoice/invoice.model.js";
 import { Job } from "../job/job.model.js";
 import { JobEvent } from "../jobEvent/jobEvent.model.js";
 import { EarningTransaction } from "../earning/earningTransaction.model.js";
+import { StripeWebhookEvent } from "./stripeWebhookEvent.model.js";
+import { completeJobOnConfirmedPayment } from "../job/job.service.js";
+import {
+  invoiceStatusFromPaymentIntent,
+  shouldSkipDowngrade,
+} from "./stripePaymentStatus.js";
 import {
   computePlatformFeeNet,
   getPlatformFeePercent,
 } from "../../utils/platformFee.js";
 import { notifyAdminsSafely } from "../notification/adminNotification.service.js";
 import { ADMIN_NOTIFICATION_EVENTS } from "../notification/adminNotificationEvents.js";
-
-const invoiceStatusFromPaymentIntent = (status) => {
-  switch (`${status || ""}`) {
-    case "succeeded":
-      return { invoiceStatus: "PAID", paymentStatus: "SUCCEEDED", markPaid: true };
-    case "processing":
-      return { invoiceStatus: "ISSUED", paymentStatus: "PROCESSING", markPaid: false };
-    case "requires_action":
-      return {
-        invoiceStatus: "ISSUED",
-        paymentStatus: "REQUIRES_ACTION",
-        markPaid: false,
-      };
-    case "requires_payment_method":
-      return {
-        invoiceStatus: "FAILED",
-        paymentStatus: "REQUIRES_PAYMENT_METHOD",
-        markPaid: false,
-      };
-    case "canceled":
-      return { invoiceStatus: "VOID", paymentStatus: "CANCELED", markPaid: false };
-    default:
-      return { invoiceStatus: "ISSUED", paymentStatus: "PENDING", markPaid: false };
-  }
-};
 
 const roundAmount = (value) =>
   Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
@@ -121,6 +102,18 @@ export const applyPaymentIntentToInvoice = async (paymentIntent) => {
 
   const statusMap = invoiceStatusFromPaymentIntent(paymentIntent.status);
   const previousPaymentStatus = invoice.payment?.status;
+
+  // Monotonic guard: never downgrade a confirmed payment because a stale,
+  // out-of-order event (e.g. a late "processing") arrives after "succeeded".
+  if (shouldSkipDowngrade(previousPaymentStatus, statusMap)) {
+    return {
+      ok: true,
+      ignored: true,
+      reason: "already_paid_no_downgrade",
+      invoiceId: invoice._id.toString(),
+      paymentStatus: previousPaymentStatus,
+    };
+  }
   const paidAt =
     statusMap.markPaid && paymentIntent.created
       ? new Date(Number(paymentIntent.created) * 1000)
@@ -163,6 +156,14 @@ export const applyPaymentIntentToInvoice = async (paymentIntent) => {
       invoiceStatus: statusMap.invoiceStatus,
     },
   });
+
+  // Finalize a job that was left awaiting approval pending authentication
+  // (3D Secure) once the payment is confirmed asynchronously.
+  if (statusMap.markPaid) {
+    await completeJobOnConfirmedPayment(invoice.job, {
+      paymentStatus: statusMap.paymentStatus,
+    });
+  }
 
   if (
     statusMap.invoiceStatus === "FAILED" &&
@@ -239,9 +240,65 @@ const applyRefundToInvoice = async (charge) => {
   };
 };
 
-export const processStripeWebhookEvent = async (event) => {
-  if (!event?.type) throw new AppError("Stripe webhook event type is required", 400);
+const applyDisputeToInvoice = async (dispute) => {
+  const paymentIntentId = dispute?.payment_intent;
+  const chargeId = dispute?.charge;
+  if (!paymentIntentId && !chargeId) {
+    return { ok: true, ignored: true, reason: "payment_reference_missing" };
+  }
 
+  const invoice = paymentIntentId
+    ? await Invoice.findOne({ "payment.stripePaymentIntentId": paymentIntentId })
+    : null;
+  if (!invoice) {
+    return { ok: true, ignored: true, reason: "invoice_not_found" };
+  }
+
+  const closed = dispute?.status === "won" || dispute?.status === "lost";
+  invoice.payment = {
+    ...(invoice.payment || {}),
+    provider: "STRIPE",
+    disputeStatus: dispute?.status || "under_review",
+    lastError: `Stripe dispute ${dispute?.status || "opened"}`,
+    updatedAt: new Date(),
+  };
+  if (dispute?.status === "lost") invoice.status = "REFUNDED";
+  await invoice.save();
+
+  const job = await Job.findById(invoice.job);
+  await createLifecycleJobEvent({
+    job,
+    type: "PAYMENT_DISPUTED",
+    note: `Stripe dispute ${dispute?.status || "opened"}`,
+    payload: {
+      invoiceId: invoice._id,
+      stripePaymentIntentId: paymentIntentId || null,
+      disputeStatus: dispute?.status || null,
+    },
+  });
+
+  await notifyAdminsSafely({
+    eventKey: ADMIN_NOTIFICATION_EVENTS.PAYMENT_FAILED,
+    dedupeKey: `payment-dispute:${dispute?.id || invoice._id}:${dispute?.status || "open"}`,
+    title: `Chargeback ${dispute?.status || "opened"} on invoice ${invoice.invoiceNo || invoice._id}`,
+    body: `A Stripe dispute is ${dispute?.status || "open"} for payment ${paymentIntentId || ""}.`,
+    data: {
+      invoiceId: invoice._id.toString(),
+      jobId: invoice.job?.toString?.() || null,
+      paymentIntentId: paymentIntentId || null,
+      screen: "ADMIN_PAYMENT",
+    },
+  });
+
+  return {
+    ok: true,
+    invoiceId: invoice._id.toString(),
+    disputeStatus: dispute?.status || null,
+    closed,
+  };
+};
+
+const dispatchStripeEvent = async (event) => {
   switch (event.type) {
     case "payment_intent.succeeded":
     case "payment_intent.processing":
@@ -251,6 +308,10 @@ export const processStripeWebhookEvent = async (event) => {
       return applyPaymentIntentToInvoice(event.data?.object || {});
     case "charge.refunded":
       return applyRefundToInvoice(event.data?.object || {});
+    case "charge.dispute.created":
+    case "charge.dispute.updated":
+    case "charge.dispute.closed":
+      return applyDisputeToInvoice(event.data?.object || {});
     default:
       return {
         ok: true,
@@ -258,5 +319,33 @@ export const processStripeWebhookEvent = async (event) => {
         reason: "event_not_handled",
         eventType: event.type,
       };
+  }
+};
+
+export const processStripeWebhookEvent = async (event) => {
+  if (!event?.type) throw new AppError("Stripe webhook event type is required", 400);
+
+  // Idempotency ledger: Stripe delivers at-least-once. Claim the event id
+  // first; a duplicate delivery is acknowledged without reprocessing.
+  if (event.id) {
+    try {
+      await StripeWebhookEvent.create({ eventId: event.id, type: event.type });
+    } catch (err) {
+      if (err?.code === 11000) {
+        return { ok: true, ignored: true, reason: "duplicate_event", eventId: event.id };
+      }
+      throw err;
+    }
+  }
+
+  try {
+    return await dispatchStripeEvent(event);
+  } catch (err) {
+    // Do not poison the idempotency ledger: a failed handler must be
+    // retryable when Stripe redelivers the event.
+    if (event.id) {
+      await StripeWebhookEvent.deleteOne({ eventId: event.id });
+    }
+    throw err;
   }
 };

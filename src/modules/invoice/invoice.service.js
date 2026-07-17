@@ -305,10 +305,24 @@ export const listInvoices = async (user, query = {}) => {
   const filter = {};
   if (user.role === "FLEET") filter.fleet = user._id;
   if (user.role === "MECHANIC") filter.mechanic = user._id;
+  if (user.role === ROLES.COMPANY) {
+    const assignedJobIds = await Job.distinct("_id", { assignedCompany: user._id });
+    filter.job = { $in: assignedJobIds };
+  }
   if (query.status) filter.status = `${query.status}`.trim().toUpperCase();
   if (query.job) {
     const jobId = `${query.job}`.trim();
-    if (jobId) filter.job = jobId;
+    if (jobId) {
+      if (user.role === ROLES.COMPANY) {
+        const hasAccess = await Job.exists({
+          _id: jobId,
+          assignedCompany: user._id,
+        });
+        filter.job = hasAccess ? jobId : { $in: [] };
+      } else {
+        filter.job = jobId;
+      }
+    }
   }
 
   const [items, total] = await Promise.all([

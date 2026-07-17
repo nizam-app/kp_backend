@@ -6,6 +6,7 @@ import {
   createStripeConnectLoginLink,
   constructStripeWebhookEvent,
   createStripeSetupIntent,
+  detachStripePaymentMethod,
   ensureStripeCustomerForUser,
   ensureStripeConnectAccountForMechanic,
   getStripePublicConfig,
@@ -401,6 +402,17 @@ export const setDefaultPaymentMethod = async (user, methodId) => {
 
 export const removePaymentMethod = async (user, methodId) => {
   const method = await ensureRelatedPaymentMethod(methodId, user._id);
+
+  // Detach from Stripe so it can no longer be charged. Never block local
+  // removal on a Stripe hiccup (card may already be detached/gone).
+  if (method.provider === "STRIPE" && method.providerMethodId) {
+    try {
+      await detachStripePaymentMethod(method.providerMethodId);
+    } catch (err) {
+      // Ignore: local deactivation below is the source of truth for the app.
+    }
+  }
+
   method.isActive = false;
   method.isDefault = false;
   await method.save({ validateBeforeSave: false });
