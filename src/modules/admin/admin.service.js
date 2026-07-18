@@ -1,5 +1,6 @@
 import AppError from "../../utils/AppError.js";
 import { AsyncLocalStorage } from "async_hooks";
+import mongoose from "mongoose";
 import {
   JOB_STATUS,
   MECHANIC_VERIFICATION_STATUS,
@@ -22,6 +23,17 @@ import { Review } from "../review/review.model.js";
 import { AuditLog } from "../auditLog/auditLog.model.js";
 import { JobEvent } from "../jobEvent/jobEvent.model.js";
 import { EarningTransaction } from "../earning/earningTransaction.model.js";
+import { PaymentAttempt } from "../billing/paymentAttempt.model.js";
+import { Refund } from "../billing/refund.model.js";
+import {
+  createStripeRefund,
+  retrieveStripePaymentIntent,
+} from "../billing/stripe.service.js";
+import {
+  applyPaymentIntentToInvoice,
+  applyStripeRefundToInvoice,
+} from "../billing/stripeWebhook.service.js";
+import { paymentAgingBucket } from "../billing/paymentOperations.service.js";
 import { ChatMessage } from "../chat/chat.model.js";
 import { sendJobMessage } from "../chat/chat.service.js";
 import { calculateJobVat } from "../../utils/vat.js";
@@ -67,6 +79,18 @@ const trendPayload = (current, previous) => ({
   previous: Number(previous) || 0,
   deltaPct: pctDelta(current, previous),
 });
+
+const netCapturedInvoiceAmountExpression = {
+  $max: [
+    {
+      $subtract: [
+        "$totalAmount",
+        { $ifNull: ["$payment.refundedAmount", 0] },
+      ],
+    },
+    0,
+  ],
+};
 
 const serviceRequestBucketFromJobStatus = (status) => {
   if ([JOB_STATUS.COMPLETED].includes(status)) return "COMPLETED";
@@ -660,8 +684,17 @@ export const getAdminDashboard = async () => {
     jobsCompletedPrevious,
   ] = await Promise.all([
     Invoice.aggregate([
-      { $match: { status: "PAID" } },
-      { $group: { _id: null, totalRevenue: { $sum: "$totalAmount" } } },
+      {
+        $match: {
+          status: { $in: ["PAID", "PARTIALLY_REFUNDED", "REFUNDED"] },
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          totalRevenue: { $sum: netCapturedInvoiceAmountExpression },
+        },
+      },
     ]),
     EarningTransaction.aggregate([
       { $group: { _id: null, platformCommission: { $sum: "$platformFee" } } },
@@ -683,7 +716,7 @@ export const getAdminDashboard = async () => {
       {
         $match: {
           paidAt: { $gte: seriesStart },
-          status: "PAID",
+          status: { $in: ["PAID", "PARTIALLY_REFUNDED", "REFUNDED"] },
         },
       },
       {
@@ -692,7 +725,7 @@ export const getAdminDashboard = async () => {
             year: { $year: "$paidAt" },
             month: { $month: "$paidAt" },
           },
-          total: { $sum: "$totalAmount" },
+          total: { $sum: netCapturedInvoiceAmountExpression },
         },
       },
     ]),
@@ -720,20 +753,30 @@ export const getAdminDashboard = async () => {
     Invoice.aggregate([
       {
         $match: {
-          status: "PAID",
+          status: { $in: ["PAID", "PARTIALLY_REFUNDED", "REFUNDED"] },
           paidAt: { $gte: periodStart, $lte: now },
         },
       },
-      { $group: { _id: null, total: { $sum: "$totalAmount" } } },
+      {
+        $group: {
+          _id: null,
+          total: { $sum: netCapturedInvoiceAmountExpression },
+        },
+      },
     ]),
     Invoice.aggregate([
       {
         $match: {
-          status: "PAID",
+          status: { $in: ["PAID", "PARTIALLY_REFUNDED", "REFUNDED"] },
           paidAt: { $gte: prevStart, $lt: periodStart },
         },
       },
-      { $group: { _id: null, total: { $sum: "$totalAmount" } } },
+      {
+        $group: {
+          _id: null,
+          total: { $sum: netCapturedInvoiceAmountExpression },
+        },
+      },
     ]),
     EarningTransaction.aggregate([
       {
@@ -1982,13 +2025,13 @@ export const listAdminFleet = async (query = {}) => {
           {
             $match: {
               fleet: { $in: fleetIds },
-              status: "PAID",
+              status: { $in: ["PAID", "PARTIALLY_REFUNDED", "REFUNDED"] },
             },
           },
           {
             $group: {
               _id: "$fleet",
-              paidSpend: { $sum: "$totalAmount" },
+              paidSpend: { $sum: netCapturedInvoiceAmountExpression },
             },
           },
         ])
@@ -2192,6 +2235,151 @@ export const updateAdminFleetVehicle = async (
   return vehicle.toObject();
 };
 
+const getAwaitingPaymentNoAttemptQueue = async ({
+  page,
+  limit,
+  search,
+  fleetId,
+}) => {
+  const match = { status: JOB_STATUS.AWAITING_APPROVAL };
+  if (fleetId && mongoose.Types.ObjectId.isValid(fleetId)) {
+    match.fleet = new mongoose.Types.ObjectId(fleetId);
+  }
+
+  const pipeline = [
+    { $match: match },
+    {
+      $lookup: {
+        from: Invoice.collection.name,
+        localField: "_id",
+        foreignField: "job",
+        as: "invoices",
+      },
+    },
+    { $match: { "invoices.0": { $exists: false } } },
+    {
+      $lookup: {
+        from: User.collection.name,
+        localField: "fleet",
+        foreignField: "_id",
+        as: "fleetUser",
+      },
+    },
+    { $unwind: { path: "$fleetUser", preserveNullAndEmptyArrays: true } },
+    {
+      $lookup: {
+        from: User.collection.name,
+        localField: "assignedMechanic",
+        foreignField: "_id",
+        as: "mechanicUser",
+      },
+    },
+    { $unwind: { path: "$mechanicUser", preserveNullAndEmptyArrays: true } },
+  ];
+
+  if (search) {
+    const regex = safeRegex(search);
+    pipeline.push({
+      $match: {
+        $or: [
+          { jobCode: regex },
+          { title: regex },
+          { "fleetUser.email": regex },
+          { "fleetUser.fleetProfile.companyName": regex },
+          { "mechanicUser.email": regex },
+          { "mechanicUser.mechanicProfile.displayName": regex },
+        ],
+      },
+    });
+  }
+
+  pipeline.push({
+    $facet: {
+      items: [
+        { $sort: { paymentDueAt: 1, updatedAt: 1 } },
+        { $skip: (page - 1) * limit },
+        { $limit: limit },
+      ],
+      summary: [
+        {
+          $group: {
+            _id: null,
+            total: { $sum: 1 },
+            amount: {
+              $sum: {
+                $ifNull: ["$finalAmount", { $ifNull: ["$acceptedAmount", 0] }],
+              },
+            },
+            overdueCount: {
+              $sum: {
+                $cond: [{ $lt: ["$paymentDueAt", new Date()] }, 1, 0],
+              },
+            },
+            overdueAmount: {
+              $sum: {
+                $cond: [
+                  { $lt: ["$paymentDueAt", new Date()] },
+                  {
+                    $ifNull: [
+                      "$finalAmount",
+                      { $ifNull: ["$acceptedAmount", 0] },
+                    ],
+                  },
+                  0,
+                ],
+              },
+            },
+          },
+        },
+      ],
+    },
+  });
+
+  const [result] = await Job.aggregate(pipeline);
+  const total = result?.summary?.[0]?.total || 0;
+  const amount = result?.summary?.[0]?.amount || 0;
+  const overdueCount = result?.summary?.[0]?.overdueCount || 0;
+  const overdueAmount = result?.summary?.[0]?.overdueAmount || 0;
+  const items = (result?.items || []).map((job) => ({
+    _id: `job:${job._id}`,
+    invoiceNo: null,
+    jobId: job._id,
+    company:
+      job.fleetUser?.fleetProfile?.companyName || job.fleetUser?.email || null,
+    service: job.title || job.jobCode || null,
+    jobCode: job.jobCode || null,
+    mechanic:
+      job.mechanicUser?.mechanicProfile?.displayName ||
+      job.mechanicUser?.email ||
+      null,
+    amount: Number(job.finalAmount ?? job.acceptedAmount ?? 0) || 0,
+    subtotal: Number(job.finalAmount ?? job.acceptedAmount ?? 0) || 0,
+    platformFee: 0,
+    mechanicPayout: 0,
+    currency: job.currency || "GBP",
+    stripeRef: null,
+    paymentMethod: null,
+    status: "AWAITING_PAYMENT",
+    paymentStatus: "NOT_STARTED",
+    date: job.updatedAt,
+    ageMinutes: Math.max(
+      0,
+      Math.floor(
+        (Date.now() - new Date(job.updatedAt).getTime()) /
+          60000
+      )
+    ),
+    dueAt: job.paymentDueAt || null,
+    collectionState: job.paymentCollectionState || "ACTION_REQUIRED",
+    reminderCount: job.paymentReminderCount || 0,
+    nextReminderAt: job.paymentNextReminderAt || null,
+    agingBucket: paymentAgingBucket(job.paymentDueAt || job.updatedAt),
+    recommendedAction: "PAYER_APPROVAL_REQUIRED",
+  }));
+
+  return { items, total, amount, overdueCount, overdueAmount };
+};
+
 export const getAdminFinancialOverview = async (query = {}) => {
   const page = parsePage(query.page);
   const exportAll =
@@ -2204,13 +2392,22 @@ export const getAdminFinancialOverview = async (query = {}) => {
   let statusFilter = `${query.status || ""}`.trim().toUpperCase();
   // UI aliases → invoice enum
   if (statusFilter === "PENDING") statusFilter = "ISSUED";
-  if (statusFilter === "HELD") statusFilter = "AUTHORIZED";
+  const awaitingPaymentNoAttempt = statusFilter === "AWAITING_PAYMENT";
+  const paymentStatusFilter = ["REQUIRES_ACTION", "PROCESSING"].includes(
+    statusFilter
+  )
+    ? statusFilter
+    : null;
 
   const search = `${query.search || ""}`.trim();
   const fleetId = `${query.fleetId || query.fleet || ""}`.trim();
   const invoiceFilter = {};
 
-  if (statusFilter) {
+  if (paymentStatusFilter) {
+    invoiceFilter["payment.status"] = paymentStatusFilter;
+  } else if (statusFilter === "REFUNDED") {
+    invoiceFilter.status = { $in: ["PARTIALLY_REFUNDED", "REFUNDED"] };
+  } else if (statusFilter && !awaitingPaymentNoAttempt) {
     invoiceFilter.status = statusFilter;
   }
 
@@ -2240,8 +2437,17 @@ export const getAdminFinancialOverview = async (query = {}) => {
     }
   }
 
+  const awaitingQueue = await getAwaitingPaymentNoAttemptQueue({
+    page: awaitingPaymentNoAttempt ? page : 1,
+    limit: awaitingPaymentNoAttempt ? limit : 1,
+    search,
+    fleetId,
+  });
+
   const [invoices, total, summaryAgg] = await Promise.all([
-    Invoice.find(invoiceFilter)
+    awaitingPaymentNoAttempt
+      ? Promise.resolve([])
+      : Invoice.find(invoiceFilter)
       .sort({ issuedAt: -1, createdAt: -1 })
       .skip(skip)
       .limit(limit)
@@ -2249,29 +2455,74 @@ export const getAdminFinancialOverview = async (query = {}) => {
       .populate("job", "title jobCode")
       .populate("mechanic", "email mechanicProfile.displayName")
       .lean(),
-    Invoice.countDocuments(invoiceFilter),
+    awaitingPaymentNoAttempt
+      ? Promise.resolve(awaitingQueue.total)
+      : Invoice.countDocuments(invoiceFilter),
     Invoice.aggregate([
       {
         $group: {
           _id: null,
           totalRevenue: {
             $sum: {
-              $cond: [{ $eq: ["$status", "PAID"] }, "$totalAmount", 0],
+              $cond: [
+                {
+                  $in: [
+                    "$status",
+                    ["PAID", "PARTIALLY_REFUNDED", "REFUNDED"],
+                  ],
+                },
+                {
+                  $max: [
+                    {
+                      $subtract: [
+                        "$totalAmount",
+                        { $ifNull: ["$payment.refundedAmount", 0] },
+                      ],
+                    },
+                    0,
+                  ],
+                },
+                0,
+              ],
             },
           },
           paidSubtotal: {
             $sum: {
-              $cond: [{ $eq: ["$status", "PAID"] }, "$subtotal", 0],
+              $cond: [
+                {
+                  $in: [
+                    "$status",
+                    ["PAID", "PARTIALLY_REFUNDED", "REFUNDED"],
+                  ],
+                },
+                {
+                  $multiply: [
+                    "$subtotal",
+                    {
+                      $max: [
+                        {
+                          $subtract: [
+                            1,
+                            {
+                              $divide: [
+                                { $ifNull: ["$payment.refundedAmount", 0] },
+                                { $max: ["$totalAmount", 0.01] },
+                              ],
+                            },
+                          ],
+                        },
+                        0,
+                      ],
+                    },
+                  ],
+                },
+                0,
+              ],
             },
           },
           pendingPayments: {
             $sum: {
               $cond: [{ $eq: ["$status", "ISSUED"] }, "$totalAmount", 0],
-            },
-          },
-          heldPayments: {
-            $sum: {
-              $cond: [{ $eq: ["$status", "AUTHORIZED"] }, "$totalAmount", 0],
             },
           },
           failedPayments: {
@@ -2284,16 +2535,25 @@ export const getAdminFinancialOverview = async (query = {}) => {
               $cond: [
                 {
                   $and: [
-                    { $eq: ["$status", "ISSUED"] },
-                    {
-                      $lt: [
-                        "$issuedAt",
-                        new Date(Date.now() - 14 * 24 * 60 * 60 * 1000),
-                      ],
-                    },
+                    { $in: ["$status", ["ISSUED", "FAILED"]] },
+                    { $lt: ["$dueAt", new Date()] },
                   ],
                 },
                 "$totalAmount",
+                0,
+              ],
+            },
+          },
+          overdueCount: {
+            $sum: {
+              $cond: [
+                {
+                  $and: [
+                    { $in: ["$status", ["ISSUED", "FAILED"]] },
+                    { $lt: ["$dueAt", new Date()] },
+                  ],
+                },
+                1,
                 0,
               ],
             },
@@ -2312,13 +2572,19 @@ export const getAdminFinancialOverview = async (query = {}) => {
       totalRevenue: summaryAgg[0]?.totalRevenue || 0,
       platformCommission,
       pendingPayments: summaryAgg[0]?.pendingPayments || 0,
-      heldPayments: summaryAgg[0]?.heldPayments || 0,
       failedPayments: summaryAgg[0]?.failedPayments || 0,
-      overdueAmount: summaryAgg[0]?.overdueAmount || 0,
+      awaitingPaymentNoAttempt: awaitingQueue.amount,
+      awaitingPaymentNoAttemptCount: awaitingQueue.total,
+      overdueAmount:
+        (summaryAgg[0]?.overdueAmount || 0) + awaitingQueue.overdueAmount,
+      overdueCount:
+        (summaryAgg[0]?.overdueCount || 0) + awaitingQueue.overdueCount,
       totalInvoices: summaryAgg[0]?.totalInvoices || 0,
       platformFeePercent: getPlatformFeePercent(),
     },
-    items: invoices.map((invoice) => {
+    items: awaitingPaymentNoAttempt
+      ? awaitingQueue.items
+      : invoices.map((invoice) => {
       const subtotal = Number(invoice.subtotal) || 0;
       const platformFee = companyEarningsPlatformFee(subtotal);
       const mechanicPayout = companyEarningsNet(subtotal);
@@ -2330,11 +2596,13 @@ export const getAdminFinancialOverview = async (query = {}) => {
       const displayStatus =
         invoice.status === "PAID"
           ? "PAID"
+          : invoice.payment?.status === "REQUIRES_ACTION"
+            ? "REQUIRES_ACTION"
+            : invoice.payment?.status === "PROCESSING"
+              ? "PROCESSING"
           : invoice.status === "ISSUED"
             ? "PENDING"
-            : invoice.status === "AUTHORIZED"
-              ? "HELD"
-              : invoice.status;
+            : invoice.status;
 
       return {
         _id: invoice._id,
@@ -2351,7 +2619,29 @@ export const getAdminFinancialOverview = async (query = {}) => {
         stripeRef: invoice.payment?.stripePaymentIntentId || null,
         paymentMethod: invoice.payment?.provider || null,
         status: displayStatus,
+        paymentStatus: invoice.payment?.status || null,
         date: invoice.paidAt || invoice.issuedAt,
+        ageMinutes: Math.max(
+          0,
+          Math.floor(
+            (Date.now() - new Date(invoice.paidAt || invoice.issuedAt).getTime()) /
+              60000
+          )
+        ),
+        dueAt: invoice.dueAt || null,
+        collectionState: invoice.collections?.state || null,
+        reminderCount: invoice.collections?.reminderCount || 0,
+        nextReminderAt: invoice.collections?.nextReminderAt || null,
+        agingBucket: paymentAgingBucket(invoice.dueAt || invoice.issuedAt),
+        lastError: invoice.payment?.lastError || null,
+        recommendedAction:
+          invoice.payment?.status === "REQUIRES_ACTION"
+            ? "PAYER_AUTHENTICATION_REQUIRED"
+            : invoice.payment?.status === "PROCESSING"
+              ? "SYNC_STATUS"
+              : invoice.status === "FAILED"
+                ? "PAYER_RETRY_REQUIRED"
+                : null,
       };
     }),
     meta: {
@@ -2361,6 +2651,236 @@ export const getAdminFinancialOverview = async (query = {}) => {
       totalPages: Math.ceil(total / limit) || 1,
     },
   };
+};
+
+export const getAdminFinancialPaymentDetail = async (invoiceId) => {
+  if (!mongoose.Types.ObjectId.isValid(invoiceId)) {
+    throw new AppError("Invalid invoice id", 400);
+  }
+
+  const invoice = await Invoice.findById(invoiceId)
+    .populate("fleet", "email fleetProfile.companyName fleetProfile.contactName")
+    .populate("mechanic", "email mechanicProfile.displayName")
+    .populate("job", "jobCode title status completedAt updatedAt")
+    .lean();
+  if (!invoice) throw new AppError("Invoice not found", 404);
+
+  const [attempts, refunds, paymentEvents] = await Promise.all([
+    PaymentAttempt.find({ invoice: invoice._id })
+      .sort({ createdAt: -1 })
+      .populate("payer", "email role fleetProfile.companyName companyProfile.companyName")
+      .lean(),
+    Refund.find({ invoice: invoice._id })
+      .sort({ createdAt: -1 })
+      .populate("initiatedBy", "email role")
+      .lean(),
+    JobEvent.find({
+      job: invoice.job?._id || invoice.job,
+      type: { $in: ["PAYMENT_UPDATED", "PAYMENT_REFUNDED", "PAYMENT_DISPUTED"] },
+    })
+      .sort({ createdAt: -1 })
+      .select("type note payload createdAt")
+      .lean(),
+  ]);
+
+  return {
+    invoice: {
+      _id: invoice._id,
+      invoiceNo: invoice.invoiceNo,
+      status: invoice.status,
+      subtotal: invoice.subtotal,
+      vatAmount: invoice.vatAmount,
+      totalAmount: invoice.totalAmount,
+      currency: invoice.currency,
+      issuedAt: invoice.issuedAt,
+      paidAt: invoice.paidAt || null,
+      dueAt: invoice.dueAt || null,
+      agingBucket: paymentAgingBucket(invoice.dueAt || invoice.issuedAt),
+      collections: invoice.collections || null,
+      payment: {
+        provider: invoice.payment?.provider || null,
+        status: invoice.payment?.status || "PENDING",
+        stripePaymentIntentId: invoice.payment?.stripePaymentIntentId || null,
+        lastError: invoice.payment?.lastError || null,
+        authorizedAmount: invoice.payment?.authorizedAmount ?? null,
+        capturedAmount: invoice.payment?.capturedAmount ?? null,
+        refundedAmount: invoice.payment?.refundedAmount ?? 0,
+        updatedAt: invoice.payment?.updatedAt || null,
+      },
+    },
+    job: invoice.job
+      ? {
+          _id: invoice.job._id || invoice.job,
+          jobCode: invoice.job.jobCode || null,
+          title: invoice.job.title || null,
+          status: invoice.job.status || null,
+          updatedAt: invoice.job.updatedAt || null,
+        }
+      : null,
+    fleet: invoice.fleet
+      ? {
+          _id: invoice.fleet._id || invoice.fleet,
+          name:
+            invoice.fleet.fleetProfile?.companyName || invoice.fleet.email || null,
+          email: invoice.fleet.email || null,
+        }
+      : null,
+    mechanic: invoice.mechanic
+      ? {
+          _id: invoice.mechanic._id || invoice.mechanic,
+          name:
+            invoice.mechanic.mechanicProfile?.displayName ||
+            invoice.mechanic.email ||
+            null,
+          email: invoice.mechanic.email || null,
+        }
+      : null,
+    attempts: attempts.map((attempt) => ({
+      _id: attempt._id,
+      paymentStatus: attempt.paymentStatus,
+      processorStatus: attempt.processorStatus || null,
+      amount: attempt.amount,
+      currency: attempt.currency,
+      stripePaymentIntentId: attempt.stripePaymentIntentId,
+      declineCode: attempt.declineCode || null,
+      failureMessage: attempt.failureMessage || null,
+      payer: attempt.payer
+        ? {
+            _id: attempt.payer._id || attempt.payer,
+            email: attempt.payer.email || null,
+            role: attempt.payer.role || attempt.payerRole,
+          }
+        : null,
+      createdAt: attempt.createdAt,
+      completedAt: attempt.completedAt || null,
+      events: [...(attempt.events || [])].reverse(),
+    })),
+    refunds: refunds.map((refund) => ({
+      _id: refund._id,
+      stripeRefundId: refund.stripeRefundId,
+      amount: refund.amount,
+      currency: refund.currency,
+      reason: refund.reason,
+      status: refund.status,
+      source: refund.source,
+      initiatedBy: refund.initiatedBy
+        ? {
+            email: refund.initiatedBy.email || null,
+            role: refund.initiatedBy.role || null,
+          }
+        : null,
+      processedAt: refund.processedAt || null,
+      createdAt: refund.createdAt,
+    })),
+    paymentEvents,
+    actions: {
+      canSync: Boolean(invoice.payment?.stripePaymentIntentId),
+      canRetry: false,
+      canRefund:
+        Boolean(invoice.payment?.stripePaymentIntentId) &&
+        ["PAID", "PARTIALLY_REFUNDED"].includes(invoice.status) &&
+        Number(invoice.payment?.refundedAmount || 0) <
+          Number(invoice.payment?.capturedAmount || invoice.totalAmount || 0),
+      refundableAmount: Math.max(
+        Number(invoice.payment?.capturedAmount || invoice.totalAmount || 0) -
+          Number(invoice.payment?.refundedAmount || 0),
+        0
+      ),
+      retryReason:
+        invoice.status === "FAILED" ||
+        invoice.payment?.status === "REQUIRES_PAYMENT_METHOD"
+          ? "The payer must choose or add a card and retry from the job approval screen."
+          : null,
+    },
+  };
+};
+
+export const syncAdminFinancialPayment = async (invoiceId) => {
+  const invoice = await Invoice.findById(invoiceId);
+  if (!invoice) throw new AppError("Invoice not found", 404);
+
+  const paymentIntentId = invoice.payment?.stripePaymentIntentId;
+  if (!paymentIntentId) {
+    throw new AppError("This invoice has no Stripe payment to synchronize", 400);
+  }
+
+  const paymentIntent = await retrieveStripePaymentIntent(paymentIntentId);
+  const result = await applyPaymentIntentToInvoice(paymentIntent, {
+    source: "ADMIN",
+    eventType: "ADMIN_PAYMENT_SYNC",
+  });
+  return {
+    paymentIntentId,
+    processorStatus: paymentIntent.status,
+    invoiceStatus: result.invoiceStatus,
+    paymentStatus: result.paymentStatus,
+  };
+};
+
+export const refundAdminFinancialPayment = async (
+  invoiceId,
+  payload = {},
+  adminUser
+) => {
+  const invoice = await Invoice.findById(invoiceId);
+  if (!invoice) throw new AppError("Invoice not found", 404);
+  if (!["PAID", "PARTIALLY_REFUNDED"].includes(invoice.status)) {
+    throw new AppError("Only paid invoices can be refunded", 400);
+  }
+
+  const paymentIntentId = invoice.payment?.stripePaymentIntentId;
+  if (!paymentIntentId) {
+    throw new AppError("This invoice has no Stripe payment to refund", 400);
+  }
+
+  const reason = `${payload.reason || ""}`.trim();
+  if (reason.length < 5) {
+    throw new AppError("Provide a refund reason of at least 5 characters", 400);
+  }
+
+  const capturedAmount = Number(
+    invoice.payment?.capturedAmount || invoice.totalAmount || 0
+  );
+  const refundedAmount = Number(invoice.payment?.refundedAmount || 0);
+  const refundableAmount = Math.max(capturedAmount - refundedAmount, 0);
+  const requestedAmount =
+    payload.amount === undefined || payload.amount === null || payload.amount === ""
+      ? refundableAmount
+      : Number(payload.amount);
+
+  if (
+    !Number.isFinite(requestedAmount) ||
+    requestedAmount <= 0 ||
+    requestedAmount > refundableAmount + 0.001
+  ) {
+    throw new AppError(
+      `Refund amount must be between 0.01 and ${refundableAmount.toFixed(2)}`,
+      400
+    );
+  }
+
+  const amount = Math.round(requestedAmount * 100) / 100;
+  const idempotencyKey = `invoice:${invoice._id}:refund:${refundedAmount.toFixed(
+    2
+  )}:${amount.toFixed(2)}`;
+  const stripeRefund = await createStripeRefund({
+    paymentIntentId,
+    amount,
+    reason: "requested_by_customer",
+    idempotencyKey,
+    metadata: {
+      invoiceId: invoice._id.toString(),
+      jobId: invoice.job.toString(),
+      adminId: adminUser._id.toString(),
+      adminReason: reason,
+    },
+  });
+
+  return applyStripeRefundToInvoice(stripeRefund, {
+    source: "ADMIN",
+    initiatedBy: adminUser._id,
+    reason,
+  });
 };
 
 const toIdString = (value) => {
@@ -3298,7 +3818,7 @@ export const getAdminReports = async (query = {}) => {
   const prevStart = new Date(now.getFullYear(), now.getMonth() - (2 * monthCount - 1), 1);
 
   const paidMatch = (from, to) => ({
-    status: "PAID",
+    status: { $in: ["PAID", "PARTIALLY_REFUNDED", "REFUNDED"] },
     paidAt: { $gte: from, $lte: to },
   });
 
@@ -3322,11 +3842,11 @@ export const getAdminReports = async (query = {}) => {
   ] = await Promise.all([
     Invoice.aggregate([
       { $match: paidMatch(rangeStart, now) },
-      { $group: { _id: null, total: { $sum: "$totalAmount" } } },
+      { $group: { _id: null, total: { $sum: netCapturedInvoiceAmountExpression } } },
     ]),
     Invoice.aggregate([
       { $match: paidMatch(prevStart, new Date(rangeStart.getTime() - 1)) },
-      { $group: { _id: null, total: { $sum: "$totalAmount" } } },
+      { $group: { _id: null, total: { $sum: netCapturedInvoiceAmountExpression } } },
     ]),
     EarningTransaction.aggregate([
       { $match: { paidAt: { $gte: rangeStart, $lte: now } } },
@@ -3340,18 +3860,18 @@ export const getAdminReports = async (query = {}) => {
     Job.countDocuments({ createdAt: { $gte: prevStart, $lt: rangeStart } }),
     Invoice.aggregate([
       { $match: paidMatch(rangeStart, now) },
-      { $group: { _id: null, avg: { $avg: "$totalAmount" } } },
+      { $group: { _id: null, avg: { $avg: netCapturedInvoiceAmountExpression } } },
     ]),
     Invoice.aggregate([
       { $match: paidMatch(prevStart, new Date(rangeStart.getTime() - 1)) },
-      { $group: { _id: null, avg: { $avg: "$totalAmount" } } },
+      { $group: { _id: null, avg: { $avg: netCapturedInvoiceAmountExpression } } },
     ]),
     Invoice.aggregate([
       { $match: paidMatch(rangeStart, now) },
       {
         $group: {
           _id: { year: { $year: "$paidAt" }, month: { $month: "$paidAt" } },
-          revenue: { $sum: "$totalAmount" },
+          revenue: { $sum: netCapturedInvoiceAmountExpression },
         },
       },
     ]),
@@ -3398,7 +3918,7 @@ export const getAdminReports = async (query = {}) => {
       {
         $group: {
           _id: "$fleet",
-          revenue: { $sum: "$totalAmount" },
+          revenue: { $sum: netCapturedInvoiceAmountExpression },
           count: { $sum: 1 },
         },
       },

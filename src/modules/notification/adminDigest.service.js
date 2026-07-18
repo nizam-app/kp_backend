@@ -24,14 +24,26 @@ export const buildWeeklyAdminDigest = async ({ now = new Date() } = {}) => {
       Invoice.aggregate([
         {
           $match: {
-            status: "PAID",
+            status: { $in: ["PAID", "PARTIALLY_REFUNDED", "REFUNDED"] },
             paidAt: { $gte: periodStart, $lt: periodEnd },
           },
         },
         {
           $group: {
             _id: null,
-            total: { $sum: "$totalAmount" },
+            total: {
+              $sum: {
+                $max: [
+                  {
+                    $subtract: [
+                      "$totalAmount",
+                      { $ifNull: ["$payment.refundedAmount", 0] },
+                    ],
+                  },
+                  0,
+                ],
+              },
+            },
             count: { $sum: 1 },
           },
         },

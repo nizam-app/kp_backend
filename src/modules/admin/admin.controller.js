@@ -17,6 +17,9 @@ import {
   exportAdminReports,
   getAdminDashboard,
   getAdminFinancialOverview,
+  getAdminFinancialPaymentDetail,
+  refundAdminFinancialPayment,
+  syncAdminFinancialPayment,
   getAdminLiveTracking,
   getAdminReports,
   getAdminSettings,
@@ -256,6 +259,34 @@ export const adminFinancialController = async (req, res) => {
     message: "Admin financial overview fetched",
     data,
     meta,
+  });
+};
+
+export const adminFinancialPaymentDetailController = async (req, res) => {
+  const data = await getAdminFinancialPaymentDetail(req.params.invoiceId);
+  return sendResponse(res, {
+    message: "Admin payment detail fetched",
+    data,
+  });
+};
+
+export const syncAdminFinancialPaymentController = async (req, res) => {
+  const data = await syncAdminFinancialPayment(req.params.invoiceId);
+  return sendResponse(res, {
+    message: "Payment status synchronized",
+    data,
+  });
+};
+
+export const refundAdminFinancialPaymentController = async (req, res) => {
+  const data = await refundAdminFinancialPayment(
+    req.params.invoiceId,
+    req.body,
+    req.user
+  );
+  return sendResponse(res, {
+    message: "Refund submitted",
+    data,
   });
 };
 

@@ -4,6 +4,8 @@ import { Job } from "../job/job.model.js";
 import { JobEvent } from "../jobEvent/jobEvent.model.js";
 import { EarningTransaction } from "../earning/earningTransaction.model.js";
 import { StripeWebhookEvent } from "./stripeWebhookEvent.model.js";
+import { PaymentAttempt } from "./paymentAttempt.model.js";
+import { Refund } from "./refund.model.js";
 import { completeJobOnConfirmedPayment } from "../job/job.service.js";
 import {
   invoiceStatusFromPaymentIntent,
@@ -52,12 +54,13 @@ const syncEarningForInvoice = async (invoice, { shouldBePaid }) => {
     await EarningTransaction.deleteOne({
       mechanic: invoice.mechanic,
       job: invoice.job,
+      type: "JOB_PAYMENT",
     });
     return null;
   }
 
   return EarningTransaction.findOneAndUpdate(
-    { mechanic: invoice.mechanic, job: invoice.job },
+    { mechanic: invoice.mechanic, job: invoice.job, type: "JOB_PAYMENT" },
     {
       $set: {
         grossAmount,
@@ -94,7 +97,10 @@ const findInvoiceForPaymentIntent = async (paymentIntent) => {
   return invoice;
 };
 
-export const applyPaymentIntentToInvoice = async (paymentIntent) => {
+export const applyPaymentIntentToInvoice = async (
+  paymentIntent,
+  { source = "SYNC", eventType = "PAYMENT_INTENT_SYNCED", externalEventId } = {}
+) => {
   const invoice = await findInvoiceForPaymentIntent(paymentIntent);
   if (!invoice) {
     return { ok: true, ignored: true, reason: "invoice_not_found" };
@@ -129,8 +135,6 @@ export const applyPaymentIntentToInvoice = async (paymentIntent) => {
     stripePaymentMethodId:
       paymentIntent.payment_method || invoice.payment?.stripePaymentMethodId,
     stripePaymentIntentId: paymentIntent.id,
-    stripeClientSecret:
-      paymentIntent.client_secret || invoice.payment?.stripeClientSecret,
     lastError:
       paymentIntent.last_payment_error?.message || invoice.payment?.lastError || null,
     authorizedAmount:
@@ -140,8 +144,49 @@ export const applyPaymentIntentToInvoice = async (paymentIntent) => {
       : undefined,
     updatedAt: new Date(),
   };
+  invoice.dueAt =
+    invoice.dueAt ||
+    new Date(new Date(invoice.issuedAt || invoice.createdAt).getTime() + 24 * 60 * 60 * 1000);
+  invoice.collections = {
+    ...(invoice.collections || {}),
+    state: statusMap.markPaid
+      ? "RESOLVED"
+      : ["REQUIRES_ACTION", "REQUIRES_PAYMENT_METHOD"].includes(
+            statusMap.paymentStatus
+          )
+        ? "ACTION_REQUIRED"
+        : invoice.collections?.state || "CURRENT",
+    nextReminderAt: statusMap.markPaid
+      ? undefined
+      : invoice.collections?.nextReminderAt ||
+        new Date(Date.now() + 60 * 60 * 1000),
+  };
 
   await invoice.save();
+  await PaymentAttempt.updateOne(
+    { stripePaymentIntentId: paymentIntent.id },
+    {
+      $set: {
+        invoice: invoice._id,
+        paymentStatus: statusMap.paymentStatus,
+        processorStatus: paymentIntent.status,
+        declineCode: paymentIntent.last_payment_error?.code || undefined,
+        failureMessage: paymentIntent.last_payment_error?.message || undefined,
+        completedAt: statusMap.markPaid ? paidAt || new Date() : undefined,
+      },
+      $push: {
+        events: {
+          source,
+          eventType,
+          externalEventId,
+          paymentStatus: statusMap.paymentStatus,
+          processorStatus: paymentIntent.status,
+          message: paymentIntent.last_payment_error?.message || undefined,
+          occurredAt: new Date(),
+        },
+      },
+    }
+  );
   await syncEarningForInvoice(invoice, { shouldBePaid: statusMap.markPaid });
 
   const job = await Job.findById(invoice.job);
@@ -194,8 +239,102 @@ export const applyPaymentIntentToInvoice = async (paymentIntent) => {
   };
 };
 
-const applyRefundToInvoice = async (charge) => {
-  const paymentIntentId = charge?.payment_intent;
+const reconcileRefundAccounting = async (invoice) => {
+  const [summary] = await Refund.aggregate([
+    { $match: { invoice: invoice._id, status: "SUCCEEDED" } },
+    { $group: { _id: null, amount: { $sum: "$amount" } } },
+  ]);
+  const refundedAmount = roundAmount(summary?.amount || 0);
+  const capturedAmount = roundAmount(
+    invoice.payment?.capturedAmount || invoice.totalAmount || 0
+  );
+  const fullyRefunded = capturedAmount > 0 && refundedAmount >= capturedAmount - 0.01;
+
+  invoice.status = fullyRefunded ? "REFUNDED" : "PARTIALLY_REFUNDED";
+  invoice.payment = {
+    ...(invoice.payment || {}),
+    provider: "STRIPE",
+    status: fullyRefunded ? "REFUNDED" : "PARTIALLY_REFUNDED",
+    refundedAmount,
+    lastRefundAt: new Date(),
+    updatedAt: new Date(),
+  };
+  invoice.collections = {
+    ...(invoice.collections || {}),
+    state: "RESOLVED",
+    nextReminderAt: undefined,
+  };
+  await invoice.save();
+  return { refundedAmount, capturedAmount, fullyRefunded };
+};
+
+const createRefundEarningAdjustment = async (invoice, refund) => {
+  const [[refundSummary], [adjustmentSummary]] = await Promise.all([
+    Refund.aggregate([
+      { $match: { invoice: invoice._id, status: "SUCCEEDED" } },
+      { $group: { _id: null, amount: { $sum: "$amount" } } },
+    ]),
+    EarningTransaction.aggregate([
+      {
+        $match: {
+          invoice: invoice._id,
+          type: "ADJUSTMENT",
+          refund: { $ne: refund._id },
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          gross: { $sum: "$grossAmount" },
+          fee: { $sum: "$platformFee" },
+          net: { $sum: "$netAmount" },
+        },
+      },
+    ]),
+  ]);
+  const ratio = Math.min(
+    Number(refundSummary?.amount || 0) /
+      Math.max(Number(invoice.totalAmount || 0), 0.01),
+    1
+  );
+  const feePercent =
+    invoice.platformFeePercent != null
+      ? Number(invoice.platformFeePercent)
+      : getPlatformFeePercent();
+  const targetGross = -roundAmount(Number(invoice.subtotal || 0) * ratio);
+  const targetFee = -roundAmount((Math.abs(targetGross) * feePercent) / 100);
+  const targetNet = roundAmount(targetGross - targetFee);
+  const grossAmount = roundAmount(targetGross - Number(adjustmentSummary?.gross || 0));
+  const platformFee = roundAmount(targetFee - Number(adjustmentSummary?.fee || 0));
+  const netAmount = roundAmount(targetNet - Number(adjustmentSummary?.net || 0));
+
+  return EarningTransaction.findOneAndUpdate(
+    { refund: refund._id },
+    {
+      $setOnInsert: {
+        mechanic: invoice.mechanic,
+        job: invoice.job,
+        invoice: invoice._id,
+        refund: refund._id,
+        type: "ADJUSTMENT",
+        grossAmount,
+        platformFee,
+        platformFeePercent: feePercent,
+        netAmount,
+        currency: invoice.currency || "GBP",
+        paidAt: refund.processedAt || new Date(),
+        notes: `Refund adjustment: ${refund.reason}`,
+      },
+    },
+    { upsert: true, new: true }
+  );
+};
+
+export const applyStripeRefundToInvoice = async (
+  stripeRefund,
+  { source = "WEBHOOK", initiatedBy = null, reason = null } = {}
+) => {
+  const paymentIntentId = stripeRefund?.payment_intent;
   if (!paymentIntentId) {
     return { ok: true, ignored: true, reason: "payment_intent_missing" };
   }
@@ -207,17 +346,57 @@ const applyRefundToInvoice = async (charge) => {
     return { ok: true, ignored: true, reason: "invoice_not_found" };
   }
 
-  invoice.status = "REFUNDED";
-  invoice.payment = {
-    ...(invoice.payment || {}),
-    provider: "STRIPE",
-    status: "REFUNDED",
-    stripePaymentIntentId: paymentIntentId,
-    capturedAmount: 0,
-    updatedAt: new Date(),
-  };
-  await invoice.save();
-  await syncEarningForInvoice(invoice, { shouldBePaid: false });
+  const amount = minorToMajor(stripeRefund.amount);
+  if (!(amount > 0)) {
+    return { ok: true, ignored: true, reason: "refund_amount_missing" };
+  }
+
+  const refund = await Refund.findOneAndUpdate(
+    { stripeRefundId: stripeRefund.id },
+    {
+      $set: {
+        status:
+          `${stripeRefund.status || "succeeded"}`.toLowerCase() === "succeeded"
+            ? "SUCCEEDED"
+            : `${stripeRefund.status || "PENDING"}`.toUpperCase(),
+        failureReason: stripeRefund.failure_reason || undefined,
+        processedAt:
+          `${stripeRefund.status || "succeeded"}`.toLowerCase() === "succeeded"
+            ? new Date()
+            : undefined,
+      },
+      $setOnInsert: {
+        invoice: invoice._id,
+        job: invoice.job,
+        mechanic: invoice.mechanic,
+        initiatedBy,
+        provider: "STRIPE",
+        stripeRefundId: stripeRefund.id,
+        stripePaymentIntentId: paymentIntentId,
+        amount,
+        currency: invoice.currency || "GBP",
+        reason:
+          reason ||
+          stripeRefund.metadata?.adminReason ||
+          stripeRefund.reason ||
+          "Stripe refund",
+        source,
+      },
+    },
+    { upsert: true, new: true }
+  );
+
+  if (refund.status !== "SUCCEEDED") {
+    return {
+      ok: true,
+      invoiceId: invoice._id.toString(),
+      refundId: refund._id.toString(),
+      refundStatus: refund.status,
+    };
+  }
+
+  await createRefundEarningAdjustment(invoice, refund);
+  const accounting = await reconcileRefundAccounting(invoice);
 
   const job = await Job.findById(invoice.job);
   await createLifecycleJobEvent({
@@ -227,7 +406,10 @@ const applyRefundToInvoice = async (charge) => {
     payload: {
       invoiceId: invoice._id,
       stripePaymentIntentId: paymentIntentId,
-      refundedAmount: minorToMajor(charge.amount_refunded || charge.amount),
+      stripeRefundId: refund.stripeRefundId,
+      refundedAmount: refund.amount,
+      cumulativeRefundedAmount: accounting.refundedAmount,
+      fullyRefunded: accounting.fullyRefunded,
     },
   });
 
@@ -235,8 +417,30 @@ const applyRefundToInvoice = async (charge) => {
     ok: true,
     invoiceId: invoice._id.toString(),
     paymentIntentId,
+    refundId: refund._id.toString(),
     invoiceStatus: invoice.status,
     paymentStatus: invoice.payment?.status,
+    refundedAmount: accounting.refundedAmount,
+  };
+};
+
+const applyChargeRefundsToInvoice = async (charge) => {
+  const refunds = charge?.refunds?.data || [];
+  if (refunds.length) {
+    let result = null;
+    for (const refund of refunds) {
+      result = await applyStripeRefundToInvoice(
+        { ...refund, payment_intent: refund.payment_intent || charge.payment_intent },
+        { source: "WEBHOOK" }
+      );
+    }
+    return result;
+  }
+  return {
+    ok: true,
+    ignored: true,
+    reason: "refund_details_missing",
+    paymentIntentId: charge?.payment_intent || null,
   };
 };
 
@@ -305,9 +509,19 @@ const dispatchStripeEvent = async (event) => {
     case "payment_intent.payment_failed":
     case "payment_intent.canceled":
     case "payment_intent.requires_action":
-      return applyPaymentIntentToInvoice(event.data?.object || {});
+      return applyPaymentIntentToInvoice(event.data?.object || {}, {
+        source: "WEBHOOK",
+        eventType: event.type,
+        externalEventId: event.id,
+      });
     case "charge.refunded":
-      return applyRefundToInvoice(event.data?.object || {});
+      return applyChargeRefundsToInvoice(event.data?.object || {});
+    case "refund.created":
+    case "refund.updated":
+    case "refund.failed":
+      return applyStripeRefundToInvoice(event.data?.object || {}, {
+        source: "WEBHOOK",
+      });
     case "charge.dispute.created":
     case "charge.dispute.updated":
     case "charge.dispute.closed":

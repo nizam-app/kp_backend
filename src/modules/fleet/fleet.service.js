@@ -152,14 +152,26 @@ export const getFleetDashboard = async (fleetUser, query) => {
       {
         $match: {
           fleet: fleetUser._id,
-          status: "PAID",
+          status: { $in: ["PAID", "PARTIALLY_REFUNDED", "REFUNDED"] },
           paidAt: { $gte: start, $lt: end },
         },
       },
       {
         $group: {
           _id: null,
-          total: { $sum: "$totalAmount" },
+          total: {
+            $sum: {
+              $max: [
+                {
+                  $subtract: [
+                    "$totalAmount",
+                    { $ifNull: ["$payment.refundedAmount", 0] },
+                  ],
+                },
+                0,
+              ],
+            },
+          },
         },
       },
     ]),

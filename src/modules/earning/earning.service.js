@@ -130,7 +130,10 @@ const computeEarningFeeNet = (gross) => {
 
 /** Persist invoice-aligned amounts for this mechanic before aggregates / lists. */
 const reconcileMechanicEarningsWithInvoices = async (mechanicId) => {
-  const txs = await EarningTransaction.find({ mechanic: mechanicId })
+  const txs = await EarningTransaction.find({
+    mechanic: mechanicId,
+    type: "JOB_PAYMENT",
+  })
     .select("_id job grossAmount platformFee netAmount")
     .lean();
   if (!txs.length) return;
@@ -351,7 +354,6 @@ const serializeInvoiceForEarnings = (invoice, currencyFallback) => {
           status: invoice.payment.status || null,
           stripePaymentIntentId: invoice.payment.stripePaymentIntentId || null,
           stripePaymentMethodId: invoice.payment.stripePaymentMethodId || null,
-          stripeClientSecret: invoice.payment.stripeClientSecret || null,
           lastError: invoice.payment.lastError || null,
           authorizedAmount: invoice.payment.authorizedAmount ?? null,
           capturedAmount: invoice.payment.capturedAmount ?? null,
@@ -427,10 +429,23 @@ export const listEarningJobs = async (user, query = {}) => {
       const invoice = jobIdStr ? invoiceByJobId.get(jobIdStr) : undefined;
       const review = jobIdStr ? reviewByJobId.get(jobIdStr) : undefined;
       const cur = item.currency || invoice?.currency || "GBP";
-      // Prefer invoice work total when present (same canon as Quotes / fleet invoice).
-      const { grossAmount: gross, platformFee: fee, netAmount: net } = computeEarningFeeNet(
-        resolveEarningGrossFromSources(item, invoice, item.job)
-      );
+      // Refund adjustments are immutable signed rows; never reconcile them back
+      // to the original positive invoice amount.
+      const amounts =
+        item.type === "ADJUSTMENT"
+          ? {
+              grossAmount: Number(item.grossAmount) || 0,
+              platformFee: Number(item.platformFee) || 0,
+              netAmount: Number(item.netAmount) || 0,
+            }
+          : computeEarningFeeNet(
+              resolveEarningGrossFromSources(item, invoice, item.job)
+            );
+      const {
+        grossAmount: gross,
+        platformFee: fee,
+        netAmount: net,
+      } = amounts;
       const feeWhole = Math.round(fee);
       const completedAt = item.job?.completedAt || null;
       const paidAt = item.paidAt || null;
@@ -452,7 +467,7 @@ export const listEarningJobs = async (user, query = {}) => {
         grossAmount: gross,
         platformFee: fee,
         netAmount: net,
-        platformFeePercent: getPlatformFeePercent(),
+        platformFeePercent: item.platformFeePercent ?? getPlatformFeePercent(),
         currency: cur,
         paidAt,
         notes: item.notes || null,
@@ -499,12 +514,17 @@ export const listEarningJobs = async (user, query = {}) => {
           currency: cur,
           netEarnedLabel: moneyLabel(net, cur),
           grossLabel: moneyLabel(gross, cur),
-          platformFeeLabel: `-${moneyLabel(fee, cur)}`,
-          platformFeeWholeLabel: `-${currencySymbol(cur)}${feeWhole}`,
+          platformFeeLabel:
+            fee < 0 ? moneyLabel(fee, cur) : `-${moneyLabel(fee, cur)}`,
+          platformFeeWholeLabel:
+            feeWhole < 0
+              ? `${currencySymbol(cur)}${feeWhole}`
+              : `-${currencySymbol(cur)}${feeWhole}`,
           netLabel: moneyLabel(net, cur),
           breakdown: {
             grossAmount: gross,
-            platformFeePercent: getPlatformFeePercent(),
+            platformFeePercent:
+              item.platformFeePercent ?? getPlatformFeePercent(),
             platformFeeAmount: fee,
             netAmount: net,
             currency: cur,

@@ -155,6 +155,33 @@ export const retrieveStripePaymentMethod = async (paymentMethodId) =>
 export const retrieveStripePaymentIntent = async (paymentIntentId) =>
   stripeRequest(`/payment_intents/${paymentIntentId}`);
 
+export const createStripeRefund = async ({
+  paymentIntentId,
+  amount,
+  reason = "requested_by_customer",
+  metadata = {},
+  idempotencyKey,
+}) => {
+  const amountInMinor = Math.round(Number(amount || 0) * 100);
+  if (!paymentIntentId) {
+    throw new AppError("Stripe payment intent is required for a refund", 400);
+  }
+  if (!Number.isFinite(amountInMinor) || amountInMinor <= 0) {
+    throw new AppError("Refund amount must be greater than zero", 400);
+  }
+
+  return stripeRequest("/refunds", {
+    method: "POST",
+    idempotencyKey,
+    body: {
+      payment_intent: paymentIntentId,
+      amount: amountInMinor,
+      reason,
+      metadata,
+    },
+  });
+};
+
 export const attachStripePaymentMethodToCustomer = async ({
   customerId,
   paymentMethodId,
@@ -191,6 +218,8 @@ export const createStripePaymentIntent = async ({
     payment_method: paymentMethodId,
     confirm: true,
     off_session: true,
+    // TruckFix charges on approval; it does not reserve/hold card funds.
+    capture_method: "automatic",
     metadata,
   };
 

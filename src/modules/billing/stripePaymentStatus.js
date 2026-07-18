@@ -4,8 +4,13 @@
  * the synchronous approval path and the asynchronous webhook path.
  */
 
-/** Payment statuses that must never be downgraded by a later out-of-order event. */
+/** Payment states protected from stale, out-of-order processor events. */
 export const TERMINAL_PAID_STATUSES = new Set(["SUCCEEDED"]);
+export const TERMINAL_PAYMENT_STATUSES = new Set([
+  "SUCCEEDED",
+  "PARTIALLY_REFUNDED",
+  "REFUNDED",
+]);
 
 export const invoiceStatusFromPaymentIntent = (status) => {
   switch (`${status || ""}`) {
@@ -37,7 +42,8 @@ export const invoiceStatusFromPaymentIntent = (status) => {
  * already-confirmed payment (protects against out-of-order webhook delivery).
  */
 export const shouldSkipDowngrade = (previousPaymentStatus, statusMap) =>
-  TERMINAL_PAID_STATUSES.has(previousPaymentStatus) && !statusMap.markPaid;
+  ["PARTIALLY_REFUNDED", "REFUNDED"].includes(previousPaymentStatus) ||
+  (TERMINAL_PAID_STATUSES.has(previousPaymentStatus) && !statusMap.markPaid);
 
 /**
  * True when a signature timestamp is outside the replay-tolerance window.

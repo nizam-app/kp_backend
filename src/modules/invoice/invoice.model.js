@@ -15,7 +15,7 @@ const invoiceLineItemSchema = new Schema(
 const invoiceSchema = new Schema(
   {
     invoiceNo: { type: String, required: true, unique: true, index: true },
-    job: { type: Schema.Types.ObjectId, ref: "Job", required: true, index: true },
+    job: { type: Schema.Types.ObjectId, ref: "Job", required: true },
     fleet: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
     mechanic: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
     subtotal: { type: Number, required: true, min: 0 },
@@ -28,12 +28,32 @@ const invoiceSchema = new Schema(
     platformFeePercent: { type: Number, min: 0, max: 100 },
     status: {
       type: String,
-      enum: ["DRAFT", "ISSUED", "AUTHORIZED", "PAID", "FAILED", "REFUNDED", "VOID"],
+      enum: [
+        "DRAFT",
+        "ISSUED",
+        "PAID",
+        "FAILED",
+        "PARTIALLY_REFUNDED",
+        "REFUNDED",
+        "VOID",
+      ],
       default: "ISSUED",
       index: true,
     },
     issuedAt: { type: Date, default: Date.now },
     paidAt: Date,
+    dueAt: { type: Date, index: true },
+    collections: {
+      state: {
+        type: String,
+        enum: ["CURRENT", "ACTION_REQUIRED", "OVERDUE", "ESCALATED", "RESOLVED"],
+        default: "CURRENT",
+        index: true,
+      },
+      reminderCount: { type: Number, min: 0, default: 0 },
+      lastReminderAt: Date,
+      nextReminderAt: { type: Date, index: true },
+    },
     payment: {
       provider: { type: String, trim: true, default: "MANUAL" },
       status: {
@@ -46,6 +66,7 @@ const invoiceSchema = new Schema(
           "SUCCEEDED",
           "FAILED",
           "CANCELED",
+          "PARTIALLY_REFUNDED",
           "REFUNDED",
         ],
         default: "PENDING",
@@ -53,11 +74,12 @@ const invoiceSchema = new Schema(
       stripeCustomerId: { type: String, trim: true },
       stripePaymentMethodId: { type: String, trim: true },
       stripePaymentIntentId: { type: String, trim: true },
-      stripeClientSecret: { type: String, trim: true },
       lastError: { type: String, trim: true },
       disputeStatus: { type: String, trim: true },
       authorizedAmount: { type: Number, min: 0 },
       capturedAmount: { type: Number, min: 0 },
+      refundedAmount: { type: Number, min: 0, default: 0 },
+      lastRefundAt: Date,
       updatedAt: Date,
     },
     pdfUrl: { type: String, trim: true },
@@ -89,5 +111,6 @@ const invoiceSchema = new Schema(
 
 invoiceSchema.index({ fleet: 1, createdAt: -1 });
 invoiceSchema.index({ mechanic: 1, createdAt: -1 });
+invoiceSchema.index({ job: 1 }, { unique: true, name: "uniq_invoice_job" });
 
 export const Invoice = model("Invoice", invoiceSchema);

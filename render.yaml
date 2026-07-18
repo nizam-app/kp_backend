@@ -34,3 +34,22 @@ services:
         sync: false
       - key: PASSWORD_RESET_URL
         sync: false
+  - type: cron
+    name: kp-payment-operations
+    runtime: node
+    schedule: "0 * * * *"
+    buildCommand: npm install
+    startCommand: npm run payments:operate
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: MONGODB_URL
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_PUBLISHABLE_KEY
+        sync: false
+      - key: FIREBASE_SERVICE_ACCOUNT_JSON
+        sync: false

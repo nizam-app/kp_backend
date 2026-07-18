@@ -4,7 +4,7 @@ import { catchAsync } from "../../utils/catchAsync.js";
 import { ROLES } from "../../constants/domain.js";
 import { handleProfileImageMulterError } from "../../config/profileImageUpload.js";
 import {
-  adminDashboardController,adminAuditLogsController,adminDisputesController,adminFinancialController,adminFleetController,adminLiveTrackingController,
+  adminDashboardController,adminAuditLogsController,adminDisputesController,adminFinancialController,adminFinancialPaymentDetailController,adminFleetController,adminLiveTrackingController,
   adminNotificationsController,adminPromotionsController,adminReportsController,adminReviewsController,adminServiceCatalogController,
   adminServiceRequestByIdController,adminServiceRequestsController,adminSettingsController,adminSupportTicketsController,adminSupportTicketByIdController,adminSupportTicketReplyController,adminUserByIdController,adminUserMembersController,adminUsersController,approveMechanicController,
   createAdminFinancialInvoiceController,createAdminFleetController,createAdminFleetVehicleController,createAdminUserController,
@@ -16,7 +16,7 @@ import {
   deleteAdminServiceRequestController,sendAdminServiceRequestMessageController,
   resetAdminUserPasswordController,sendAdminUserMessageController,
   markAdminNotificationReadController,markAllAdminNotificationsReadController,removeAdminNotificationController,
-  exportAdminFinancialController,exportAdminReportsController,exportAdminAuditLogsController,
+  exportAdminFinancialController,exportAdminReportsController,exportAdminAuditLogsController,refundAdminFinancialPaymentController,syncAdminFinancialPaymentController,
   updateAdminPromotionController,updateAdminReviewController,updateAdminServiceCatalogController,updateAdminDisputeController,
   updateAdminFleetController,
   updateAdminFleetVehicleController,
@@ -84,6 +84,18 @@ router.patch("/fleet/:fleetId/vehicles/:vehicleId", catchAsync(updateAdminFleetV
 router.get("/financial", catchAsync(adminFinancialController));
 router.post("/financial/invoices", catchAsync(createAdminFinancialInvoiceController));
 router.get("/financial/export", catchAsync(exportAdminFinancialController));
+router.get(
+  "/financial/:invoiceId",
+  catchAsync(adminFinancialPaymentDetailController)
+);
+router.post(
+  "/financial/:invoiceId/sync",
+  catchAsync(syncAdminFinancialPaymentController)
+);
+router.post(
+  "/financial/:invoiceId/refund",
+  catchAsync(refundAdminFinancialPaymentController)
+);
 router.get("/live-tracking", catchAsync(adminLiveTrackingController));
 router.get("/reports", catchAsync(adminReportsController));
 router.get("/reports/export", catchAsync(exportAdminReportsController));

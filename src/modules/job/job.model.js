@@ -186,6 +186,16 @@ const jobSchema = new Schema(
       token: { type: String, trim: true },
       expiresAt: Date,
     },
+    paymentDueAt: { type: Date, index: true },
+    paymentNextReminderAt: { type: Date, index: true },
+    paymentLastReminderAt: Date,
+    paymentReminderCount: { type: Number, min: 0, default: 0 },
+    paymentCollectionState: {
+      type: String,
+      enum: ["CURRENT", "ACTION_REQUIRED", "OVERDUE", "ESCALATED", "RESOLVED"],
+      default: "CURRENT",
+      index: true,
+    },
     tracking: {
       latestMechanicLocation: journeyLocationSchema,
       etaMinutes: { type: Number, min: 0 },

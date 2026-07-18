@@ -37,6 +37,15 @@ test("a paid event is still applied over a confirmed payment (idempotent)", () =
   assert.equal(shouldSkipDowngrade("SUCCEEDED", paid), false);
 });
 
+test("a refunded payment ignores every later PaymentIntent event", () => {
+  const paid = invoiceStatusFromPaymentIntent("succeeded");
+  const stale = invoiceStatusFromPaymentIntent("processing");
+  assert.equal(shouldSkipDowngrade("PARTIALLY_REFUNDED", paid), true);
+  assert.equal(shouldSkipDowngrade("PARTIALLY_REFUNDED", stale), true);
+  assert.equal(shouldSkipDowngrade("REFUNDED", paid), true);
+  assert.equal(shouldSkipDowngrade("REFUNDED", stale), true);
+});
+
 test("terminal paid statuses only include SUCCEEDED", () => {
   assert.deepEqual([...TERMINAL_PAID_STATUSES], ["SUCCEEDED"]);
 });

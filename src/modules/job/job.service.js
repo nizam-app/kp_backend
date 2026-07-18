@@ -27,6 +27,8 @@ import { JobLocationPing } from "../jobLocationPing/jobLocationPing.model.js";
 import { Invoice } from "../invoice/invoice.model.js";
 import { EarningTransaction } from "../earning/earningTransaction.model.js";
 import { PaymentMethod } from "../billing/paymentMethod.model.js";
+import { PaymentAttempt } from "../billing/paymentAttempt.model.js";
+import { invoiceStatusFromPaymentIntent } from "../billing/stripePaymentStatus.js";
 import { User } from "../user/user.model.js";
 import { ChatMessage } from "../chat/chat.model.js";
 import { Notification } from "../notification/notification.model.js";
@@ -604,7 +606,7 @@ const computeFleetPaymentBox = ({ job, defaultPaymentMethod, invoice = null }) =
   const isAwaitingApproval = job.status === JOB_STATUS.AWAITING_APPROVAL;
 
   /**
-   * Pre-settlement (assigned → in progress): payment hold follows accepted quote.
+   * Pre-settlement (assigned → in progress): estimated approval charge follows accepted quote.
    * Awaiting approval: prefer submitted completion bill so fleet sees Quoted vs Submitted.
    * After complete/pay: canon is completion bill (invoice subtotal / finalAmount).
    */
@@ -661,8 +663,8 @@ const computeFleetPaymentBox = ({ job, defaultPaymentMethod, invoice = null }) =
     /** @deprecated Prefer chargedToFleet */
     totalPayable: chargedToFleet,
     chargedToFleet,
-    /** Hold amount before approve; after settle equals final charged. */
-    preAuthHeld: chargedToFleet,
+    /** @deprecated Immediate-capture flow has no pre-authorization hold. */
+    preAuthHeld: null,
     vatApplied,
     vatRate,
     vatAmount: billExVat > 0 ? vatAmount : null,
@@ -675,38 +677,12 @@ const computeFleetPaymentBox = ({ job, defaultPaymentMethod, invoice = null }) =
     status:
       job.status === JOB_STATUS.COMPLETED || isSettled
         ? "PAID"
-        : [JOB_STATUS.ASSIGNED, JOB_STATUS.EN_ROUTE, JOB_STATUS.ON_SITE, JOB_STATUS.IN_PROGRESS, JOB_STATUS.AWAITING_APPROVAL].includes(
-            job.status
-          )
-          ? "AUTHORIZED"
-          : "PENDING",
+        : invoice?.payment?.status ||
+          (job.status === JOB_STATUS.AWAITING_APPROVAL
+            ? "AWAITING_PAYMENT"
+            : "NOT_STARTED"),
     currency: invoice?.currency || job.currency || "GBP",
   };
-};
-
-const mapStripePaymentIntentStatus = (status) => {
-  switch (status) {
-    case "succeeded":
-      return { invoiceStatus: "PAID", paymentStatus: "SUCCEEDED", paid: true };
-    case "processing":
-      return { invoiceStatus: "ISSUED", paymentStatus: "PROCESSING", paid: false };
-    case "requires_payment_method":
-      return {
-        invoiceStatus: "FAILED",
-        paymentStatus: "REQUIRES_PAYMENT_METHOD",
-        paid: false,
-      };
-    case "requires_action":
-      return {
-        invoiceStatus: "ISSUED",
-        paymentStatus: "REQUIRES_ACTION",
-        paid: false,
-      };
-    case "canceled":
-      return { invoiceStatus: "FAILED", paymentStatus: "CANCELED", paid: false };
-    default:
-      return { invoiceStatus: "ISSUED", paymentStatus: "PENDING", paid: false };
-  }
 };
 
 const resolvePayerStripeCustomerId = (payerUser, paymentMethod) => {
@@ -822,6 +798,7 @@ const buildJobApprovalPaymentContext = async ({
     mechanicProfile?.stripeConnectAccountId
       ? mechanicProfile.stripeConnectAccountId
       : null;
+  const idempotencyKey = `job:${job._id}:approval:${methodId}`;
 
   const paymentIntent = await createStripePaymentIntent({
     amount: totalAmount,
@@ -832,7 +809,7 @@ const buildJobApprovalPaymentContext = async ({
     mechanicNetAmount: mechanicConnectAccountId ? mechanicNetAmount : null,
     // Keyed by job + card: a double-click reuses the same PaymentIntent (no
     // double charge), while retrying with a different card starts a new one.
-    idempotencyKey: `job:${job._id}:approval:${methodId}`,
+    idempotencyKey,
     metadata: {
       jobId: job._id.toString(),
       fleetId: toObjectIdString(job.fleet),
@@ -856,9 +833,46 @@ const buildJobApprovalPaymentContext = async ({
     paymentIntent.status === "requires_action" ||
     paymentIntent.next_action != null ||
     paymentIntent.last_payment_error?.code === "authentication_required";
+  const statusMap = invoiceStatusFromPaymentIntent(paymentIntent.status);
   const mapped = needsAuthentication
     ? { invoiceStatus: "ISSUED", paymentStatus: "REQUIRES_ACTION", paid: false }
-    : mapStripePaymentIntentStatus(paymentIntent.status);
+    : { ...statusMap, paid: statusMap.markPaid };
+
+  await PaymentAttempt.findOneAndUpdate(
+    { stripePaymentIntentId: paymentIntent.id },
+    {
+      $set: {
+        paymentStatus: mapped.paymentStatus,
+        processorStatus: paymentIntent.status,
+        declineCode: paymentIntent.last_payment_error?.code || undefined,
+        failureMessage: paymentIntent.last_payment_error?.message || undefined,
+        completedAt: mapped.paid ? new Date() : undefined,
+      },
+      $setOnInsert: {
+        job: job._id,
+        payer: payerUser._id,
+        payerRole: payerUser.role,
+        provider: "STRIPE",
+        amount: totalAmount,
+        currency: job.currency || "GBP",
+        stripePaymentIntentId: paymentIntent.id,
+        stripePaymentMethodId: paymentMethod.providerMethodId,
+        idempotencyKey,
+        events: [
+          {
+            source: "APPROVAL",
+            eventType: "PAYMENT_INTENT_CREATED",
+            paymentStatus: mapped.paymentStatus,
+            processorStatus: paymentIntent.status,
+            message: paymentIntent.last_payment_error?.message || undefined,
+            occurredAt: new Date(),
+          },
+        ],
+      },
+    },
+    { upsert: true, new: true }
+  );
+
   return {
     provider: "STRIPE",
     invoiceStatus: mapped.invoiceStatus,
@@ -1063,6 +1077,8 @@ export const completeJobOnConfirmedPayment = async (jobId, { paymentStatus } = {
   job.status = JOB_STATUS.COMPLETED;
   job.completedAt = new Date();
   job.approvalPaymentLock = undefined;
+  job.paymentCollectionState = "RESOLVED";
+  job.paymentNextReminderAt = undefined;
   await job.save();
 
   await createJobEvent({
@@ -1098,6 +1114,8 @@ const markJobCompletedAfterApproval = async (job, payload = {}, breakdown = null
   job.status = JOB_STATUS.COMPLETED;
   job.completedAt = new Date();
   job.approvalPaymentLock = undefined;
+  job.paymentCollectionState = "RESOLVED";
+  job.paymentNextReminderAt = undefined;
   await job.save();
 };
 
@@ -1762,13 +1780,25 @@ const upsertFinancialRecordsForCompletedJob = async (job, paymentContext = {}) =
       status: invoiceStatus,
       issuedAt: paidAt,
       paidAt: invoiceStatus === "PAID" ? paidAt : undefined,
+      dueAt:
+        job.paymentDueAt ||
+        new Date(new Date(paidAt).getTime() + 24 * 60 * 60 * 1000),
+      collections: {
+        state: invoiceStatus === "PAID" ? "RESOLVED" : "ACTION_REQUIRED",
+        reminderCount: job.paymentReminderCount || 0,
+        lastReminderAt: job.paymentLastReminderAt,
+        nextReminderAt:
+          invoiceStatus === "PAID"
+            ? undefined
+            : job.paymentNextReminderAt ||
+              new Date(Date.now() + 60 * 60 * 1000),
+      },
       payment: {
         provider: paymentContext.provider || "MANUAL",
         status: paymentStatus,
         stripeCustomerId: paymentContext.stripeCustomerId,
         stripePaymentMethodId: paymentContext.stripePaymentMethodId,
         stripePaymentIntentId: paymentContext.stripePaymentIntentId,
-        stripeClientSecret: paymentContext.stripeClientSecret,
         lastError: paymentContext.lastError,
         authorizedAmount: totalAmount,
         capturedAmount: invoiceStatus === "PAID" ? totalAmount : undefined,
@@ -1805,6 +1835,27 @@ const upsertFinancialRecordsForCompletedJob = async (job, paymentContext = {}) =
     invoice.status = invoiceStatus;
     invoice.paidAt = invoiceStatus === "PAID" ? paidAt : undefined;
     invoice.issuedAt = invoice.issuedAt || paidAt;
+    invoice.dueAt =
+      invoice.dueAt ||
+      job.paymentDueAt ||
+      new Date(new Date(invoice.issuedAt).getTime() + 24 * 60 * 60 * 1000);
+    invoice.collections = {
+      ...(invoice.collections || {}),
+      state:
+        invoiceStatus === "PAID"
+          ? "RESOLVED"
+          : invoice.collections?.state || "ACTION_REQUIRED",
+      reminderCount:
+        invoice.collections?.reminderCount ?? job.paymentReminderCount ?? 0,
+      lastReminderAt:
+        invoice.collections?.lastReminderAt || job.paymentLastReminderAt,
+      nextReminderAt:
+        invoiceStatus === "PAID"
+          ? undefined
+          : invoice.collections?.nextReminderAt ||
+            job.paymentNextReminderAt ||
+            new Date(Date.now() + 60 * 60 * 1000),
+    };
     invoice.payment = {
       ...(invoice.payment || {}),
       provider: paymentContext.provider || invoice.payment?.provider || "MANUAL",
@@ -1815,8 +1866,6 @@ const upsertFinancialRecordsForCompletedJob = async (job, paymentContext = {}) =
         paymentContext.stripePaymentMethodId || invoice.payment?.stripePaymentMethodId,
       stripePaymentIntentId:
         paymentContext.stripePaymentIntentId || invoice.payment?.stripePaymentIntentId,
-      stripeClientSecret:
-        paymentContext.stripeClientSecret || invoice.payment?.stripeClientSecret,
       lastError: paymentContext.lastError || invoice.payment?.lastError,
       authorizedAmount: totalAmount,
       capturedAmount: invoiceStatus === "PAID" ? totalAmount : undefined,
@@ -1853,10 +1902,21 @@ const upsertFinancialRecordsForCompletedJob = async (job, paymentContext = {}) =
     await invoice.save();
   }
 
+  if (paymentContext.stripePaymentIntentId) {
+    await PaymentAttempt.updateOne(
+      { stripePaymentIntentId: paymentContext.stripePaymentIntentId },
+      { $set: { invoice: invoice._id } }
+    );
+  }
+
   let earningTransaction = null;
   if (invoiceStatus === "PAID") {
     earningTransaction = await EarningTransaction.findOneAndUpdate(
-      { mechanic: job.assignedMechanic, job: job._id },
+      {
+        mechanic: job.assignedMechanic,
+        job: job._id,
+        type: "JOB_PAYMENT",
+      },
       {
         $set: {
           grossAmount: subtotal,
@@ -2895,6 +2955,13 @@ export const completeJobWork = async (jobId, mechanicUser, payload = {}) => {
         : {}),
     },
     extraMutation: (j) => {
+      const submittedAt = new Date();
+      j.paymentDueAt = new Date(submittedAt.getTime() + 24 * 60 * 60 * 1000);
+      j.paymentNextReminderAt = new Date(
+        submittedAt.getTime() + 60 * 60 * 1000
+      );
+      j.paymentReminderCount = 0;
+      j.paymentCollectionState = "ACTION_REQUIRED";
       if (finalForJob !== undefined && finalForJob !== null && Number.isFinite(finalForJob)) {
         j.finalAmount = finalForJob;
       }
