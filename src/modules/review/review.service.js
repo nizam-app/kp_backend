@@ -25,6 +25,15 @@ const fleetRatesMechanicClause = () => ({
   ],
 });
 
+/** All reviews that rate a mechanic (fleet + company dispatcher reviews). */
+const mechanicRatingClause = () => ({
+  $or: [
+    { reviewKind: REVIEW_KIND.FLEET_RATES_MECHANIC },
+    { reviewKind: REVIEW_KIND.COMPANY_RATES_MECHANIC },
+    { reviewKind: { $exists: false } },
+  ],
+});
+
 const serializeReview = (review) => ({
   _id: review._id,
   reviewKind: review.reviewKind || REVIEW_KIND.FLEET_RATES_MECHANIC,
@@ -73,7 +82,7 @@ const updateMechanicRating = async (mechanicId) => {
       $match: {
         mechanic: mechanicId,
         status: "PUBLISHED",
-        ...fleetRatesMechanicClause(),
+        ...mechanicRatingClause(),
       },
     },
     {
@@ -309,6 +318,65 @@ export const createFleetReview = async (fleetUser, payload = {}) => {
   return serializeReview(populated);
 };
 
+/**
+ * Company dispatcher rates their mechanic while approving job completion.
+ * Idempotent per job (returns the existing review instead of throwing) so the
+ * approval flow can call it best-effort.
+ */
+export const createCompanyMechanicReview = async (companyUser, job, payload = {}) => {
+  if (companyUser.role !== ROLES.COMPANY) {
+    throw new AppError("Only company users can rate their mechanics", 403);
+  }
+
+  const rating = Number(payload.rating);
+  if (!Number.isFinite(rating) || rating < 1 || rating > 5) {
+    throw new AppError("rating must be between 1 and 5", 400);
+  }
+
+  const mechanicId = job.assignedMechanic?._id || job.assignedMechanic;
+  if (!mechanicId) throw new AppError("No mechanic assigned to this job", 400);
+
+  const existing = await Review.findOne({
+    job: job._id,
+    reviewKind: REVIEW_KIND.COMPANY_RATES_MECHANIC,
+  }).lean();
+  if (existing) return serializeReview(existing);
+
+  const companyName = companyUser.companyProfile?.companyName || null;
+  const review = await Review.create({
+    fleet: companyUser._id,
+    mechanic: mechanicId,
+    job: job._id,
+    reviewKind: REVIEW_KIND.COMPANY_RATES_MECHANIC,
+    customerName:
+      companyUser.companyProfile?.contactName || companyName || companyUser.email,
+    companyName,
+    serviceLabel: job.title || job.description,
+    mechanicName: job.assignedMechanic?.mechanicProfile?.displayName || null,
+    rating,
+    comment: payload.comment,
+    status: "PUBLISHED",
+  });
+
+  await updateMechanicRating(review.mechanic);
+
+  await createNotification({
+    user: review.mechanic,
+    type: "REVIEW_CREATED",
+    title: `New rating from ${companyName || "your company"} for ${job.jobCode}`,
+    body: `Your dispatcher rated this completed job ${rating} star${rating === 1 ? "" : "s"}.`,
+    data: {
+      jobId: job._id.toString(),
+      reviewId: review._id.toString(),
+      rating,
+      reviewKind: REVIEW_KIND.COMPANY_RATES_MECHANIC,
+      screen: "JOB_DETAIL",
+    },
+  });
+
+  return serializeReview(review.toObject());
+};
+
 export const listFleetReviews = async (fleetUser, query = {}) => {
   ensureFleetUser(fleetUser);
 
@@ -353,7 +421,7 @@ export const listMechanicReviews = async (mechanicUser, query = {}) => {
 
   const filter = {
     mechanic: mechanicUser._id,
-    ...fleetRatesMechanicClause(),
+    ...mechanicRatingClause(),
   };
   if (query.status) filter.status = `${query.status}`.trim().toUpperCase();
 
@@ -388,7 +456,7 @@ export const getMechanicReviewById = async (mechanicUser, reviewId) => {
   const review = await Review.findOne({
     _id: reviewId,
     mechanic: mechanicUser._id,
-    ...fleetRatesMechanicClause(),
+    ...mechanicRatingClause(),
   })
     .populate("fleet", "fleetProfile.companyName fleetProfile.contactName")
     .populate("mechanic", "mechanicProfile.displayName")

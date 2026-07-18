@@ -158,6 +158,7 @@ export const QUOTE_AVAILABILITY = Object.freeze({
 export const REVIEW_KIND = Object.freeze({
   FLEET_RATES_MECHANIC: "FLEET_RATES_MECHANIC",
   MECHANIC_RATES_FLEET: "MECHANIC_RATES_FLEET",
+  COMPANY_RATES_MECHANIC: "COMPANY_RATES_MECHANIC",
 });
 
 export const roleValues = Object.values(ROLES);

@@ -49,6 +49,7 @@ import {
   notifyJobCompleted,
   notifyJobStatusChanged,
 } from "../notification/jobQuoteNotification.service.js";
+import { createCompanyMechanicReview } from "../review/review.service.js";
 import { notifyAdminsSafely } from "../notification/adminNotification.service.js";
 import { ADMIN_NOTIFICATION_EVENTS } from "../notification/adminNotificationEvents.js";
 import {
@@ -982,6 +983,72 @@ const shouldHoldApprovalPaymentLock = (err) =>
   ["REQUIRES_ACTION", "PROCESSING"].includes(err?.data?.paymentStatus);
 
 /**
+ * Recompute the mechanic's cached profile stats after a job completes.
+ * - jobsDone: true count of COMPLETED jobs assigned to the mechanic (self-healing).
+ * - responseMinutesAvg: avg ASSIGNED → EN_ROUTE time over the last 50 completed jobs.
+ * Best-effort: a stats failure must never block job completion/payment.
+ */
+const refreshMechanicStatsAfterCompletion = async (job) => {
+  const mechanicId = job?.assignedMechanic?._id || job?.assignedMechanic;
+  if (!mechanicId) return;
+  try {
+    const [jobsDone, recentJobs] = await Promise.all([
+      Job.countDocuments({
+        assignedMechanic: mechanicId,
+        status: JOB_STATUS.COMPLETED,
+      }),
+      Job.find({
+        assignedMechanic: mechanicId,
+        status: JOB_STATUS.COMPLETED,
+        assignedAt: { $ne: null },
+      })
+        .sort({ completedAt: -1 })
+        .limit(50)
+        .select("_id assignedAt")
+        .lean(),
+    ]);
+
+    let responseMinutesAvg = null;
+    if (recentJobs.length) {
+      const events = await JobEvent.find({
+        job: { $in: recentJobs.map((j) => j._id) },
+        toStatus: JOB_STATUS.EN_ROUTE,
+      })
+        .sort({ createdAt: 1 })
+        .select("job createdAt")
+        .lean();
+      const firstEnRouteByJob = new Map();
+      for (const e of events) {
+        const key = e.job.toString();
+        if (!firstEnRouteByJob.has(key)) firstEnRouteByJob.set(key, e.createdAt);
+      }
+      const samples = [];
+      for (const j of recentJobs) {
+        const enRouteAt = firstEnRouteByJob.get(j._id.toString());
+        if (!enRouteAt) continue;
+        const minutes =
+          (new Date(enRouteAt).getTime() - new Date(j.assignedAt).getTime()) / 60000;
+        if (Number.isFinite(minutes) && minutes >= 0) samples.push(minutes);
+      }
+      if (samples.length) {
+        responseMinutesAvg = Math.max(
+          1,
+          Math.round(samples.reduce((a, b) => a + b, 0) / samples.length)
+        );
+      }
+    }
+
+    const $set = { "mechanicProfile.stats.jobsDone": jobsDone };
+    if (responseMinutesAvg != null) {
+      $set["mechanicProfile.stats.responseMinutesAvg"] = responseMinutesAvg;
+    }
+    await User.updateOne({ _id: mechanicId }, { $set });
+  } catch (err) {
+    console.error("Failed to refresh mechanic stats after job completion", err);
+  }
+};
+
+/**
  * Finalize a job whose payment was confirmed asynchronously (3DS sync or
  * Stripe webhook). Idempotent: only transitions a job still awaiting approval.
  */
@@ -1016,6 +1083,8 @@ export const completeJobOnConfirmedPayment = async (jobId, { paymentStatus } = {
   await notifyJobCompleted(job, {
     approvedByCompany: Boolean(job.assignedCompany),
   });
+
+  await refreshMechanicStatsAfterCompletion(job);
 
   return job;
 };
@@ -1844,6 +1913,8 @@ const finalizeApprovedJobCompletion = async ({
     approvedByCompany: Boolean(eventExtras.approvedByCompany),
   });
 
+  await refreshMechanicStatsAfterCompletion(job);
+
   return {
     job,
     invoice: financials.invoice,
@@ -2358,6 +2429,20 @@ export const listJobs = async (user, query) => {
   let nearPoint = null;
   if ([ROLES.MECHANIC, ROLES.MECHANIC_EMPLOYEE].includes(user.role)) {
     if (`${query.feed}` === "true") {
+      if (user.role === ROLES.MECHANIC_EMPLOYEE) {
+        return {
+          items: [],
+          meta: {
+            page,
+            limit,
+            total: 0,
+            totalPages: 1,
+            activeCount: 0,
+            completedCount: 0,
+            mode: "feed",
+          },
+        };
+      }
       filter.status = { $in: [JOB_STATUS.POSTED, JOB_STATUS.QUOTING] };
       const radiusMiles = Number(
         query.radiusMiles ||
@@ -2964,6 +3049,15 @@ export const approveJobCompletionAsCompany = async (jobId, companyUser, payload 
     );
   }
 
+  // Validate the optional mechanic rating before charging the card.
+  const mechanicRating = payload.rating !== undefined ? Number(payload.rating) : null;
+  if (
+    mechanicRating !== null &&
+    (!Number.isFinite(mechanicRating) || mechanicRating < 1 || mechanicRating > 5)
+  ) {
+    throw new AppError("rating must be between 1 and 5", 400);
+  }
+
   const fromStatus = job.status;
   const acceptedAmountSnapshot = job.acceptedAmount;
   const breakdown = buildLineItemsFromCompanyInvoicePayload(payload, job);
@@ -3003,7 +3097,7 @@ export const approveJobCompletionAsCompany = async (jobId, companyUser, payload 
       ...(completionLines?.length ? { lineItems: completionLines } : {}),
     };
 
-    return await settleApprovalPayment({
+    const result = await settleApprovalPayment({
       job,
       fromStatus,
       actorUser: companyUser,
@@ -3011,6 +3105,17 @@ export const approveJobCompletionAsCompany = async (jobId, companyUser, payload 
       eventExtras: { approvedByCompany: true, paymentMethodId },
       breakdown: breakdown || null,
     });
+
+    // Best-effort: the dispatcher's star rating must never undo a settled payment.
+    if (mechanicRating !== null) {
+      try {
+        await createCompanyMechanicReview(companyUser, job, { rating: mechanicRating });
+      } catch (err) {
+        console.error("Failed to record company mechanic rating on approval", err);
+      }
+    }
+
+    return result;
   } catch (err) {
     if (!shouldHoldApprovalPaymentLock(err)) {
       await releaseApprovalPaymentLock(job._id, lockToken);

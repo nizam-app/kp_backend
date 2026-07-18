@@ -779,9 +779,15 @@ const buildProfileResponse = async (user) => {
     mp.vatRegistered = mp.vatRegistered === true;
     response.mechanicProfile = mp;
     const { start: weekStart, end: weekEndExclusive } = getMechanicCalendarWeekBounds();
-    const jobsThisWeek = await countMechanicJobsCompletedThisCalendarWeek(base._id);
+    const [jobsThisWeek, jobsDoneLive] = await Promise.all([
+      countMechanicJobsCompletedThisCalendarWeek(base._id),
+      Job.countDocuments({
+        assignedMechanic: base._id,
+        status: JOB_STATUS.COMPLETED,
+      }),
+    ]);
     response.performance = {
-      jobsDone: mp.stats?.jobsDone ?? 0,
+      jobsDone: jobsDoneLive ?? mp.stats?.jobsDone ?? 0,
       jobsThisWeek,
       thisWeekFrom: weekStart.toISOString(),
       thisWeekToExclusive: weekEndExclusive.toISOString(),

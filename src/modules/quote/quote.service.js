@@ -412,7 +412,13 @@ const ensureQuoteAccess = (quote, user) => {
 
 export const submitQuote = async (jobId, payload, mechanicUser) => {
   if (!payload.amount) throw new AppError("amount is required", 400);
-  if (![ROLES.MECHANIC, ROLES.MECHANIC_EMPLOYEE, ROLES.COMPANY].includes(mechanicUser.role)) {
+  if (mechanicUser.role === ROLES.MECHANIC_EMPLOYEE) {
+    throw new AppError(
+      "Company employees cannot quote on open jobs. Ask your company dispatcher to assign you.",
+      403
+    );
+  }
+  if (![ROLES.MECHANIC, ROLES.COMPANY].includes(mechanicUser.role)) {
     throw new AppError("Only mechanics or companies can submit quotes", 403);
   }
 
