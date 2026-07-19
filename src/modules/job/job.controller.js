@@ -1,3 +1,4 @@
+import path from "path";
 import { sendResponse } from "../../utils/sendResponse.js";
 import AppError from "../../utils/AppError.js";
 import { ROLES } from "../../constants/domain.js";
@@ -17,6 +18,7 @@ import {
   removeJobAttachment,
   getJobByIdForUser,
   getJobTimeline,
+  getCompletionPhotoForDownload,
   createJobLocationPing,
   listJobs,
   previewJobCancellation,
@@ -315,6 +317,47 @@ export const jobTimelineController = async (req, res) => {
     message: "Job timeline fetched",
     data: timeline,
   });
+};
+
+export const downloadCompletionPhotoController = async (req, res) => {
+  const photo = await getCompletionPhotoForDownload(
+    req.params.jobId,
+    req.user,
+    req.params.photoIndex
+  );
+  const filename = `completion-photo-${Number(photo.index) + 1}.jpg`;
+
+  if (`${photo.url}`.startsWith("/uploads/jobs/")) {
+    const absolute = path.resolve(process.cwd(), `${photo.url}`.replace(/^\/+/, ""));
+    const uploadsRoot = path.resolve(process.cwd(), "uploads", "jobs");
+    if (!absolute.startsWith(`${uploadsRoot}${path.sep}`)) {
+      throw new AppError("Invalid completion photo path", 400);
+    }
+    return res.download(absolute, filename);
+  }
+
+  let remote;
+  try {
+    remote = new URL(photo.url);
+  } catch {
+    throw new AppError("Invalid completion photo URL", 400);
+  }
+  if (
+    remote.protocol !== "https:" ||
+    !(
+      remote.hostname === "res.cloudinary.com" ||
+      remote.hostname.endsWith(".cloudinary.com")
+    )
+  ) {
+    throw new AppError("Unsupported completion photo host", 400);
+  }
+
+  const response = await fetch(remote);
+  if (!response.ok) throw new AppError("Completion photo download failed", 502);
+  const contentType = response.headers.get("content-type") || "image/jpeg";
+  res.setHeader("Content-Type", contentType);
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+  return res.send(Buffer.from(await response.arrayBuffer()));
 };
 
 export const jobLocationPingController = async (req, res) => {

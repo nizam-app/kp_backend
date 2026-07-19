@@ -1297,14 +1297,149 @@ const buildJobSummaryForDetail = (job, statusTimes = {}) => {
   };
 };
 
+const completionPhotosForDetail = async (job, statusTimes) => {
+  const stored = Array.isArray(job.completionPhotos)
+    ? job.completionPhotos.filter(Boolean)
+    : [];
+  if (stored.length) return [...new Set(stored)];
+  if (!statusTimes.inProgressAt || !statusTimes.awaitingApprovalAt) return [];
+
+  // Submissions created before completionPhotos existed still have an immutable
+  // mechanic photo-upload event immediately before WORK_COMPLETED.
+  const upperBound = new Date(
+    new Date(statusTimes.awaitingApprovalAt).getTime() + 5 * 60 * 1000
+  );
+  const events = await JobEvent.find({
+    job: job._id,
+    type: "JOB_PHOTOS_ADDED",
+    actor: job.assignedMechanic?._id || job.assignedMechanic,
+    createdAt: {
+      $gte: statusTimes.inProgressAt,
+      $lte: upperBound,
+    },
+  })
+    .sort({ createdAt: 1 })
+    .select("payload.photos")
+    .lean();
+
+  return [
+    ...new Set(
+      events.flatMap((event) =>
+        Array.isArray(event.payload?.photos)
+          ? event.payload.photos.filter(Boolean)
+          : []
+      )
+    ),
+  ];
+};
+
+const buildSubmittedWorkForDetail = async (job, invoiceDoc, statusTimes) => {
+  const completionInvoice =
+    job.completionInvoice && typeof job.completionInvoice === "object"
+      ? job.completionInvoice
+      : null;
+  const lineItems =
+    (Array.isArray(completionInvoice?.lineItems) &&
+    completionInvoice.lineItems.length
+      ? completionInvoice.lineItems
+      : invoiceDoc?.lineItems || []
+    ).map((row) => ({
+      description: `${row.description || "Service"}`.trim(),
+      quantity: Number(row.quantity) || 1,
+      unitAmount: round2(row.unitAmount ?? row.totalAmount ?? 0),
+      totalAmount: round2(row.totalAmount ?? row.unitAmount ?? 0),
+    }));
+  const inputs = completionInvoice?.submittedInputs || {};
+  const callOutLine = lineItems.find((row) =>
+    /call[\s-]?out/i.test(row.description)
+  );
+  const labourLine = lineItems.find((row) =>
+    /labou?r/i.test(row.description)
+  );
+  const parts = Array.isArray(inputs.parts)
+    ? inputs.parts
+        .map((part) => ({
+          description: `${
+            part?.description ?? part?.name ?? "Part"
+          }`.trim(),
+          amount: round2(
+            part?.amount ??
+              part?.price ??
+              part?.totalAmount ??
+              part?.cost ??
+              0
+          ),
+        }))
+        .filter((part) => part.description && part.amount >= 0)
+    : lineItems
+        .filter(
+          (row) =>
+            !/call[\s-]?out/i.test(row.description) &&
+            !/labou?r/i.test(row.description)
+        )
+        .map((row) => ({
+          description: row.description,
+          amount: row.totalAmount,
+        }));
+  const photos = await completionPhotosForDetail(job, statusTimes);
+  const notes = job.completionSummary || null;
+  const subtotal = round2(
+    completionInvoice?.subtotal ??
+      invoiceDoc?.subtotal ??
+      job.finalAmount ??
+      lineItems.reduce((sum, row) => sum + row.totalAmount, 0)
+  );
+  if (!notes && !lineItems.length && !photos.length && subtotal <= 0) return null;
+
+  const labourHours = Number(
+    inputs.labourHours ?? labourLine?.quantity ?? 0
+  );
+  const labourRatePerHour = round2(
+    inputs.labourRatePerHour ?? labourLine?.unitAmount ?? 0
+  );
+
+  return {
+    submittedAt: statusTimes.awaitingApprovalAt || null,
+    notes,
+    currency:
+      completionInvoice?.currency || invoiceDoc?.currency || job.currency || "GBP",
+    subtotal,
+    callOutCharge: round2(
+      inputs.callOutCharge ?? callOutLine?.totalAmount ?? 0
+    ),
+    labourHours,
+    labourRatePerHour,
+    labourTotal: round2(
+      labourLine?.totalAmount || labourHours * labourRatePerHour
+    ),
+    parts,
+    lineItems,
+    photos,
+  };
+};
+
 const serializeJobDetail = async (job, viewer) => {
   const base = serializeJobCard(job, viewer);
+  const viewerId = toObjectIdString(viewer._id);
+  const canViewSubmittedWork =
+    viewer.role === ROLES.ADMIN ||
+    (viewer.role === ROLES.FLEET &&
+      toObjectIdString(job.fleet?._id || job.fleet) === viewerId) ||
+    (viewer.role === ROLES.COMPANY &&
+      toObjectIdString(job.assignedCompany?._id || job.assignedCompany) ===
+        viewerId) ||
+    ([ROLES.MECHANIC, ROLES.MECHANIC_EMPLOYEE].includes(viewer.role) &&
+      toObjectIdString(job.assignedMechanic?._id || job.assignedMechanic) ===
+        viewerId);
   const myQuote =
     viewer.role === ROLES.MECHANIC
       ? await Quote.findOne({ job: job._id, mechanic: viewer._id }).sort({ createdAt: -1 }).lean()
       : viewer.role === ROLES.COMPANY
         ? await Quote.findOne({ job: job._id, company: viewer._id }).sort({ createdAt: -1 }).lean()
         : null;
+  const acceptedQuote = job.acceptedQuote
+    ? await Quote.findById(job.acceptedQuote?._id || job.acceptedQuote).lean()
+    : null;
 
   const statusTimes = await deriveStatusTimes(job._id, job);
   const mlResult = await loadLatestMechanicLocationForJob(job);
@@ -1328,12 +1463,59 @@ const serializeJobDetail = async (job, viewer) => {
 
   const invoiceDoc = await Invoice.findOne({ job: job._id })
     .select(
-      "invoiceNo status totalAmount subtotal vatAmount vatRate vatApplied currency paidAt issuedAt lineItems billedToSnapshot mechanicSnapshot"
+      "invoiceNo status totalAmount subtotal vatAmount vatRate vatApplied currency paidAt issuedAt lineItems billedToSnapshot mechanicSnapshot payment"
     )
     .lean();
+  const submittedWork = canViewSubmittedWork
+    ? await buildSubmittedWorkForDetail(job, invoiceDoc, statusTimes)
+    : null;
+  const completionPhotoSet = new Set(job.completionPhotos || []);
+  const providerProfile =
+    job.assignedCompany?.companyProfile ||
+    job.assignedMechanic?.mechanicProfile ||
+    {};
+  const isEmergency = job.mode === "EMERGENCY";
+  const fallbackHourlyRate =
+    isEmergency && Number(providerProfile.emergencyRate) > 0
+      ? Number(providerProfile.emergencyRate)
+      : Number(providerProfile.hourlyRate);
+  const commercialTerms =
+    canViewSubmittedWork &&
+    (acceptedQuote?.pricing || Number.isFinite(fallbackHourlyRate))
+      ? {
+          source: acceptedQuote?.pricing ? "QUOTE_SNAPSHOT" : "PROFILE_FALLBACK",
+          rateType:
+            acceptedQuote?.pricing?.rateType ||
+            (isEmergency ? "EMERGENCY" : "STANDARD"),
+          hourlyRate:
+            acceptedQuote?.pricing?.hourlyRate || fallbackHourlyRate || null,
+          callOutFee:
+            acceptedQuote?.pricing?.callOutFee ??
+            Number(providerProfile.callOutFee || 0),
+          estimatedLabourHours:
+            acceptedQuote?.pricing?.estimatedLabourHours ?? null,
+          labourTotal: acceptedQuote?.pricing?.labourTotal ?? null,
+          parts: acceptedQuote?.pricing?.parts || [],
+          partsTotal: acceptedQuote?.pricing?.partsTotal ?? null,
+          quotedSubtotal:
+            acceptedQuote?.pricing?.subtotal ??
+            acceptedQuote?.amount ??
+            job.acceptedAmount ??
+            null,
+          currency: "GBP",
+          capturedAt:
+            acceptedQuote?.pricing?.profileRateCapturedAt ||
+            acceptedQuote?.createdAt ||
+            null,
+        }
+      : null;
 
   return {
     ...base,
+    completionSummary: canViewSubmittedWork ? base.completionSummary : null,
+    photos: canViewSubmittedWork
+      ? base.photos
+      : base.photos.filter((url) => !completionPhotoSet.has(url)),
     tracking: mergedTracking,
     mechanicLocation,
     summary: {
@@ -1342,6 +1524,13 @@ const serializeJobDetail = async (job, viewer) => {
       etaMinutes: job.tracking?.etaMinutes ?? null,
     },
     statusTimeline: statusTimes,
+    completionPhotos: submittedWork?.photos || [],
+    completionInvoice:
+      canViewSubmittedWork && job.completionInvoice
+        ? job.completionInvoice
+        : null,
+    submittedWork,
+    commercialTerms,
     map: {
       origin: mechanicLocation?.point || null,
       destination: job.location || null,
@@ -1373,6 +1562,7 @@ const serializeJobDetail = async (job, viewer) => {
             availabilityType: myQuote.availabilityType,
             scheduledAt: myQuote.scheduledAt || null,
             etaMinutes: myQuote.etaMinutes ?? null,
+            pricing: myQuote.pricing || null,
           };
         })()
       : null,
@@ -1380,7 +1570,7 @@ const serializeJobDetail = async (job, viewer) => {
       viewer.role === ROLES.FLEET
         ? computeFleetPaymentBox({ job, defaultPaymentMethod, invoice: invoiceDoc })
         : null,
-    invoice: invoiceDoc
+    invoice: canViewSubmittedWork && invoiceDoc
       ? {
           _id: invoiceDoc._id,
           invoiceNo: invoiceDoc.invoiceNo,
@@ -2535,6 +2725,11 @@ export const listJobs = async (user, query) => {
     } else if (listTab === "completed") {
       filter.assignedMechanic = user._id;
       filter.status = JOB_STATUS.COMPLETED;
+      filter._id = {
+        $in: await Invoice.find({
+          status: { $in: ["PAID", "PARTIALLY_REFUNDED", "REFUNDED"] },
+        }).distinct("job"),
+      };
     } else if (listTab === "active") {
       filter.assignedMechanic = user._id;
       const mechActiveList = [
@@ -2607,11 +2802,11 @@ export const listJobs = async (user, query) => {
     )
     .populate(
       "assignedCompany",
-      "email role companyProfile.companyName companyProfile.contactName companyProfile.phone"
+      "email role companyProfile.companyName companyProfile.contactName companyProfile.phone companyProfile.hourlyRate companyProfile.emergencyRate companyProfile.callOutFee companyProfile.rateCurrency"
     )
     .populate(
       "assignedMechanic",
-      "email role mechanicProfile.displayName mechanicProfile.businessName mechanicProfile.phone mechanicProfile.rating mechanicProfile.profilePhotoUrl mechanicProfile.availability"
+      "email role mechanicProfile.displayName mechanicProfile.businessName mechanicProfile.phone mechanicProfile.rating mechanicProfile.profilePhotoUrl mechanicProfile.availability mechanicProfile.hourlyRate mechanicProfile.emergencyRate mechanicProfile.callOutFee mechanicProfile.rateCurrency"
     )
     .lean();
 
@@ -2893,8 +3088,10 @@ export const completeJobWork = async (jobId, mechanicUser, payload = {}) => {
     throw new AppError("At most 5 completion photos are allowed in one request", 400);
   }
   const photoPayload = pickCompletionPhotoPayload(payload);
+  let completionPhotoUrls = [];
   if (photoPayload) {
-    await addJobPhotos(jobId, mechanicUser, photoPayload);
+    const photoResult = await addJobPhotos(jobId, mechanicUser, photoPayload);
+    completionPhotoUrls = photoResult.added || [];
   }
 
   const attachmentItems = pickCompletionAttachmentItems(payload);
@@ -2905,7 +3102,19 @@ export const completeJobWork = async (jobId, mechanicUser, payload = {}) => {
     await addJobAttachments(jobId, mechanicUser, { items: attachmentItems });
   }
 
-  const inv = payload.invoice;
+  let inv = payload.invoice;
+  if (inv && typeof inv === "object" && !Array.isArray(inv) && job.acceptedQuote) {
+    const acceptedQuote = await Quote.findById(job.acceptedQuote)
+      .select("pricing")
+      .lean();
+    if (acceptedQuote?.pricing) {
+      inv = {
+        ...inv,
+        callOutCharge: acceptedQuote.pricing.callOutFee,
+        labourRatePerHour: acceptedQuote.pricing.hourlyRate,
+      };
+    }
+  }
   let invoiceBreakdown = null;
   let resolvedFinal;
 
@@ -2941,6 +3150,7 @@ export const completeJobWork = async (jobId, mechanicUser, payload = {}) => {
     payload: {
       workSummary: payload.workSummary ?? null,
       finalAmount: finalForJob ?? null,
+      completionPhotos: completionPhotoUrls,
       ...(invoiceBreakdown
         ? {
             invoiceSubtotal: invoiceBreakdown.subtotal,
@@ -2966,9 +3176,14 @@ export const completeJobWork = async (jobId, mechanicUser, payload = {}) => {
         j.finalAmount = finalForJob;
       }
       j.completionSummary = payload.workSummary || j.completionSummary;
+      if (completionPhotoUrls.length) {
+        j.completionPhotos = [
+          ...new Set([...(j.completionPhotos || []), ...completionPhotoUrls]),
+        ];
+      }
       if (invoiceBreakdown) {
         j.completionInvoice = {
-          currency: j.currency || job.currency || "GBP",
+          currency: "GBP",
           subtotal: invoiceBreakdown.subtotal,
           lineItems: invoiceBreakdown.lineItems.map((row) => ({
             description: row.description,
@@ -3268,7 +3483,50 @@ export const previewJobCancellation = async (jobId, fleetUser) => {
 export const getJobTimeline = async (jobId, user) => {
   const resolvedId = await resolveJobRef(jobId);
   await getJobByIdForUser(jobId, user);
-  return JobEvent.find({ job: resolvedId }).sort({ createdAt: -1 }).lean();
+  const [job, events] = await Promise.all([
+    Job.findById(resolvedId)
+      .select("fleet assignedCompany assignedMechanic")
+      .lean(),
+    JobEvent.find({ job: resolvedId }).sort({ createdAt: -1 }).lean(),
+  ]);
+  if (user.role === ROLES.ADMIN) return events;
+
+  const userId = toObjectIdString(user._id);
+  const isParticipant =
+    (user.role === ROLES.FLEET &&
+      toObjectIdString(job?.fleet) === userId) ||
+    (user.role === ROLES.COMPANY &&
+      toObjectIdString(job?.assignedCompany) === userId) ||
+    ([ROLES.MECHANIC, ROLES.MECHANIC_EMPLOYEE].includes(user.role) &&
+      toObjectIdString(job?.assignedMechanic) === userId);
+
+  return events.map((event) => ({
+    _id: event._id,
+    job: event.job,
+    actor: event.actor,
+    type: event.type,
+    fromStatus: event.fromStatus || null,
+    toStatus: event.toStatus || null,
+    note: isParticipant ? event.note || null : null,
+    createdAt: event.createdAt,
+  }));
+};
+
+export const getCompletionPhotoForDownload = async (jobId, user, photoIndex) => {
+  const resolvedId = await resolveJobRef(jobId);
+  const job = await Job.findById(resolvedId);
+  if (!job) throw new AppError("Job not found", 404);
+  assertJobParticipantAccess(job, user);
+
+  const index = Number(photoIndex);
+  if (!Number.isInteger(index) || index < 0) {
+    throw new AppError("Invalid completion photo index", 400);
+  }
+  const statusTimes = await deriveStatusTimes(job._id, job);
+  const photos = await completionPhotosForDetail(job.toObject(), statusTimes);
+  const url = photos[index];
+  if (!url) throw new AppError("Completion photo not found", 404);
+  return { url, index, jobId: job._id };
 };
 
 export const createJobLocationPing = async (jobId, user, payload) => {

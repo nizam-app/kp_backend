@@ -16,6 +16,7 @@ import {
   exportAdminFinancialOverview,
   exportAdminReports,
   getAdminDashboard,
+  getAdminDispute,
   getAdminFinancialOverview,
   getAdminFinancialPaymentDetail,
   refundAdminFinancialPayment,
@@ -401,7 +402,7 @@ export const adminSupportTicketReplyController = async (req, res) => {
 };
 
 export const adminDisputesController = async (req, res) => {
-  const result = await listAdminDisputes(req.query);
+  const result = await listAdminDisputes(req.user, req.query);
   return sendResponse(res, {
     message: "Admin disputes fetched",
     data: {
@@ -413,7 +414,7 @@ export const adminDisputesController = async (req, res) => {
 };
 
 export const createAdminDisputeController = async (req, res) => {
-  const result = await createAdminDispute(req.body);
+  const result = await createAdminDispute(req.user, req.body);
   return sendResponse(res, {
     statusCode: 201,
     message: "Admin dispute created",
@@ -422,12 +423,18 @@ export const createAdminDisputeController = async (req, res) => {
 };
 
 export const updateAdminDisputeController = async (req, res) => {
-  const result = await updateAdminDispute(req.params.disputeId, req.body);
+  const result = await updateAdminDispute(req.user, req.params.disputeId, req.body);
   return sendResponse(res, {
     message: "Admin dispute updated",
     data: result,
   });
 };
+
+export const adminDisputeByIdController = async (req, res) =>
+  sendResponse(res, {
+    message: "Admin dispute fetched",
+    data: await getAdminDispute(req.user, req.params.disputeId),
+  });
 
 export const adminNotificationsController = async (_req, res) => {
   const result = await listAdminNotifications();

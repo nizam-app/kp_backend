@@ -34,6 +34,8 @@ router.use("/earnings", earningRouter);
 router.use("/notifications", notificationRouter);
 router.use("/support/tickets", supportTicketRouter);
 router.use("/fleet/reviews", reviewRouter);
+router.use("/disputes", disputeRouter);
+// Backward compatibility for older Fleet clients.
 router.use("/fleet/disputes", disputeRouter);
 router.use("/chat", chatRouter);
 router.use("/admin", adminRouter);

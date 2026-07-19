@@ -987,6 +987,7 @@ export const updateOwnProfile = async (user, payload) => {
     user.mechanicProfile = {
       ...(user.mechanicProfile || {}),
       ...normalizedPatch,
+      rateCurrency: "GBP",
     };
   }
 
@@ -1039,6 +1040,7 @@ export const updateOwnProfile = async (user, payload) => {
     user.mechanicProfile = {
       ...(user.mechanicProfile || {}),
       ...normalizedPatch,
+      rateCurrency: "GBP",
     };
   }
 
@@ -1054,6 +1056,9 @@ export const updateOwnProfile = async (user, payload) => {
       "vatRegistered",
       "billingAddress",
       "baseLocationText",
+      "hourlyRate",
+      "emergencyRate",
+      "callOutFee",
       "serviceRadiusMiles",
       "coverageRadius",
       "teamSize",
@@ -1072,6 +1077,7 @@ export const updateOwnProfile = async (user, payload) => {
     const nextProfile = {
       ...(user.companyProfile || {}),
       ...normalizedPatch,
+      rateCurrency: "GBP",
       serviceRadiusMiles: normalizedPatch.coverageRadius ?? normalizedPatch.serviceRadiusMiles ?? user.companyProfile?.serviceRadiusMiles,
     };
     delete nextProfile.coverageRadius;

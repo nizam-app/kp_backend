@@ -18,6 +18,7 @@ import {
   startWorkController,
   jobLocationPingController,
   jobTimelineController,
+  downloadCompletionPhotoController,
   removeJobPhotoController,
   removeJobAttachmentController,
   previewJobCancellationController,
@@ -136,6 +137,10 @@ router.post(
 router.get(
   "/:jobId/timeline",
   catchAsync(jobTimelineController)
+);
+router.get(
+  "/:jobId/completion-photos/:photoIndex/download",
+  catchAsync(downloadCompletionPhotoController)
 );
 router.post(
   "/:jobId/quotes",

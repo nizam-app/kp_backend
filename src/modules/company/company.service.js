@@ -1247,6 +1247,10 @@ export const getCompanyQuotes = async (companyUser, query) => {
         WAITING: quoteCounts.WAITING,
         PENDING: quoteCounts.WAITING,
         ACCEPTED: quoteCounts.ACCEPTED,
+        IN_PROGRESS: quoteCounts.IN_PROGRESS,
+        AWAITING_APPROVAL: quoteCounts.AWAITING_APPROVAL,
+        COMPLETED: quoteCounts.COMPLETED,
+        CANCELLED: quoteCounts.CANCELLED,
         DECLINED: quoteCounts.DECLINED,
         REJECTED: quoteCounts.DECLINED,
         EXPIRED: quoteCounts.EXPIRED,
@@ -1291,6 +1295,11 @@ export const getCompanyJobs = async (companyUser, query = {}) => {
     filter.status = JOB_STATUS.AWAITING_APPROVAL;
   } else if (tab === "completed") {
     filter.status = JOB_STATUS.COMPLETED;
+    filter._id = {
+      $in: await Invoice.find({
+        status: { $in: ["PAID", "PARTIALLY_REFUNDED", "REFUNDED"] },
+      }).distinct("job"),
+    };
   }
 
   const [items, total, summary] = await Promise.all([

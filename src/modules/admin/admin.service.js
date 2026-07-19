@@ -17,6 +17,15 @@ import { JobLocationPing } from "../jobLocationPing/jobLocationPing.model.js";
 import { Notification } from "../notification/notification.model.js";
 import { createNotification } from "../notification/notification.service.js";
 import { Dispute } from "../dispute/dispute.model.js";
+import {
+  assignDispute as assignCanonicalDispute,
+  createParticipantDispute,
+  getDisputeDetail,
+  listDisputesForUser,
+  serializeDispute as serializeCanonicalDispute,
+  transitionDispute as transitionCanonicalDispute,
+} from "../dispute/dispute.service.js";
+import { DisputeMessage } from "../dispute/disputeMessage.model.js";
 import { ServiceCatalog } from "../serviceCatalog/serviceCatalog.model.js";
 import { Promotion } from "../promotion/promotion.model.js";
 import { Review } from "../review/review.model.js";
@@ -2665,7 +2674,7 @@ export const getAdminFinancialPaymentDetail = async (invoiceId) => {
     .lean();
   if (!invoice) throw new AppError("Invoice not found", 404);
 
-  const [attempts, refunds, paymentEvents] = await Promise.all([
+  const [attempts, refunds, paymentEvents, disputes] = await Promise.all([
     PaymentAttempt.find({ invoice: invoice._id })
       .sort({ createdAt: -1 })
       .populate("payer", "email role fleetProfile.companyName companyProfile.companyName")
@@ -2680,6 +2689,10 @@ export const getAdminFinancialPaymentDetail = async (invoiceId) => {
     })
       .sort({ createdAt: -1 })
       .select("type note payload createdAt")
+      .lean(),
+    Dispute.find({ invoice: invoice._id })
+      .sort({ createdAt: -1 })
+      .select("caseNo caseType title status processorStatus financialState amountMinor currency createdAt")
       .lean(),
   ]);
 
@@ -2773,6 +2786,18 @@ export const getAdminFinancialPaymentDetail = async (invoiceId) => {
       createdAt: refund.createdAt,
     })),
     paymentEvents,
+    disputes: disputes.map((item) => ({
+      _id: item._id,
+      caseNo: item.caseNo,
+      caseType: item.caseType,
+      title: item.title,
+      status: item.status,
+      processorStatus: item.processorStatus,
+      financialState: item.financialState,
+      amount: Number(item.amountMinor || 0) / 100,
+      currency: item.currency,
+      createdAt: item.createdAt,
+    })),
     actions: {
       canSync: Boolean(invoice.payment?.stripePaymentIntentId),
       canRetry: false,
@@ -3310,105 +3335,94 @@ export const updateAdminSupportTicket = async (ticketId, payload = {}, adminUser
   return updateSupportTicket(adminUser, ticketId, payload);
 };
 
-export const listAdminDisputes = async (query = {}) => {
-  const page = parsePage(query.page);
-  const limit = parseLimit(query.limit);
-  const skip = (page - 1) * limit;
-  const filter = {};
-
-  if (query.status) {
-    filter.status = `${query.status}`.trim().toUpperCase();
-  }
-  if (query.priority) {
-    filter.priority = parsePriority(query.priority);
-  }
-  if (query.search) {
-    const searchRegex = safeRegex(query.search);
-    filter.$or = [
-      { title: searchRegex },
-      { description: searchRegex },
-      { customerName: searchRegex },
-      { serviceLabel: searchRegex },
-      { reason: searchRegex },
-    ];
-  }
-
-  const [items, total, allItems] = await Promise.all([
-    Dispute.find(filter)
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit)
-      .populate("company", "email fleetProfile.companyName")
-      .populate("mechanic", "email mechanicProfile.displayName")
-      .lean(),
-    Dispute.countDocuments(filter),
-    Dispute.find({}).lean(),
+export const listAdminDisputes = async (adminUser, query = {}) => {
+  const result = await listDisputesForUser(adminUser, query);
+  const now = new Date();
+  const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+  const [
+    unassigned,
+    mine,
+    slaRisk,
+    awaitingEvidence,
+    decisionPending,
+    stripeDeadline,
+    resolved30d,
+    amountRows,
+  ] = await Promise.all([
+    Dispute.countDocuments({ status: { $nin: ["RESOLVED", "CLOSED"] }, assignedTo: { $exists: false } }),
+    Dispute.countDocuments({ status: { $nin: ["RESOLVED", "CLOSED"] }, assignedTo: adminUser._id }),
+    Dispute.countDocuments({
+      status: { $nin: ["RESOLVED", "CLOSED"] },
+      decisionDueAt: { $lte: new Date(now.getTime() + 24 * 60 * 60 * 1000) },
+    }),
+    Dispute.countDocuments({
+      status: { $in: ["AWAITING_CUSTOMER_EVIDENCE", "AWAITING_PROVIDER_EVIDENCE"] },
+    }),
+    Dispute.countDocuments({ status: "DECISION_PENDING" }),
+    Dispute.countDocuments({
+      caseType: "STRIPE_CHARGEBACK",
+      status: { $nin: ["RESOLVED", "CLOSED"] },
+      stripeEvidenceDueAt: { $ne: null },
+    }),
+    Dispute.countDocuments({ status: { $in: ["RESOLVED", "CLOSED"] }, resolvedAt: { $gte: thirtyDaysAgo } }),
+    Dispute.aggregate([
+      { $match: { status: { $nin: ["RESOLVED", "CLOSED"] } } },
+      { $group: { _id: null, amountMinor: { $sum: "$amountMinor" } } },
+    ]),
   ]);
-
   return {
-    items: items.map(serializeDispute),
-    meta: {
-      page,
-      limit,
-      total,
-      totalPages: Math.ceil(total / limit) || 1,
-    },
+    ...result,
     stats: {
-      open: allItems.filter((item) => item.status === "OPEN").length,
-      inReview: allItems.filter((item) => item.status === "IN_REVIEW").length,
-      resolved: allItems.filter((item) => item.status === "RESOLVED").length,
-      amountAtRisk: allItems.reduce((sum, item) => sum + (item.amount || 0), 0),
+      unassigned,
+      mine,
+      slaRisk,
+      awaitingEvidence,
+      decisionPending,
+      stripeDeadline,
+      resolved30d,
+      amountAtRisk: Number(amountRows[0]?.amountMinor || 0) / 100,
     },
   };
 };
 
-export const createAdminDispute = async (payload = {}) => {
-  if (!payload.title) throw new AppError("title is required", 400);
-  const dispute = await Dispute.create({
-    title: payload.title,
-    description: payload.description,
-    company: payload.companyId,
-    customerName: payload.customerName,
-    mechanic: payload.mechanicId,
-    serviceLabel: payload.serviceLabel,
-    amount: payload.amount,
-    currency: payload.currency || "GBP",
-    reason: payload.reason,
-    priority: payload.priority || "MEDIUM",
-    status: payload.status || "OPEN",
-    notes: payload.notes,
-  });
-  return dispute;
+export const getAdminDispute = (adminUser, disputeId) =>
+  getDisputeDetail(adminUser, disputeId);
+
+export const createAdminDispute = async (adminUser, payload = {}) => {
+  if (!payload.claimantId) {
+    throw new AppError("claimantId is required when an admin opens a participant case", 400);
+  }
+  const claimant = await User.findById(payload.claimantId);
+  if (!claimant) throw new AppError("Claimant not found", 404);
+  return createParticipantDispute(claimant, payload);
 };
 
-export const updateAdminDispute = async (disputeId, payload = {}) => {
+export const updateAdminDispute = async (adminUser, disputeId, payload = {}) => {
+  if (payload.assignedTo !== undefined || payload.assignedTeam) {
+    return assignCanonicalDispute(adminUser, disputeId, payload);
+  }
+  if (payload.status) {
+    return transitionCanonicalDispute(adminUser, disputeId, {
+      ...payload,
+      reason: payload.reason || payload.notes || "Admin case update",
+    });
+  }
   const dispute = await Dispute.findById(disputeId);
   if (!dispute) throw new AppError("Dispute not found", 404);
-
-  const fields = [
-    "title",
-    "description",
-    "customerName",
-    "serviceLabel",
-    "amount",
-    "currency",
-    "reason",
-    "notes",
-  ];
-
-  for (const field of fields) {
-    if (payload[field] !== undefined) dispute[field] = payload[field];
+  if (payload.priority) dispute.priority = parsePriority(payload.priority);
+  if (payload.notes) {
+    await DisputeMessage.create({
+      dispute: dispute._id,
+      sender: adminUser._id,
+      senderRole: adminUser.role,
+      visibility: "INTERNAL",
+      body: payload.notes,
+      readBy: [adminUser._id],
+    });
   }
-  if (payload.companyId !== undefined) dispute.company = payload.companyId || undefined;
-  if (payload.mechanicId !== undefined) dispute.mechanic = payload.mechanicId || undefined;
-  if (payload.priority) dispute.priority = `${payload.priority}`.trim().toUpperCase();
-  if (payload.status) dispute.status = `${payload.status}`.trim().toUpperCase();
-  if (dispute.status === "RESOLVED" && !dispute.resolvedAt) {
-    dispute.resolvedAt = new Date();
-  }
-
+  dispute.versionNumber += 1;
   await dispute.save();
-  return dispute;
+  return serializeCanonicalDispute(dispute);
 };
 
 export const listAdminNotifications = async () => {

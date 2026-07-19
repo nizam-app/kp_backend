@@ -8,6 +8,34 @@ import {
 
 const { Schema, model } = mongoose;
 
+const quotePartSchema = new Schema(
+  {
+    description: { type: String, required: true, trim: true, maxlength: 240 },
+    amount: { type: Number, required: true, min: 0 },
+  },
+  { _id: false }
+);
+
+const quotePricingSchema = new Schema(
+  {
+    rateType: {
+      type: String,
+      enum: ["STANDARD", "EMERGENCY"],
+      required: true,
+    },
+    hourlyRate: { type: Number, required: true, min: 0 },
+    estimatedLabourHours: { type: Number, required: true, min: 0, max: 999 },
+    labourTotal: { type: Number, required: true, min: 0 },
+    callOutFee: { type: Number, required: true, min: 0 },
+    parts: { type: [quotePartSchema], default: [] },
+    partsTotal: { type: Number, required: true, min: 0 },
+    subtotal: { type: Number, required: true, min: 0 },
+    currency: { type: String, enum: ["GBP"], default: "GBP" },
+    profileRateCapturedAt: { type: Date, default: Date.now },
+  },
+  { _id: false }
+);
+
 const quoteSchema = new Schema(
   {
     job: { type: Schema.Types.ObjectId, ref: "Job", required: true, index: true },
@@ -21,6 +49,7 @@ const quoteSchema = new Schema(
     company: { type: Schema.Types.ObjectId, ref: "User", index: true },
     submittedBy: { type: Schema.Types.ObjectId, ref: "User" },
     amount: { type: Number, required: true, min: 0 },
+    pricing: { type: quotePricingSchema, default: undefined },
     notes: { type: String, trim: true },
     availabilityType: {
       type: String,

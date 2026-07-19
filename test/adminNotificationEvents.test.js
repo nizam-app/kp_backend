@@ -7,8 +7,8 @@ import {
   normalizeAdminNotificationPreferences,
 } from "../src/modules/notification/adminNotificationEvents.js";
 
-test("admin notification defaults cover all six product events", () => {
-  assert.equal(adminNotificationEventKeys.length, 6);
+test("admin notification defaults cover all product events", () => {
+  assert.equal(adminNotificationEventKeys.length, 7);
   const preferences = normalizeAdminNotificationPreferences();
   assert.deepEqual(Object.keys(preferences), adminNotificationEventKeys);
   for (const channels of Object.values(preferences)) {
@@ -16,6 +16,15 @@ test("admin notification defaults cover all six product events", () => {
     assert.equal(typeof channels.email, "boolean");
     assert.equal(typeof channels.inApp, "boolean");
   }
+});
+
+test("dispute messages notify admins in-app without sending an email per reply", () => {
+  const preferences = normalizeAdminNotificationPreferences();
+  assert.deepEqual(preferences.DISPUTE_MESSAGE, {
+    push: true,
+    email: false,
+    inApp: true,
+  });
 });
 
 test("partial channel updates preserve defaults for omitted channels", () => {

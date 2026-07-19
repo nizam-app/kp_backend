@@ -36,6 +36,7 @@ const supportTicketSchema = new Schema(
     },
     job: { type: Schema.Types.ObjectId, ref: "Job", index: true },
     jobCode: { type: String, trim: true },
+    dispute: { type: Schema.Types.ObjectId, ref: "Dispute", index: true },
     assignedTo: { type: Schema.Types.ObjectId, ref: "User" },
     resolution: { type: String, trim: true },
     resolvedAt: Date,

@@ -157,7 +157,7 @@ const applyRoleProfile = (role, payload) => {
       emergencySurcharge:
         payload.emergencySurcharge ?? payload.emergencyRate,
       callOutFee: payload.callOutCharge ?? payload.callOutFee,
-      rateCurrency: payload.rateCurrency || "ZAR",
+      rateCurrency: "GBP",
       serviceRadiusMiles: payload.coverageRadius ?? payload.serviceRadiusMiles,
       profilePhotoUrl: payload.profilePhotoUrl,
       skills: payload.skills,

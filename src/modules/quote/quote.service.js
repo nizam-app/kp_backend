@@ -44,11 +44,113 @@ const formatQuoteRelativeAge = (value) => {
 };
 
 const quoteBreakdown = (quote) => {
-  const total = Number(quote?.amount) || 0;
-  const callOutFee = Math.round(total * 0.2);
-  const parts = 0;
-  const labour = Math.max(total - callOutFee - parts, 0);
-  return { labour, callOutFee, parts, total, currency: quote?.currency || "GBP" };
+  if (quote?.pricing) {
+    return {
+      labour: quote.pricing.labourTotal,
+      labourHours: quote.pricing.estimatedLabourHours,
+      hourlyRate: quote.pricing.hourlyRate,
+      rateType: quote.pricing.rateType,
+      callOutFee: quote.pricing.callOutFee,
+      parts: quote.pricing.partsTotal,
+      partItems: quote.pricing.parts || [],
+      total: quote.pricing.subtotal,
+      currency: "GBP",
+    };
+  }
+  return {
+    labour: null,
+    labourHours: null,
+    hourlyRate: null,
+    rateType: null,
+    callOutFee: null,
+    parts: null,
+    partItems: [],
+    total: Number(quote?.amount) || 0,
+    currency: "GBP",
+  };
+};
+
+const money2 = (value) =>
+  Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
+
+const buildQuotePricingSnapshot = (payload, job, provider) => {
+  const raw = payload?.pricing;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+
+  const profile =
+    provider.role === ROLES.COMPANY
+      ? provider.companyProfile || {}
+      : provider.mechanicProfile || {};
+  const standardRate = Number(profile.hourlyRate);
+  const emergencyRate = Number(profile.emergencyRate);
+  const isEmergency = job.mode === "EMERGENCY";
+  const hourlyRate =
+    isEmergency && Number.isFinite(emergencyRate) && emergencyRate > 0
+      ? emergencyRate
+      : standardRate;
+  if (!Number.isFinite(hourlyRate) || hourlyRate <= 0) {
+    throw new AppError(
+      `Set a valid ${isEmergency ? "emergency or hourly" : "hourly"} rate in your profile before quoting`,
+      400
+    );
+  }
+
+  const estimatedLabourHours = Number(raw.estimatedLabourHours);
+  if (
+    !Number.isFinite(estimatedLabourHours) ||
+    estimatedLabourHours <= 0 ||
+    estimatedLabourHours > 999
+  ) {
+    throw new AppError("Estimated labour hours must be between 0 and 999", 400);
+  }
+  const callOutFee = money2(profile.callOutFee);
+  if (!Number.isFinite(callOutFee) || callOutFee < 0) {
+    throw new AppError("Set a valid call-out fee in your profile before quoting", 400);
+  }
+
+  const incomingParts = Array.isArray(raw.parts) ? raw.parts : [];
+  if (incomingParts.length > 50) {
+    throw new AppError("At most 50 estimated parts are allowed", 400);
+  }
+  const parts = incomingParts
+    .map((part, index) => {
+      const description = `${part?.description ?? part?.name ?? ""}`
+        .trim()
+        .slice(0, 240);
+      const amount = money2(part?.amount ?? part?.cost ?? part?.price ?? 0);
+      if (!description) {
+        throw new AppError(`pricing.parts[${index}].description is required`, 400);
+      }
+      if (!Number.isFinite(amount) || amount < 0) {
+        throw new AppError(`pricing.parts[${index}].amount is invalid`, 400);
+      }
+      return { description, amount };
+    })
+    .filter((part) => part.amount > 0);
+  const labourTotal = money2(estimatedLabourHours * hourlyRate);
+  const partsTotal = money2(parts.reduce((sum, part) => sum + part.amount, 0));
+  const subtotal = money2(callOutFee + labourTotal + partsTotal);
+  if (subtotal <= 0) throw new AppError("Quote total must be greater than zero", 400);
+
+  if (
+    payload.amount !== undefined &&
+    Math.abs(Number(payload.amount) - subtotal) > 0.02
+  ) {
+    throw new AppError("Quote amount does not match its pricing breakdown", 400);
+  }
+
+  return {
+    rateType: isEmergency ? "EMERGENCY" : "STANDARD",
+    hourlyRate: money2(hourlyRate),
+    estimatedLabourHours,
+    labourTotal,
+    callOutFee,
+    parts,
+    partsTotal,
+    subtotal,
+    currency: "GBP",
+    profileRateCapturedAt: new Date(),
+  };
 };
 
 /** Matches `user.model` mechanicProfile.skills enum; used for Fleet quote cards. */
@@ -112,11 +214,25 @@ const serializeQuote = (quote) => {
   return {
   _id: quote._id,
   amount: quote.amount,
+  pricing: quote.pricing
+    ? {
+        rateType: quote.pricing.rateType,
+        hourlyRate: quote.pricing.hourlyRate,
+        estimatedLabourHours: quote.pricing.estimatedLabourHours,
+        labourTotal: quote.pricing.labourTotal,
+        callOutFee: quote.pricing.callOutFee,
+        parts: quote.pricing.parts || [],
+        partsTotal: quote.pricing.partsTotal,
+        subtotal: quote.pricing.subtotal,
+        currency: "GBP",
+        profileRateCapturedAt: quote.pricing.profileRateCapturedAt || null,
+      }
+    : null,
   notes: quote.notes || null,
   availabilityType: quote.availabilityType,
   scheduledAt: quote.scheduledAt || null,
   etaMinutes: quote.etaMinutes ?? null,
-  currency: quote.currency,
+  currency: "GBP",
   status: quote.status,
   /** Derived UI phase: keeps raw quote.status intact, reflects job outcome after accept. */
   displayStatus,
@@ -151,6 +267,9 @@ const serializeQuote = (quote) => {
             quote.mechanic.mechanicProfile?.verification?.status
           ),
         profilePhotoUrl: pickUserProfilePhotoUrl(quote.mechanic),
+        vatRegistered:
+          quote.mechanic.mechanicProfile?.vatRegistered === true ||
+          quote.mechanic.companyProfile?.vatRegistered === true,
         ...mechanicSpecialtyFields(quote.mechanic),
       }
     : null,
@@ -187,6 +306,7 @@ const serializeQuote = (quote) => {
         contactName: quote.company.companyProfile?.contactName || null,
         phone: quote.company.companyProfile?.phone || null,
         profilePhotoUrl: pickUserProfilePhotoUrl(quote.company),
+        vatRegistered: quote.company.companyProfile?.vatRegistered === true,
       }
     : null,
   actions: {
@@ -283,7 +403,7 @@ const baseQuotePopulate = (query) =>
     })
     .populate(
       "company",
-      "email role companyProfile.companyName companyProfile.contactName companyProfile.phone companyProfile.contactRole companyProfile.profilePhotoUrl"
+      "email role companyProfile.companyName companyProfile.contactName companyProfile.phone companyProfile.contactRole companyProfile.profilePhotoUrl companyProfile.vatRegistered"
     )
     .populate({
       path: "submittedBy",
@@ -411,7 +531,6 @@ const ensureQuoteAccess = (quote, user) => {
 };
 
 export const submitQuote = async (jobId, payload, mechanicUser) => {
-  if (!payload.amount) throw new AppError("amount is required", 400);
   if (mechanicUser.role === ROLES.MECHANIC_EMPLOYEE) {
     throw new AppError(
       "Company employees cannot quote on open jobs. Ask your company dispatcher to assign you.",
@@ -432,6 +551,11 @@ export const submitQuote = async (jobId, payload, mechanicUser) => {
   if (job.fleet.toString() === mechanicUser._id.toString()) {
     throw new AppError("Cannot quote your own job", 400);
   }
+  const pricing = buildQuotePricingSnapshot(payload, job, mechanicUser);
+  const amount = pricing?.subtotal ?? Number(payload.amount);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new AppError("amount is required and must be greater than zero", 400);
+  }
 
   await expireWaitingQuotes({ job: job._id });
 
@@ -451,7 +575,9 @@ export const submitQuote = async (jobId, payload, mechanicUser) => {
         ? mechanicUser._id
         : mechanicUser.companyMembership?.company || undefined,
     submittedBy: mechanicUser._id,
-    amount: payload.amount,
+    amount,
+    pricing: pricing || undefined,
+    currency: "GBP",
     notes: payload.notes,
     availabilityType: payload.availabilityType,
     scheduledAt: payload.scheduledAt,
@@ -731,7 +857,14 @@ export const amendQuote = async (quoteId, payload, mechanicUser) => {
     throw new AppError("Only waiting quotes can be amended", 400);
   }
 
-  if (payload.amount !== undefined) {
+  if (payload.pricing !== undefined) {
+    const job = await Job.findById(quote.job).lean();
+    if (!job) throw new AppError("Job not found", 404);
+    const pricing = buildQuotePricingSnapshot(payload, job, mechanicUser);
+    quote.pricing = pricing;
+    quote.amount = pricing.subtotal;
+    quote.currency = "GBP";
+  } else if (payload.amount !== undefined) {
     if (!Number.isFinite(Number(payload.amount)) || Number(payload.amount) <= 0) {
       throw new AppError("amount must be greater than zero", 400);
     }
@@ -888,10 +1021,7 @@ export const listMechanicQuotes = async (mechanicUser, query) => {
   const filter = { ...baseOwnerFilter };
   const tab = `${query.tab || "ALL"}`.toUpperCase();
 
-  if (tab === "WAITING" || tab === "PENDING") filter.status = QUOTE_STATUS.WAITING;
-  if (tab === "ACCEPTED") filter.status = QUOTE_STATUS.ACCEPTED;
-  if (tab === "EXPIRED") filter.status = QUOTE_STATUS.EXPIRED;
-  if (tab === "DECLINED" || tab === "REJECTED") filter.status = QUOTE_STATUS.DECLINED;
+  await applyOwnerQuoteTabFilter(filter, tab);
 
   const quotes = await baseQuotePopulate(
     Quote.find(filter).sort({ createdAt: -1 })
@@ -914,28 +1044,150 @@ const parseQuoteLimit = (value) => {
   return Math.min(Math.floor(n), 100);
 };
 
+const QUOTE_TAB_JOB_STATUSES = {
+  ACCEPTED: [JOB_STATUS.ASSIGNED],
+  IN_PROGRESS: [
+    JOB_STATUS.EN_ROUTE,
+    JOB_STATUS.ON_SITE,
+    JOB_STATUS.IN_PROGRESS,
+  ],
+  AWAITING_APPROVAL: [JOB_STATUS.AWAITING_APPROVAL],
+  COMPLETED: [JOB_STATUS.COMPLETED],
+  CANCELLED: [JOB_STATUS.CANCELLED],
+};
+
+const applyOwnerQuoteTabFilter = async (filter, tab) => {
+  if (tab === "WAITING" || tab === "PENDING") {
+    filter.status = QUOTE_STATUS.WAITING;
+    return;
+  }
+  if (QUOTE_TAB_JOB_STATUSES[tab]) {
+    filter.status = QUOTE_STATUS.ACCEPTED;
+    const jobFilter = {
+      status: { $in: QUOTE_TAB_JOB_STATUSES[tab] },
+    };
+    if (tab === "COMPLETED") {
+      jobFilter._id = {
+        $in: await Invoice.find({
+          status: { $in: ["PAID", "PARTIALLY_REFUNDED", "REFUNDED"] },
+        }).distinct("job"),
+      };
+    }
+    filter.job = {
+      $in: await Job.find(jobFilter).distinct("_id"),
+    };
+    return;
+  }
+  if (tab === "EXPIRED") filter.status = QUOTE_STATUS.EXPIRED;
+  else if (tab === "DECLINED" || tab === "REJECTED") {
+    filter.status = QUOTE_STATUS.DECLINED;
+  } else if (tab === "WITHDRAWN") {
+    filter.status = QUOTE_STATUS.WITHDRAWN;
+  }
+};
+
 export const countOwnerQuotesByStatus = async (ownerUser) => {
   const filter =
     ownerUser.role === ROLES.COMPANY
       ? { company: ownerUser._id }
       : { mechanic: ownerUser._id };
-  const rows = await Quote.aggregate([
-    { $match: filter },
-    { $group: { _id: "$status", count: { $sum: 1 } } },
+  const [rows, acceptedLifecycle, total] = await Promise.all([
+    Quote.aggregate([
+      { $match: filter },
+      { $group: { _id: "$status", count: { $sum: 1 } } },
+    ]),
+    Quote.aggregate([
+      { $match: { ...filter, status: QUOTE_STATUS.ACCEPTED } },
+      {
+        $lookup: {
+          from: Job.collection.name,
+          localField: "job",
+          foreignField: "_id",
+          as: "jobDoc",
+        },
+      },
+      { $unwind: "$jobDoc" },
+      {
+        $lookup: {
+          from: Invoice.collection.name,
+          localField: "job",
+          foreignField: "job",
+          as: "invoiceDocs",
+        },
+      },
+      {
+        $project: {
+          jobStatus: "$jobDoc.status",
+          paymentReleased: {
+            $gt: [
+              {
+                $size: {
+                  $filter: {
+                    input: "$invoiceDocs",
+                    as: "invoice",
+                    cond: {
+                      $in: [
+                        "$$invoice.status",
+                        ["PAID", "PARTIALLY_REFUNDED", "REFUNDED"],
+                      ],
+                    },
+                  },
+                },
+              },
+              0,
+            ],
+          },
+        },
+      },
+      {
+        $group: {
+          _id: { status: "$jobStatus", paymentReleased: "$paymentReleased" },
+          count: { $sum: 1 },
+        },
+      },
+    ]),
+    Quote.countDocuments(filter),
   ]);
   const counts = {
     WAITING: 0,
     ACCEPTED: 0,
+    IN_PROGRESS: 0,
+    AWAITING_APPROVAL: 0,
+    COMPLETED: 0,
+    CANCELLED: 0,
     DECLINED: 0,
     EXPIRED: 0,
     WITHDRAWN: 0,
   };
   for (const r of rows) {
-    if (r._id && Object.prototype.hasOwnProperty.call(counts, r._id)) {
+    if (
+      r._id &&
+      r._id !== QUOTE_STATUS.ACCEPTED &&
+      Object.prototype.hasOwnProperty.call(counts, r._id)
+    ) {
       counts[r._id] = r.count;
     }
   }
-  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+  for (const row of acceptedLifecycle) {
+    const jobStatus = row._id?.status;
+    if (jobStatus === JOB_STATUS.ASSIGNED) counts.ACCEPTED += row.count;
+    else if (
+      [JOB_STATUS.EN_ROUTE, JOB_STATUS.ON_SITE, JOB_STATUS.IN_PROGRESS].includes(
+        jobStatus
+      )
+    ) {
+      counts.IN_PROGRESS += row.count;
+    } else if (jobStatus === JOB_STATUS.AWAITING_APPROVAL) {
+      counts.AWAITING_APPROVAL += row.count;
+    } else if (
+      jobStatus === JOB_STATUS.COMPLETED &&
+      row._id?.paymentReleased === true
+    ) {
+      counts.COMPLETED += row.count;
+    } else if (jobStatus === JOB_STATUS.CANCELLED) {
+      counts.CANCELLED += row.count;
+    }
+  }
   return { ...counts, total };
 };
 
@@ -953,12 +1205,7 @@ export const listOwnerQuotesPaginated = async (ownerUser, query = {}) => {
 
   const filter = { ...baseOwnerFilter };
   const tab = `${query.tab || query.status || "ALL"}`.toUpperCase();
-
-  if (tab === "WAITING" || tab === "PENDING") filter.status = QUOTE_STATUS.WAITING;
-  else if (tab === "ACCEPTED") filter.status = QUOTE_STATUS.ACCEPTED;
-  else if (tab === "EXPIRED") filter.status = QUOTE_STATUS.EXPIRED;
-  else if (tab === "DECLINED" || tab === "REJECTED") filter.status = QUOTE_STATUS.DECLINED;
-  else if (tab === "WITHDRAWN") filter.status = QUOTE_STATUS.WITHDRAWN;
+  await applyOwnerQuoteTabFilter(filter, tab);
 
   const [total, quotes] = await Promise.all([
     Quote.countDocuments(filter),

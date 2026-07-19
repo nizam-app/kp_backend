@@ -17,6 +17,9 @@ import {
 } from "../../utils/platformFee.js";
 import { notifyAdminsSafely } from "../notification/adminNotification.service.js";
 import { ADMIN_NOTIFICATION_EVENTS } from "../notification/adminNotificationEvents.js";
+import { Dispute } from "../dispute/dispute.model.js";
+import { DisputeEvent } from "../dispute/disputeEvent.model.js";
+import { DisputeFinancialAction } from "../dispute/disputeFinancialAction.model.js";
 
 const roundAmount = (value) =>
   Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
@@ -444,9 +447,9 @@ const applyChargeRefundsToInvoice = async (charge) => {
   };
 };
 
-const applyDisputeToInvoice = async (dispute) => {
-  const paymentIntentId = dispute?.payment_intent;
-  const chargeId = dispute?.charge;
+export const applyDisputeToInvoice = async (stripeDispute) => {
+  const paymentIntentId = stripeDispute?.payment_intent;
+  const chargeId = stripeDispute?.charge;
   if (!paymentIntentId && !chargeId) {
     return { ok: true, ignored: true, reason: "payment_reference_missing" };
   }
@@ -458,46 +461,169 @@ const applyDisputeToInvoice = async (dispute) => {
     return { ok: true, ignored: true, reason: "invoice_not_found" };
   }
 
-  const closed = dispute?.status === "won" || dispute?.status === "lost";
+  const closed =
+    stripeDispute?.status === "won" || stripeDispute?.status === "lost";
   invoice.payment = {
     ...(invoice.payment || {}),
     provider: "STRIPE",
-    disputeStatus: dispute?.status || "under_review",
-    lastError: `Stripe dispute ${dispute?.status || "opened"}`,
+    disputeStatus: stripeDispute?.status || "under_review",
+    lastError: `Stripe dispute ${stripeDispute?.status || "opened"}`,
     updatedAt: new Date(),
   };
-  if (dispute?.status === "lost") invoice.status = "REFUNDED";
   await invoice.save();
 
   const job = await Job.findById(invoice.job);
+  if (!job) return { ok: true, ignored: true, reason: "job_not_found" };
+  const amountMinor = Number(stripeDispute?.amount || 0);
+  const processorStatus = `${stripeDispute?.status || "needs_response"}`.toUpperCase();
+  const canonical = await Dispute.findOneAndUpdate(
+    { stripeDisputeId: stripeDispute.id },
+    {
+      $set: {
+        processorStatus,
+        stripeChargeId: chargeId || undefined,
+        stripePaymentIntentId: paymentIntentId || undefined,
+        stripeEvidenceDueAt: stripeDispute?.evidence_details?.due_by
+          ? new Date(stripeDispute.evidence_details.due_by * 1000)
+          : undefined,
+        amountMinor,
+        amount: minorToMajor(amountMinor),
+        invoice: invoice._id,
+        job: invoice.job,
+        company: invoice.fleet,
+        mechanic: invoice.mechanic,
+        claimant: invoice.fleet,
+        claimantRole: "FLEET",
+        respondent: invoice.mechanic,
+        respondentRole: "MECHANIC",
+        financialState:
+          stripeDispute?.status === "lost" ? "FULLY_ADJUSTED" : "NO_ACTION",
+        status: closed ? "RESOLVED" : "OPEN",
+        resolvedAt: closed ? new Date() : undefined,
+      },
+      $setOnInsert: {
+        caseNo: `DSP-CB-${`${stripeDispute.id}`.slice(-10).toUpperCase()}`,
+        caseType: "STRIPE_CHARGEBACK",
+        title: `Stripe chargeback on ${invoice.invoiceNo || invoice._id}`,
+        description: `Stripe reason: ${stripeDispute?.reason || "unknown"}`,
+        reason: stripeDispute?.reason || "Stripe chargeback",
+        reasonCode: "CHARGEBACK",
+        createdBy: invoice.fleet,
+        customerName: null,
+        serviceLabel: job.title || job.jobCode,
+        currency: `${stripeDispute?.currency || invoice.currency || "GBP"}`.toUpperCase(),
+        priority: "HIGH",
+        nextActionOwner: closed ? "NONE" : "ADMIN",
+        responseDueAt: new Date(Date.now() + 4 * 60 * 60 * 1000),
+        decisionDueAt: stripeDispute?.evidence_details?.due_by
+          ? new Date(stripeDispute.evidence_details.due_by * 1000)
+          : new Date(Date.now() + 3 * 24 * 60 * 60 * 1000),
+      },
+      $inc: { versionNumber: 1 },
+    },
+    { upsert: true, new: true }
+  );
+  await DisputeEvent.updateOne(
+    {
+      dispute: canonical._id,
+      correlationId: `stripe-chargeback:${stripeDispute.id}:${stripeDispute?.status || "open"}`,
+    },
+    {
+      $setOnInsert: {
+        dispute: canonical._id,
+        source: "STRIPE",
+        type: closed ? "PROCESSOR_DECISION_RECORDED" : "PROCESSOR_STATUS_CHANGED",
+        toStatus: canonical.status,
+        correlationId: `stripe-chargeback:${stripeDispute.id}:${stripeDispute?.status || "open"}`,
+        payload: {
+          stripeDisputeId: stripeDispute.id,
+          processorStatus,
+          amountMinor,
+          reason: stripeDispute?.reason,
+        },
+      },
+    },
+    { upsert: true }
+  );
+
+  if (stripeDispute?.status === "lost") {
+    const notes = `Stripe chargeback loss ${stripeDispute.id}`;
+    const original = await EarningTransaction.findOne({
+      job: invoice.job,
+      mechanic: invoice.mechanic,
+      type: "JOB_PAYMENT",
+    }).lean();
+    if (original) {
+      await EarningTransaction.findOneAndUpdate(
+        { notes },
+        {
+          $setOnInsert: {
+            mechanic: invoice.mechanic,
+            job: invoice.job,
+            invoice: invoice._id,
+            type: "ADJUSTMENT",
+            grossAmount: -Math.abs(Number(original.grossAmount || 0)),
+            platformFee: -Math.abs(Number(original.platformFee || 0)),
+            platformFeePercent: original.platformFeePercent,
+            netAmount: -Math.abs(Number(original.netAmount || 0)),
+            currency: invoice.currency || "GBP",
+            paidAt: new Date(),
+            notes,
+          },
+        },
+        { upsert: true, new: true }
+      );
+    }
+    await DisputeFinancialAction.findOneAndUpdate(
+      { idempotencyKey: `stripe-chargeback:${stripeDispute.id}:lost` },
+      {
+        $setOnInsert: {
+          dispute: canonical._id,
+          invoice: invoice._id,
+          requestedBy: invoice.fleet,
+          type: "CHARGEBACK_ADJUSTMENT",
+          amountMinor,
+          currency: invoice.currency || "GBP",
+          status: "SUCCEEDED",
+          idempotencyKey: `stripe-chargeback:${stripeDispute.id}:lost`,
+          processedAt: new Date(),
+        },
+      },
+      { upsert: true }
+    );
+  }
+
   await createLifecycleJobEvent({
     job,
     type: "PAYMENT_DISPUTED",
-    note: `Stripe dispute ${dispute?.status || "opened"}`,
+    note: `Stripe dispute ${stripeDispute?.status || "opened"}`,
     payload: {
       invoiceId: invoice._id,
       stripePaymentIntentId: paymentIntentId || null,
-      disputeStatus: dispute?.status || null,
+      disputeStatus: stripeDispute?.status || null,
+      disputeId: canonical._id,
     },
   });
 
   await notifyAdminsSafely({
     eventKey: ADMIN_NOTIFICATION_EVENTS.PAYMENT_FAILED,
-    dedupeKey: `payment-dispute:${dispute?.id || invoice._id}:${dispute?.status || "open"}`,
-    title: `Chargeback ${dispute?.status || "opened"} on invoice ${invoice.invoiceNo || invoice._id}`,
-    body: `A Stripe dispute is ${dispute?.status || "open"} for payment ${paymentIntentId || ""}.`,
+    dedupeKey: `payment-dispute:${stripeDispute?.id || invoice._id}:${stripeDispute?.status || "open"}`,
+    title: `Chargeback ${stripeDispute?.status || "opened"} on invoice ${invoice.invoiceNo || invoice._id}`,
+    body: `A Stripe dispute is ${stripeDispute?.status || "open"} for payment ${paymentIntentId || ""}.`,
     data: {
+      disputeId: canonical._id.toString(),
       invoiceId: invoice._id.toString(),
       jobId: invoice.job?.toString?.() || null,
       paymentIntentId: paymentIntentId || null,
-      screen: "ADMIN_PAYMENT",
+      screen: "ADMIN_DISPUTE",
     },
   });
 
   return {
     ok: true,
     invoiceId: invoice._id.toString(),
-    disputeStatus: dispute?.status || null,
+    disputeId: canonical._id.toString(),
+    disputeStatus: stripeDispute?.status || null,
     closed,
   };
 };

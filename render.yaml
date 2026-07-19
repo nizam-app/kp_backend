@@ -53,3 +53,18 @@ services:
         sync: false
       - key: FIREBASE_SERVICE_ACCOUNT_JSON
         sync: false
+  - type: cron
+    name: kp-dispute-operations
+    runtime: node
+    schedule: "*/15 * * * *"
+    buildCommand: npm install
+    startCommand: npm run disputes:operate
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: MONGODB_URL
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: FIREBASE_SERVICE_ACCOUNT_JSON
+        sync: false

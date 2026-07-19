@@ -4,7 +4,7 @@ import { catchAsync } from "../../utils/catchAsync.js";
 import { ROLES } from "../../constants/domain.js";
 import { handleProfileImageMulterError } from "../../config/profileImageUpload.js";
 import {
-  adminDashboardController,adminAuditLogsController,adminDisputesController,adminFinancialController,adminFinancialPaymentDetailController,adminFleetController,adminLiveTrackingController,
+  adminDashboardController,adminAuditLogsController,adminDisputesController,adminDisputeByIdController,adminFinancialController,adminFinancialPaymentDetailController,adminFleetController,adminLiveTrackingController,
   adminNotificationsController,adminPromotionsController,adminReportsController,adminReviewsController,adminServiceCatalogController,
   adminServiceRequestByIdController,adminServiceRequestsController,adminSettingsController,adminSupportTicketsController,adminSupportTicketByIdController,adminSupportTicketReplyController,adminUserByIdController,adminUserMembersController,adminUsersController,approveMechanicController,
   createAdminFinancialInvoiceController,createAdminFleetController,createAdminFleetVehicleController,createAdminUserController,
@@ -117,6 +117,7 @@ router.patch("/support/:ticketId", catchAsync(updateAdminSupportTicketController
 router.post("/support/:ticketId/replies", catchAsync(adminSupportTicketReplyController));
 router.get("/disputes", catchAsync(adminDisputesController));
 router.post("/disputes", catchAsync(createAdminDisputeController));
+router.get("/disputes/:disputeId", catchAsync(adminDisputeByIdController));
 router.patch("/disputes/:disputeId", catchAsync(updateAdminDisputeController));
 router.get("/notifications", catchAsync(adminNotificationsController));
 router.patch("/notifications/read-all", catchAsync(markAllAdminNotificationsReadController));
