@@ -18,6 +18,7 @@
     "migrate:dispute-evidence": "node scripts/migrateSealedDisputeEvidence.js",
     "migrate:completion-photos": "node scripts/migrateCompletionPhotos.js",
     "migrate:gbp": "node scripts/migrateGbpCurrency.js",
+    "migrate:job-ordering": "node scripts/migrateJobOrderingTimestamps.js",
     "seed:disputes": "node scripts/seedDisputes.js",
     "test:stripe": "node scripts/testStripeApis.mjs --role=fleet",
     "test:stripe:company": "node scripts/testStripeApis.mjs --role=company",

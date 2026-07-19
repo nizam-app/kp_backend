@@ -264,7 +264,7 @@ const serializeMechanicReviewItem = (user) => ({
 });
 
 const serializeDashboardJob = (job) => {
-  const created = job.createdAt || job.postedAt;
+  const activityAt = job.updatedAt || job.createdAt || job.postedAt;
   return {
     _id: job._id,
     requestId: job.jobCode,
@@ -286,8 +286,9 @@ const serializeDashboardJob = (job) => {
     issue: job.completionSummary || job.description || job.title,
     status: serviceRequestBucketFromJobStatus(job.status),
     rawStatus: job.status,
-    time: relativeTimeLabel(created),
-    postedAt: created || null,
+    time: relativeTimeLabel(activityAt),
+    postedAt: job.postedAt || job.createdAt || null,
+    updatedAt: job.updatedAt || null,
   };
 };
 
@@ -363,6 +364,7 @@ const serializeServiceRequest = (job) => {
     currency: job.currency || "GBP",
     quoteCount: job.quoteCount || 0,
     postedAt: job.postedAt || job.createdAt,
+    completedAt: job.completedAt || null,
     updatedAt: job.updatedAt,
   };
 };
@@ -739,7 +741,7 @@ export const getAdminDashboard = async () => {
       },
     ]),
     Job.find({})
-      .sort({ createdAt: -1 })
+      .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
       .limit(8)
       .populate("fleet", "email fleetProfile.companyName fleetProfile.contactName fleetProfile.phone")
       .populate("assignedMechanic", "email mechanicProfile.displayName mechanicProfile.phone")
@@ -931,8 +933,9 @@ export const listAdminServiceRequests = async (query = {}) => {
 
   const filter = {};
 
-  if (query.status) {
-    const status = `${query.status}`.trim().toUpperCase();
+  const requestedStatus = `${query.status || ""}`.trim().toUpperCase();
+  if (requestedStatus) {
+    const status = requestedStatus;
     if (status === "PENDING") {
       filter.status = { $in: [JOB_STATUS.POSTED, JOB_STATUS.QUOTING] };
     } else if (status === "IN_PROGRESS") {
@@ -1005,9 +1008,16 @@ export const listAdminServiceRequests = async (query = {}) => {
     }
   }
 
+  const newestFirstSort =
+    requestedStatus === "COMPLETED"
+      ? { completedAt: -1, updatedAt: -1, createdAt: -1, _id: -1 }
+      : requestedStatus === "PENDING"
+        ? { postedAt: -1, createdAt: -1, _id: -1 }
+        : { updatedAt: -1, createdAt: -1, _id: -1 };
+
   const [items, total, allStatusAgg] = await Promise.all([
     Job.find(filter)
-      .sort({ createdAt: -1 })
+      .sort(newestFirstSort)
       .skip(skip)
       .limit(limit)
       .populate("fleet", "email fleetProfile.companyName fleetProfile.contactName fleetProfile.phone")
@@ -3098,7 +3108,7 @@ export const getAdminLiveTracking = async () => {
         ],
       },
     })
-      .sort({ updatedAt: -1 })
+      .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
       .populate("fleet", "fleetProfile.companyName")
       .lean(),
     JobLocationPing.aggregate([
@@ -3187,7 +3197,7 @@ export const getAdminLiveTracking = async () => {
   const openJobs = await Job.find({
     status: { $in: [JOB_STATUS.POSTED, JOB_STATUS.QUOTING] },
   })
-    .sort({ postedAt: -1 })
+    .sort({ postedAt: -1, createdAt: -1, _id: -1 })
     .limit(40)
     .populate("fleet", "fleetProfile.companyName")
     .lean();

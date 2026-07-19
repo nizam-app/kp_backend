@@ -13,6 +13,7 @@ import {
   mechanicAvailabilityValues,
   JOB_CATEGORY_SUBTYPE_TO_ISSUE_TYPE,
   slugifyJobCategoryKey,
+  urgencyValues,
 } from "../../constants/domain.js";
 import mongoose from "mongoose";
 import { resolveCanonicalJobCategory } from "../jobCategory/jobCategory.service.js";
@@ -2790,10 +2791,34 @@ export const listJobs = async (user, query) => {
     }
   }
 
+  const urgencyParam = (() => {
+    const value = query.urgency;
+    if (Array.isArray(value)) return `${value[0] ?? ""}`.trim().toUpperCase();
+    return `${value ?? ""}`.trim().toUpperCase();
+  })();
+  if (urgencyParam) {
+    if (!urgencyValues.includes(urgencyParam)) {
+      throw new AppError(`urgency must be one of: ${urgencyValues.join(", ")}`, 400);
+    }
+    filter.urgency = urgencyParam;
+  }
+
   applyListSearchFilter(filter, query);
 
+  const isFeedRequest =
+    query.feed === true ||
+    `${Array.isArray(query.feed) ? query.feed[0] : query.feed || ""}`
+      .trim()
+      .toLowerCase() === "true";
+  const newestFirstSort =
+    listTab === "completed" || listStatusParam === JOB_STATUS.COMPLETED
+      ? { completedAt: -1, updatedAt: -1, createdAt: -1, _id: -1 }
+      : isFeedRequest
+        ? { postedAt: -1, createdAt: -1, _id: -1 }
+        : { updatedAt: -1, createdAt: -1, _id: -1 };
+
   const queryBuilder = Job.find(filter)
-    .sort({ createdAt: -1 })
+    .sort(newestFirstSort)
     .skip(skip)
     .limit(limit)
     .populate(

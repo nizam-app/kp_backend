@@ -77,7 +77,7 @@ export const exportUserGdprData = async (adminUser, userId) => {
     deviceTokens,
     paymentMethods,
   ] = await Promise.all([
-    Job.find(partyFilter).sort({ createdAt: -1 }).lean(),
+    Job.find(partyFilter).sort({ updatedAt: -1, createdAt: -1, _id: -1 }).lean(),
     Quote.find({
       $or: [
         { fleet: user._id },

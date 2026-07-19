@@ -176,7 +176,7 @@ export const getFleetDashboard = async (fleetUser, query) => {
       },
     ]),
     Job.find({ fleet: fleetUser._id, status: { $in: activeStatuses } })
-      .sort({ createdAt: -1 })
+      .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
       .limit(10)
       .populate(
         "assignedMechanic",
@@ -184,7 +184,7 @@ export const getFleetDashboard = async (fleetUser, query) => {
       )
       .lean(),
     Job.find({ fleet: fleetUser._id, status: JOB_STATUS.COMPLETED })
-      .sort({ completedAt: -1 })
+      .sort({ completedAt: -1, updatedAt: -1, _id: -1 })
       .skip(skip)
       .limit(limit)
       .populate(

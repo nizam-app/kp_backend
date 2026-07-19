@@ -227,5 +227,36 @@ jobSchema.index({ mode: 1, "availabilityWindow.from": 1, "availabilityWindow.to"
 jobSchema.index({ fleet: 1, status: 1, createdAt: -1 });
 jobSchema.index({ assignedMechanic: 1, status: 1, createdAt: -1 });
 jobSchema.index({ assignedCompany: 1, status: 1, createdAt: -1 });
+jobSchema.index({ status: 1, postedAt: -1, createdAt: -1, _id: -1 });
+jobSchema.index({ fleet: 1, status: 1, updatedAt: -1, createdAt: -1, _id: -1 });
+jobSchema.index({ fleet: 1, status: 1, completedAt: -1, updatedAt: -1, _id: -1 });
+jobSchema.index({
+  assignedMechanic: 1,
+  status: 1,
+  updatedAt: -1,
+  createdAt: -1,
+  _id: -1,
+});
+jobSchema.index({
+  assignedMechanic: 1,
+  status: 1,
+  completedAt: -1,
+  updatedAt: -1,
+  _id: -1,
+});
+jobSchema.index({
+  assignedCompany: 1,
+  status: 1,
+  updatedAt: -1,
+  createdAt: -1,
+  _id: -1,
+});
+jobSchema.index({
+  assignedCompany: 1,
+  status: 1,
+  completedAt: -1,
+  updatedAt: -1,
+  _id: -1,
+});
 
 export const Job = model("Job", jobSchema);

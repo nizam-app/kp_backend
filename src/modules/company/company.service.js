@@ -980,7 +980,7 @@ export const getCompanyDashboard = async (companyUser) => {
       expiresAt: { $gt: new Date() },
     }),
     Job.find(unassignedFilter)
-      .sort({ assignedAt: -1, createdAt: -1 })
+      .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
       .limit(6)
       .select("jobCode title description urgency location vehicle status createdAt assignedAt")
       .lean(),
@@ -1302,9 +1302,14 @@ export const getCompanyJobs = async (companyUser, query = {}) => {
     };
   }
 
+  const newestFirstSort =
+    tab === "completed"
+      ? { completedAt: -1, updatedAt: -1, createdAt: -1, _id: -1 }
+      : { updatedAt: -1, createdAt: -1, _id: -1 };
+
   const [items, total, summary] = await Promise.all([
     Job.find(filter)
-      .sort({ updatedAt: -1, createdAt: -1 })
+      .sort(newestFirstSort)
       .skip(skip)
       .limit(limit)
       .populate("fleet", "fleetProfile.companyName fleetProfile.contactName")
@@ -2213,7 +2218,7 @@ export const listCompanyEarningJobs = async (companyUser, query = {}) => {
       assignedCompany: companyUser._id,
       status: JOB_STATUS.COMPLETED,
     })
-      .sort({ completedAt: -1, updatedAt: -1 })
+      .sort({ completedAt: -1, updatedAt: -1, _id: -1 })
       .skip(skip)
       .limit(limit)
       .populate("fleet", "fleetProfile.companyName")

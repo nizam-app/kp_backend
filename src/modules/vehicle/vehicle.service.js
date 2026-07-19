@@ -292,7 +292,7 @@ export const getVehicleByIdForFleet = async (fleetUser, vehicleId, query = {}) =
 
   const [recentJobs, recentJobsTotal, enriched] = await Promise.all([
     Job.find(jobFilter)
-      .sort({ updatedAt: -1, createdAt: -1 })
+      .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
       .limit(limit)
       .populate(
         "assignedMechanic",

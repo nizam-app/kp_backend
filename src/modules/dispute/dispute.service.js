@@ -451,7 +451,7 @@ export const listEligibleDisputeJobs = async (user) => {
     throw new AppError("Admins must open cases on behalf of a selected claimant", 400);
   }
   return Job.find(filter)
-    .sort({ updatedAt: -1 })
+    .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
     .limit(100)
     .select("_id jobCode title status completedAt updatedAt")
     .lean();
