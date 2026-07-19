@@ -1,11 +1,14 @@
 import { sendResponse } from "../../utils/sendResponse.js";
 import {
   attachStripeCardPaymentMethod,
+  createCompanyStripeDashboardLink,
+  createCompanyStripeOnboardingLink,
   createMechanicStripeDashboardLink,
   createMechanicStripeOnboardingLink,
   createPaymentMethod,
   createStripeSetupIntentForUser,
   getMechanicStripePayoutAccount,
+  getCompanyStripePayoutAccount,
   getStripeBillingConfig,
   handleStripeWebhook,
   listPaymentMethods,
@@ -67,6 +70,30 @@ export const mechanicStripeDashboardLinkController = async (req, res) => {
   const result = await createMechanicStripeDashboardLink(req.user);
   return sendResponse(res, {
     message: "Mechanic Stripe dashboard link created",
+    data: result,
+  });
+};
+
+export const companyStripePayoutAccountController = async (req, res) => {
+  const account = await getCompanyStripePayoutAccount(req.user);
+  return sendResponse(res, {
+    message: "Company Stripe payout account fetched",
+    data: account,
+  });
+};
+
+export const companyStripeOnboardingLinkController = async (req, res) => {
+  const result = await createCompanyStripeOnboardingLink(req.user, req.body);
+  return sendResponse(res, {
+    message: "Company Stripe onboarding link created",
+    data: result,
+  });
+};
+
+export const companyStripeDashboardLinkController = async (req, res) => {
+  const result = await createCompanyStripeDashboardLink(req.user);
+  return sendResponse(res, {
+    message: "Company Stripe dashboard link created",
     data: result,
   });
 };

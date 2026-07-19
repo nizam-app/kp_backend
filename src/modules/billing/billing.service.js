@@ -8,9 +8,11 @@ import {
   createStripeSetupIntent,
   detachStripePaymentMethod,
   ensureStripeCustomerForUser,
+  ensureStripeConnectAccountForCompany,
   ensureStripeConnectAccountForMechanic,
   getStripePublicConfig,
   retrieveStripePaymentMethod,
+  syncCompanyStripeConnectAccount,
   syncMechanicStripeConnectAccount,
 } from "./stripe.service.js";
 import { Invoice } from "../invoice/invoice.model.js";
@@ -215,6 +217,12 @@ const assertMechanicRole = (user) => {
   }
 };
 
+const assertCompanyRole = (user) => {
+  if (user.role !== "COMPANY") {
+    throw new AppError("Company payout actions are only available to companies", 403);
+  }
+};
+
 const assertAbsoluteHttpUrl = (value, fieldName) => {
   const input = `${value || ""}`.trim();
   if (!input) throw new AppError(`${fieldName} is required`, 400);
@@ -241,6 +249,34 @@ export const createStripeSetupIntentForUser = async (user) => {
   };
 };
 
+const getStripePayoutAccountStatus = (account) => {
+  const transfersEnabled = account.capabilities?.transfers === "active";
+  const ready =
+    Boolean(account.details_submitted) &&
+    Boolean(account.charges_enabled) &&
+    transfersEnabled &&
+    Boolean(account.payouts_enabled);
+  if (ready) return "ready";
+  if (!account.details_submitted) return "needs_onboarding";
+
+  const requirements = account.requirements || {};
+  const disabledReason = String(requirements.disabled_reason || "");
+  if (
+    disabledReason.includes("pending_verification") ||
+    disabledReason.includes("under_review")
+  ) {
+    return "under_review";
+  }
+  if (
+    (requirements.currently_due || []).length > 0 ||
+    (requirements.past_due || []).length > 0
+  ) {
+    return "additional_information_required";
+  }
+  if (disabledReason) return "restricted";
+  return "under_review";
+};
+
 export const getMechanicStripePayoutAccount = async (user) => {
   assertMechanicRole(user);
 
@@ -252,6 +288,7 @@ export const getMechanicStripePayoutAccount = async (user) => {
       onboardingComplete: false,
       detailsSubmitted: false,
       chargesEnabled: false,
+      transfersEnabled: false,
       payoutsEnabled: false,
       accountId: null,
       status: "not_started",
@@ -265,16 +302,51 @@ export const getMechanicStripePayoutAccount = async (user) => {
     accountType: account.type || null,
     onboardingComplete:
       Boolean(account.details_submitted) &&
-      Boolean(account.charges_enabled || account.payouts_enabled),
+      Boolean(account.charges_enabled) &&
+      account.capabilities?.transfers === "active" &&
+      Boolean(account.payouts_enabled),
     detailsSubmitted: Boolean(account.details_submitted),
     chargesEnabled: Boolean(account.charges_enabled),
+    transfersEnabled: account.capabilities?.transfers === "active",
     payoutsEnabled: Boolean(account.payouts_enabled),
-    status:
-      account.details_submitted && (account.charges_enabled || account.payouts_enabled)
-        ? "ready"
-        : account.details_submitted
-          ? "under_review"
-          : "needs_onboarding",
+    status: getStripePayoutAccountStatus(account),
+  };
+};
+
+export const getCompanyStripePayoutAccount = async (user) => {
+  assertCompanyRole(user);
+
+  const account = await syncCompanyStripeConnectAccount(user);
+  if (!account) {
+    return {
+      ...getStripePublicConfig(),
+      hasAccount: false,
+      onboardingComplete: false,
+      detailsSubmitted: false,
+      chargesEnabled: false,
+      transfersEnabled: false,
+      payoutsEnabled: false,
+      accountId: null,
+      status: "not_started",
+    };
+  }
+
+  const ready =
+    Boolean(account.details_submitted) &&
+    Boolean(account.charges_enabled) &&
+    account.capabilities?.transfers === "active" &&
+    Boolean(account.payouts_enabled);
+  return {
+    ...getStripePublicConfig(),
+    hasAccount: true,
+    accountId: account.id,
+    accountType: account.type || null,
+    onboardingComplete: ready,
+    detailsSubmitted: Boolean(account.details_submitted),
+    chargesEnabled: Boolean(account.charges_enabled),
+    transfersEnabled: account.capabilities?.transfers === "active",
+    payoutsEnabled: Boolean(account.payouts_enabled),
+    status: getStripePayoutAccountStatus(account),
   };
 };
 
@@ -288,6 +360,28 @@ export const createMechanicStripeOnboardingLink = async (
   const refreshUrl = assertAbsoluteHttpUrl(payload.refreshUrl, "refreshUrl");
   const accountId = await ensureStripeConnectAccountForMechanic(user);
 
+  const accountLink = await createStripeConnectAccountLink({
+    accountId,
+    returnUrl,
+    refreshUrl,
+  });
+
+  return {
+    ...getStripePublicConfig(),
+    accountId,
+    url: accountLink.url,
+    expiresAt: accountLink.expires_at
+      ? new Date(accountLink.expires_at * 1000).toISOString()
+      : null,
+  };
+};
+
+export const createCompanyStripeOnboardingLink = async (user, payload = {}) => {
+  assertCompanyRole(user);
+
+  const returnUrl = assertAbsoluteHttpUrl(payload.returnUrl, "returnUrl");
+  const refreshUrl = assertAbsoluteHttpUrl(payload.refreshUrl, "refreshUrl");
+  const accountId = await ensureStripeConnectAccountForCompany(user);
   const accountLink = await createStripeConnectAccountLink({
     accountId,
     returnUrl,
@@ -321,6 +415,31 @@ export const createMechanicStripeDashboardLink = async (user) => {
 
   const loginLink = await createStripeConnectLoginLink(account.id);
 
+  return {
+    ...getStripePublicConfig(),
+    accountId: account.id,
+    url: loginLink.url,
+    createdAt: loginLink.created
+      ? new Date(loginLink.created * 1000).toISOString()
+      : null,
+  };
+};
+
+export const createCompanyStripeDashboardLink = async (user) => {
+  assertCompanyRole(user);
+
+  const account = await syncCompanyStripeConnectAccount(user);
+  if (!account?.id) {
+    throw new AppError("Stripe payout onboarding has not started yet", 400);
+  }
+  if (!account.details_submitted) {
+    throw new AppError(
+      "Complete Stripe payout onboarding before opening the payout dashboard",
+      400
+    );
+  }
+
+  const loginLink = await createStripeConnectLoginLink(account.id);
   return {
     ...getStripePublicConfig(),
     accountId: account.id,

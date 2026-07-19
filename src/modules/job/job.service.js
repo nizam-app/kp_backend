@@ -28,15 +28,33 @@ import { JobLocationPing } from "../jobLocationPing/jobLocationPing.model.js";
 import { Invoice } from "../invoice/invoice.model.js";
 import { EarningTransaction } from "../earning/earningTransaction.model.js";
 import { PaymentMethod } from "../billing/paymentMethod.model.js";
-import { PaymentAttempt } from "../billing/paymentAttempt.model.js";
+import {
+  PaymentAttempt,
+  stripePaymentAttemptIdempotencyKey,
+  stripePaymentCancellationIdempotencyKey,
+  stripePaymentConfirmationIdempotencyKey,
+} from "../billing/paymentAttempt.model.js";
+import {
+  buildPaymentAttemptUpsert,
+  normalizeApprovalRequestId,
+  paymentAttemptId,
+  planStripePaymentIntentRetry,
+} from "../billing/paymentAttempt.service.js";
 import { invoiceStatusFromPaymentIntent } from "../billing/stripePaymentStatus.js";
 import { User } from "../user/user.model.js";
 import { ChatMessage } from "../chat/chat.model.js";
 import { Notification } from "../notification/notification.model.js";
 import {
+  cancelStripePaymentIntent,
+  confirmStripePaymentIntent,
   createStripePaymentIntent,
   getStripePublicConfig,
+  retrieveStripePaymentIntent,
 } from "../billing/stripe.service.js";
+import {
+  calculateDestinationChargeAmounts,
+  resolvePayoutRecipient,
+} from "../billing/payoutRecipient.service.js";
 import { getProfileCompletionSummary } from "../user/user.service.js";
 import { readMechanicProfileRatingAverage } from "../../utils/mechanicRating.js";
 import { calculateJobVat } from "../../utils/vat.js";
@@ -738,6 +756,7 @@ const buildJobApprovalPaymentContext = async ({
   job,
   payerUser,
   paymentMethodId,
+  approvalRequestId: approvalRequestIdInput,
   metadata = {},
   billExVat: billExVatInput = null,
   lineItems = null,
@@ -748,19 +767,26 @@ const buildJobApprovalPaymentContext = async ({
       : resolveApprovalBillExVat(job, lineItems);
   const vat = calculateJobVat(job, subtotal);
   const feePercent = getPlatformFeePercent();
-  const platformFee = computePlatformFee(subtotal, feePercent);
-  /** Mechanic payout is on ex-VAT work total (same as EarningTransaction). */
-  const mechanicNetAmount = Math.max(round2(subtotal - platformFee), 0);
+  const payoutAmounts = calculateDestinationChargeAmounts({
+    subtotal,
+    vatAmount: vat.vatAmount,
+    platformFeePercent: feePercent,
+  });
+  const platformFee = payoutAmounts.platformFeeMinor / 100;
+  const recipientNetAmount = payoutAmounts.recipientAmountMinor / 100;
+  const earningNetAmount =
+    (payoutAmounts.subtotalMinor - payoutAmounts.platformFeeMinor) / 100;
 
   const moneyMeta = {
     billExVat: subtotal,
-    chargeTotal: vat.totalAmount,
+    chargeTotal: payoutAmounts.chargeAmountMinor / 100,
     vatAmount: vat.vatAmount,
     vatRate: vat.vatRate,
     vatApplied: vat.vatRegistered,
     platformFee,
     platformFeePercent: feePercent,
-    mechanicNetAmount,
+    recipientNetAmount,
+    mechanicNetAmount: earningNetAmount,
   };
 
   const methodId = `${paymentMethodId || ""}`.trim();
@@ -792,39 +818,166 @@ const buildJobApprovalPaymentContext = async ({
     throw new AppError("A Stripe card payment method is required for online payment", 400);
   }
 
-  const totalAmount = vat.totalAmount;
-  const mechanicProfile = job.assignedMechanic?.mechanicProfile;
-  const mechanicConnectAccountId =
-    mechanicProfile?.stripeConnectChargesEnabled &&
-    mechanicProfile?.stripeConnectAccountId
-      ? mechanicProfile.stripeConnectAccountId
-      : null;
-  const idempotencyKey = `job:${job._id}:approval:${methodId}`;
+  const totalAmount = payoutAmounts.chargeAmountMinor / 100;
+  const payoutRecipient = await resolvePayoutRecipient(job);
+  const stripeCustomerId = resolvePayerStripeCustomerId(
+    payerUser,
+    paymentMethod
+  );
+  const approvalRequestId = normalizeApprovalRequestId(approvalRequestIdInput);
+  if (!approvalRequestId) {
+    throw new AppError(
+      "approvalAttemptId must be 8-128 letters, numbers, underscores, or hyphens",
+      400
+    );
+  }
 
-  const paymentIntent = await createStripePaymentIntent({
-    amount: totalAmount,
-    currency: job.currency || "GBP",
-    customerId: resolvePayerStripeCustomerId(payerUser, paymentMethod),
-    paymentMethodId: paymentMethod.providerMethodId,
-    mechanicConnectAccountId,
-    mechanicNetAmount: mechanicConnectAccountId ? mechanicNetAmount : null,
-    // Keyed by job + card: a double-click reuses the same PaymentIntent (no
-    // double charge), while retrying with a different card starts a new one.
-    idempotencyKey,
-    metadata: {
-      jobId: job._id.toString(),
-      fleetId: toObjectIdString(job.fleet),
-      mechanicId: toObjectIdString(job.assignedMechanic),
-      payerUserId: payerUser._id.toString(),
-      payerRole: payerUser.role,
-      billExVat: `${subtotal}`,
-      vatApplied: `${vat.vatRegistered}`,
-      vatRate: `${vat.vatRate}`,
-      vatAmount: `${vat.vatAmount}`,
-      chargeTotal: `${totalAmount}`,
-      ...metadata,
-    },
-  });
+  const paidAttempt = await PaymentAttempt.findOne({
+    job: job._id,
+    paymentStatus: "SUCCEEDED",
+  })
+    .sort({ createdAt: -1 })
+    .lean();
+  let existingAttempt =
+    paidAttempt ||
+    (await PaymentAttempt.findOne({ job: job._id })
+    .sort({ createdAt: -1 })
+    .lean());
+
+  let paymentIntent = null;
+  let attemptId = paymentAttemptId(existingAttempt, approvalRequestId);
+  let createIdempotencyKey =
+    existingAttempt?.idempotencyKey ||
+    stripePaymentAttemptIdempotencyKey(job._id, attemptId);
+  let operationIdempotencyKey = createIdempotencyKey;
+  let eventType = "PAYMENT_INTENT_CREATED";
+
+  if (existingAttempt?.stripePaymentIntentId) {
+    paymentIntent = await retrieveStripePaymentIntent(
+      existingAttempt.stripePaymentIntentId
+    );
+    const retryPlan = planStripePaymentIntentRetry({
+      paymentIntent,
+      existingAttempt,
+      paymentMethodId: paymentMethod.providerMethodId,
+      approvalRequestId,
+      amountMinor: payoutAmounts.chargeAmountMinor,
+      currency: job.currency || "GBP",
+      customerId: stripeCustomerId,
+      recipientConnectAccountId: payoutRecipient.stripeConnectAccountId,
+      platformFeeMinor: payoutAmounts.platformFeeMinor,
+    });
+
+    if (retryPlan === "REQUEST_CONFLICT") {
+      throw new AppError(
+        "approvalAttemptId was already used with different payment parameters",
+        409
+      );
+    }
+
+    if (retryPlan === "CONFLICT") {
+      throw new AppError(
+        `Stripe payment is ${paymentIntent.status} and cannot be retried safely`,
+        409
+      );
+    }
+
+    if (retryPlan === "CANCEL_THEN_CREATE") {
+      const cancellationKey = stripePaymentCancellationIdempotencyKey(
+        job._id,
+        attemptId,
+        approvalRequestId
+      );
+      const canceledIntent = await cancelStripePaymentIntent({
+        paymentIntentId: paymentIntent.id,
+        idempotencyKey: cancellationKey,
+      });
+      if (canceledIntent.status === "succeeded") {
+        paymentIntent = canceledIntent;
+        eventType = "PAYMENT_INTENT_REUSED";
+        operationIdempotencyKey = cancellationKey;
+      } else {
+        if (canceledIntent.status !== "canceled") {
+          throw new AppError(
+            "The previous Stripe payment could not be canceled safely",
+            409
+          );
+        }
+        await PaymentAttempt.updateOne(
+          { stripePaymentIntentId: canceledIntent.id },
+          {
+            $set: {
+              paymentStatus: "CANCELED",
+              processorStatus: "canceled",
+            },
+            $push: {
+              events: {
+                source: "APPROVAL",
+                eventType: "PAYMENT_INTENT_CANCELED_FOR_REPLACEMENT",
+                externalEventId: approvalRequestId,
+                idempotencyKey: cancellationKey,
+                stripePaymentMethodId: paymentMethod.providerMethodId,
+                paymentStatus: "CANCELED",
+                processorStatus: "canceled",
+                occurredAt: new Date(),
+              },
+            },
+          }
+        );
+        paymentIntent = null;
+        existingAttempt = null;
+        attemptId = approvalRequestId;
+        createIdempotencyKey = stripePaymentAttemptIdempotencyKey(
+          job._id,
+          attemptId
+        );
+        operationIdempotencyKey = createIdempotencyKey;
+        eventType = "PAYMENT_INTENT_CREATED";
+      }
+    } else if (retryPlan === "CONFIRM_EXISTING") {
+      operationIdempotencyKey = stripePaymentConfirmationIdempotencyKey(
+        job._id,
+        attemptId,
+        approvalRequestId
+      );
+      paymentIntent = await confirmStripePaymentIntent({
+        paymentIntentId: paymentIntent.id,
+        paymentMethodId: paymentMethod.providerMethodId,
+        idempotencyKey: operationIdempotencyKey,
+      });
+      eventType = "PAYMENT_INTENT_RECONFIRMED";
+    } else {
+      eventType = "PAYMENT_INTENT_REUSED";
+    }
+  }
+
+  if (!paymentIntent) {
+    paymentIntent = await createStripePaymentIntent({
+        amount: totalAmount,
+        currency: job.currency || "GBP",
+        customerId: stripeCustomerId,
+        paymentMethodId: paymentMethod.providerMethodId,
+        recipientConnectAccountId: payoutRecipient.stripeConnectAccountId,
+        platformFeeAmount: platformFee,
+        idempotencyKey: createIdempotencyKey,
+        metadata: {
+          jobId: job._id.toString(),
+          fleetId: toObjectIdString(job.fleet),
+          mechanicId: toObjectIdString(job.assignedMechanic),
+          payoutRecipientId: toObjectIdString(payoutRecipient.userId),
+          payoutRecipientType: payoutRecipient.recipientType,
+          recipientNetAmount: `${recipientNetAmount}`,
+          payerUserId: payerUser._id.toString(),
+          payerRole: payerUser.role,
+          billExVat: `${subtotal}`,
+          vatApplied: `${vat.vatRegistered}`,
+          vatRate: `${vat.vatRate}`,
+          vatAmount: `${vat.vatAmount}`,
+          chargeTotal: `${totalAmount}`,
+          ...metadata,
+        },
+      });
+  }
 
   // Off-session confirmation of a 3D Secure card fails with code
   // "authentication_required" and resets the intent to requires_payment_method.
@@ -839,38 +992,33 @@ const buildJobApprovalPaymentContext = async ({
     ? { invoiceStatus: "ISSUED", paymentStatus: "REQUIRES_ACTION", paid: false }
     : { ...statusMap, paid: statusMap.markPaid };
 
+  const intentMethod =
+    typeof paymentIntent.payment_method === "string"
+      ? paymentIntent.payment_method
+      : paymentIntent.payment_method?.id;
+  const effectivePaymentMethodId =
+    eventType === "PAYMENT_INTENT_REUSED" && intentMethod
+      ? intentMethod
+      : paymentMethod.providerMethodId;
+
   await PaymentAttempt.findOneAndUpdate(
     { stripePaymentIntentId: paymentIntent.id },
-    {
-      $set: {
-        paymentStatus: mapped.paymentStatus,
-        processorStatus: paymentIntent.status,
-        declineCode: paymentIntent.last_payment_error?.code || undefined,
-        failureMessage: paymentIntent.last_payment_error?.message || undefined,
-        completedAt: mapped.paid ? new Date() : undefined,
-      },
-      $setOnInsert: {
-        job: job._id,
-        payer: payerUser._id,
-        payerRole: payerUser.role,
-        provider: "STRIPE",
-        amount: totalAmount,
-        currency: job.currency || "GBP",
-        stripePaymentIntentId: paymentIntent.id,
-        stripePaymentMethodId: paymentMethod.providerMethodId,
-        idempotencyKey,
-        events: [
-          {
-            source: "APPROVAL",
-            eventType: "PAYMENT_INTENT_CREATED",
-            paymentStatus: mapped.paymentStatus,
-            processorStatus: paymentIntent.status,
-            message: paymentIntent.last_payment_error?.message || undefined,
-            occurredAt: new Date(),
-          },
-        ],
-      },
-    },
+    buildPaymentAttemptUpsert({
+      job: job._id,
+      payer: payerUser._id,
+      payerRole: payerUser.role,
+      amount: totalAmount,
+      currency: job.currency || "GBP",
+      paymentIntent,
+      paymentMethodId: effectivePaymentMethodId,
+      attemptId,
+      createIdempotencyKey,
+      operationIdempotencyKey,
+      approvalRequestId,
+      paymentStatus: mapped.paymentStatus,
+      paid: mapped.paid,
+      eventType,
+    }),
     { upsert: true, new: true }
   );
 
@@ -878,8 +1026,8 @@ const buildJobApprovalPaymentContext = async ({
     provider: "STRIPE",
     invoiceStatus: mapped.invoiceStatus,
     paymentStatus: mapped.paymentStatus,
-    stripeCustomerId: resolvePayerStripeCustomerId(payerUser, paymentMethod),
-    stripePaymentMethodId: paymentMethod.providerMethodId,
+    stripeCustomerId,
+    stripePaymentMethodId: effectivePaymentMethodId,
     stripePaymentIntentId: paymentIntent.id,
     stripeClientSecret: paymentIntent.client_secret || null,
     lastError: needsAuthentication
@@ -993,10 +1141,6 @@ const releaseApprovalPaymentLock = (jobId, token) =>
     { $unset: { approvalPaymentLock: 1 } }
   );
 
-const shouldHoldApprovalPaymentLock = (err) =>
-  err?.statusCode === 402 &&
-  ["REQUIRES_ACTION", "PROCESSING"].includes(err?.data?.paymentStatus);
-
 /**
  * Recompute the mechanic's cached profile stats after a job completes.
  * - jobsDone: true count of COMPLETED jobs assigned to the mechanic (self-healing).
@@ -1070,8 +1214,8 @@ const refreshMechanicStatsAfterCompletion = async (job) => {
 export const completeJobOnConfirmedPayment = async (jobId, { paymentStatus } = {}) => {
   const job = await Job.findById(jobId)
     .populate("fleet", "fleetProfile")
-    .populate("assignedCompany", "companyProfile")
-    .populate("assignedMechanic", "mechanicProfile");
+    .populate("assignedCompany", "role companyProfile")
+    .populate("assignedMechanic", "role mechanicProfile");
   if (!job || job.status !== JOB_STATUS.AWAITING_APPROVAL) return null;
 
   const fromStatus = job.status;
@@ -1900,7 +2044,16 @@ const isDegenerateInvoiceLineItems = (lineItems, job) => {
 };
 
 const upsertFinancialRecordsForCompletedJob = async (job, paymentContext = {}) => {
-  if (!job.assignedMechanic) return { invoice: null, earningTransaction: null };
+  if (!job.assignedCompany && !job.assignedMechanic) {
+    return { invoice: null, earningTransaction: null };
+  }
+  const payoutRecipient = await resolvePayoutRecipient(job, {
+    requireStripeReady: false,
+  });
+  const isCompanyPayout = payoutRecipient.recipientType === ROLES.COMPANY;
+  const recipientFilter = isCompanyPayout
+    ? { company: payoutRecipient.userId }
+    : { mechanic: payoutRecipient.userId };
 
   // Ensure fleet billing fields are available for invoice snapshots.
   if (!job.fleet?.fleetProfile) {
@@ -1960,7 +2113,9 @@ const upsertFinancialRecordsForCompletedJob = async (job, paymentContext = {}) =
       invoiceNo: await generateInvoiceNo(),
       job: job._id,
       fleet: job.fleet,
-      mechanic: job.assignedMechanic,
+      company: isCompanyPayout ? payoutRecipient.userId : undefined,
+      mechanic: isCompanyPayout ? undefined : payoutRecipient.userId,
+      performedByMechanic: job.assignedMechanic || undefined,
       subtotal,
       vatAmount,
       vatRate: vat.vatRate,
@@ -2016,6 +2171,9 @@ const upsertFinancialRecordsForCompletedJob = async (job, paymentContext = {}) =
       },
     });
   } else {
+    invoice.company = isCompanyPayout ? payoutRecipient.userId : undefined;
+    invoice.mechanic = isCompanyPayout ? undefined : payoutRecipient.userId;
+    invoice.performedByMechanic = job.assignedMechanic || undefined;
     invoice.subtotal = subtotal;
     invoice.vatAmount = vatAmount;
     invoice.vatRate = vat.vatRate;
@@ -2104,12 +2262,12 @@ const upsertFinancialRecordsForCompletedJob = async (job, paymentContext = {}) =
   if (invoiceStatus === "PAID") {
     earningTransaction = await EarningTransaction.findOneAndUpdate(
       {
-        mechanic: job.assignedMechanic,
         job: job._id,
         type: "JOB_PAYMENT",
       },
       {
         $set: {
+          ...recipientFilter,
           grossAmount: subtotal,
           platformFee,
           platformFeePercent: feePercent,
@@ -2118,6 +2276,7 @@ const upsertFinancialRecordsForCompletedJob = async (job, paymentContext = {}) =
           paidAt,
           notes: job.completionSummary || job.description || "Completed job payout",
         },
+        $unset: isCompanyPayout ? { mechanic: 1 } : { company: 1 },
         $setOnInsert: {
           type: "JOB_PAYMENT",
           quote: job.acceptedQuote || undefined,
@@ -3267,12 +3426,15 @@ export const approveJobCompletion = async (jobId, fleetUser, payload = {}) => {
   jobId = await resolveJobRef(jobId);
   const job = await Job.findById(jobId)
     .populate("fleet", "fleetProfile")
-    .populate("assignedCompany", "companyProfile")
-    .populate("assignedMechanic", "mechanicProfile");
+    .populate("assignedCompany", "role companyProfile")
+    .populate("assignedMechanic", "role mechanicProfile");
   if (!job) throw new AppError("Job not found", 404);
 
   ensureFleetOwner(job, fleetUser._id);
   if (job.status !== JOB_STATUS.AWAITING_APPROVAL) {
+    if (job.status === JOB_STATUS.COMPLETED) {
+      throw new AppError("This job has already been paid", 409);
+    }
     throw new AppError("Job is not awaiting approval", 400);
   }
 
@@ -3310,6 +3472,7 @@ export const approveJobCompletion = async (jobId, fleetUser, payload = {}) => {
         job,
         payerUser: fleetUser,
         paymentMethodId: payload.paymentMethodId,
+        approvalRequestId: payload.approvalAttemptId,
         billExVat,
         lineItems: completionLines,
       })),
@@ -3325,9 +3488,7 @@ export const approveJobCompletion = async (jobId, fleetUser, payload = {}) => {
       eventExtras: { paymentMethodId: payload.paymentMethodId },
     });
   } catch (err) {
-    if (!shouldHoldApprovalPaymentLock(err)) {
-      await releaseApprovalPaymentLock(job._id, lockToken);
-    }
+    await releaseApprovalPaymentLock(job._id, lockToken);
     throw err;
   }
 };
@@ -3339,12 +3500,15 @@ export const approveJobCompletionAsCompany = async (jobId, companyUser, payload 
   jobId = await resolveJobRef(jobId);
   const job = await Job.findById(jobId)
     .populate("fleet", "fleetProfile")
-    .populate("assignedCompany", "companyProfile")
-    .populate("assignedMechanic", "mechanicProfile");
+    .populate("assignedCompany", "role companyProfile")
+    .populate("assignedMechanic", "role mechanicProfile");
   if (!job) throw new AppError("Job not found", 404);
 
   ensureCompanyAssignedJob(job, companyUser._id);
   if (job.status !== JOB_STATUS.AWAITING_APPROVAL) {
+    if (job.status === JOB_STATUS.COMPLETED) {
+      throw new AppError("This job has already been paid", 409);
+    }
     throw new AppError("Job is not awaiting approval", 400);
   }
 
@@ -3396,6 +3560,7 @@ export const approveJobCompletionAsCompany = async (jobId, companyUser, payload 
         job,
         payerUser: companyUser,
         paymentMethodId,
+        approvalRequestId: payload.approvalAttemptId,
         billExVat,
         lineItems: completionLines,
         metadata: { companyId: companyUser._id.toString(), approvedByCompany: "true" },
@@ -3424,9 +3589,7 @@ export const approveJobCompletionAsCompany = async (jobId, companyUser, payload 
 
     return result;
   } catch (err) {
-    if (!shouldHoldApprovalPaymentLock(err)) {
-      await releaseApprovalPaymentLock(job._id, lockToken);
-    }
+    await releaseApprovalPaymentLock(job._id, lockToken);
     throw err;
   }
 };

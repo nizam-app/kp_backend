@@ -129,6 +129,7 @@ const mechanicProfileSchema = new Schema(
     stripeConnectOnboardingComplete: { type: Boolean, default: false },
     stripeConnectDetailsSubmitted: { type: Boolean, default: false },
     stripeConnectChargesEnabled: { type: Boolean, default: false },
+    stripeConnectTransfersEnabled: { type: Boolean, default: false },
     stripeConnectPayoutsEnabled: { type: Boolean, default: false },
     stripeConnectStatusUpdatedAt: Date,
   },
@@ -165,6 +166,13 @@ const companyProfileSchema = new Schema(
       responseMinutesAvg: { type: Number, min: 0 },
     },
     stripeCustomerId: { type: String, trim: true },
+    stripeConnectAccountId: { type: String, trim: true },
+    stripeConnectOnboardingComplete: { type: Boolean, default: false },
+    stripeConnectDetailsSubmitted: { type: Boolean, default: false },
+    stripeConnectChargesEnabled: { type: Boolean, default: false },
+    stripeConnectTransfersEnabled: { type: Boolean, default: false },
+    stripeConnectPayoutsEnabled: { type: Boolean, default: false },
+    stripeConnectStatusUpdatedAt: Date,
   },
   { _id: false }
 );

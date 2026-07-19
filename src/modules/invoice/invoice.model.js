@@ -17,7 +17,11 @@ const invoiceSchema = new Schema(
     invoiceNo: { type: String, required: true, unique: true, index: true },
     job: { type: Schema.Types.ObjectId, ref: "Job", required: true },
     fleet: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
-    mechanic: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
+    /** Supplier credited for the invoice: exactly one of company/mechanic. */
+    company: { type: Schema.Types.ObjectId, ref: "User", index: true },
+    mechanic: { type: Schema.Types.ObjectId, ref: "User", index: true },
+    /** Technician who performed the work; never implies payout ownership. */
+    performedByMechanic: { type: Schema.Types.ObjectId, ref: "User", index: true },
     subtotal: { type: Number, required: true, min: 0 },
     vatAmount: { type: Number, default: 0, min: 0 },
     vatRate: { type: Number, default: 0, min: 0 },
@@ -74,6 +78,12 @@ const invoiceSchema = new Schema(
       stripeCustomerId: { type: String, trim: true },
       stripePaymentMethodId: { type: String, trim: true },
       stripePaymentIntentId: { type: String, trim: true },
+      stripeChargeId: { type: String, trim: true },
+      stripeTransferId: { type: String, trim: true },
+      transferStatus: { type: String, trim: true },
+      transferFailureCode: { type: String, trim: true },
+      transferFailureMessage: { type: String, trim: true },
+      transferUpdatedAt: Date,
       lastError: { type: String, trim: true },
       disputeStatus: { type: String, trim: true },
       authorizedAmount: { type: Number, min: 0 },
@@ -109,7 +119,17 @@ const invoiceSchema = new Schema(
   { timestamps: true }
 );
 
+invoiceSchema.pre("validate", function validateSupplierCredit() {
+  if (Boolean(this.company) === Boolean(this.mechanic)) {
+    this.invalidate(
+      "company",
+      "Invoice must credit exactly one company or independent mechanic"
+    );
+  }
+});
+
 invoiceSchema.index({ fleet: 1, createdAt: -1 });
+invoiceSchema.index({ company: 1, createdAt: -1 });
 invoiceSchema.index({ mechanic: 1, createdAt: -1 });
 invoiceSchema.index({ job: 1 }, { unique: true, name: "uniq_invoice_job" });
 

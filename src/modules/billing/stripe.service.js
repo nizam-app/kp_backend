@@ -61,9 +61,16 @@ const stripeRequest = async (path, { method = "GET", body, idempotencyKey } = {}
   if (!response.ok) {
     // Preserve the raw Stripe error so callers can recover flows such as
     // off-session authentication_required (which carries a payment_intent).
+    const isIdempotencyConflict =
+      json?.error?.type === "idempotency_error" ||
+      json?.error?.code === "idempotency_key_in_use";
     throw new AppError(
       json?.error?.message || "Stripe request failed",
-      response.status >= 400 && response.status < 500 ? 400 : 502,
+      isIdempotencyConflict
+        ? 409
+        : response.status >= 400 && response.status < 500
+          ? 400
+          : 502,
       { stripeError: json?.error || null }
     );
   }
@@ -77,10 +84,14 @@ const getStripeCustomerId = (user) => {
   return null;
 };
 
+const getStripeConnectProfile = (user) => {
+  if (user.role === "MECHANIC") return user.mechanicProfile || {};
+  if (user.role === "COMPANY") return user.companyProfile || {};
+  return {};
+};
+
 const getStripeConnectAccountId = (user) =>
-  user.role === "MECHANIC"
-    ? user.mechanicProfile?.stripeConnectAccountId || null
-    : null;
+  getStripeConnectProfile(user).stripeConnectAccountId || null;
 
 export const ensureStripeCustomerForUser = async (user) => {
   if (user.role !== "FLEET" && user.role !== "COMPANY") {
@@ -155,6 +166,51 @@ export const retrieveStripePaymentMethod = async (paymentMethodId) =>
 export const retrieveStripePaymentIntent = async (paymentIntentId) =>
   stripeRequest(`/payment_intents/${paymentIntentId}`);
 
+export const confirmStripePaymentIntent = async ({
+  paymentIntentId,
+  paymentMethodId,
+  idempotencyKey,
+}) => {
+  if (!paymentIntentId || !paymentMethodId) {
+    throw new AppError("Stripe payment intent and payment method are required", 400);
+  }
+
+  try {
+    return await stripeRequest(`/payment_intents/${paymentIntentId}/confirm`, {
+      method: "POST",
+      idempotencyKey,
+      body: {
+        payment_method: paymentMethodId,
+        off_session: true,
+      },
+    });
+  } catch (err) {
+    const recoveredIntent = err?.data?.stripeError?.payment_intent;
+    if (recoveredIntent?.id) return recoveredIntent;
+    throw err;
+  }
+};
+
+export const cancelStripePaymentIntent = async ({
+  paymentIntentId,
+  idempotencyKey,
+}) => {
+  if (!paymentIntentId) {
+    throw new AppError("Stripe payment intent is required", 400);
+  }
+
+  try {
+    return await stripeRequest(`/payment_intents/${paymentIntentId}/cancel`, {
+      method: "POST",
+      idempotencyKey,
+    });
+  } catch (err) {
+    const recoveredIntent = err?.data?.stripeError?.payment_intent;
+    if (recoveredIntent?.id) return recoveredIntent;
+    throw err;
+  }
+};
+
 export const createStripeRefund = async ({
   paymentIntentId,
   amount,
@@ -202,8 +258,8 @@ export const createStripePaymentIntent = async ({
   customerId,
   paymentMethodId,
   metadata = {},
-  mechanicConnectAccountId = null,
-  mechanicNetAmount = null,
+  recipientConnectAccountId,
+  platformFeeAmount,
   idempotencyKey = null,
 }) => {
   const amountInMinor = Math.round(Number(amount || 0) * 100);
@@ -223,17 +279,25 @@ export const createStripePaymentIntent = async ({
     metadata,
   };
 
-  const connectId = `${mechanicConnectAccountId || ""}`.trim();
-  const netMinor = Math.round(Number(mechanicNetAmount || 0) * 100);
-  if (connectId && Number.isFinite(netMinor) && netMinor > 0 && netMinor < amountInMinor) {
-    body.transfer_data = { destination: connectId };
-    body.application_fee_amount = amountInMinor - netMinor;
-    body.metadata = {
-      ...metadata,
-      mechanicConnectAccountId: connectId,
-      mechanicNetAmount: `${mechanicNetAmount}`,
-    };
+  const connectId = `${recipientConnectAccountId || ""}`.trim();
+  const platformFeeMinor = Math.round(Number(platformFeeAmount || 0) * 100);
+  if (!connectId) {
+    throw new AppError("A Stripe Connect payout destination is required", 409);
   }
+  if (
+    !Number.isFinite(platformFeeMinor) ||
+    platformFeeMinor <= 0 ||
+    platformFeeMinor >= amountInMinor
+  ) {
+    throw new AppError("The Stripe platform fee is invalid", 400);
+  }
+  body.transfer_data = { destination: connectId };
+  body.application_fee_amount = platformFeeMinor;
+  body.metadata = {
+    ...metadata,
+    payoutRecipientConnectAccountId: connectId,
+    platformFeeAmount: `${platformFeeAmount}`,
+  };
 
   try {
     return await stripeRequest("/payment_intents", {
@@ -253,33 +317,78 @@ export const createStripePaymentIntent = async ({
   }
 };
 
-const syncMechanicStripeConnectStatus = async (userId, account) => {
+export const stripeConnectStatusFields = (account) => {
+  const detailsSubmitted = Boolean(account?.details_submitted);
+  const chargesEnabled = Boolean(account?.charges_enabled);
+  const transfersEnabled = account?.capabilities?.transfers === "active";
+  const payoutsEnabled = Boolean(account?.payouts_enabled);
+
+  return {
+    stripeConnectOnboardingComplete:
+      detailsSubmitted && chargesEnabled && transfersEnabled && payoutsEnabled,
+    stripeConnectDetailsSubmitted: detailsSubmitted,
+    stripeConnectChargesEnabled: chargesEnabled,
+    stripeConnectTransfersEnabled: transfersEnabled,
+    stripeConnectPayoutsEnabled: payoutsEnabled,
+    stripeConnectStatusUpdatedAt: new Date(),
+  };
+};
+
+const syncStripeConnectStatus = async (user, account) => {
+  const profilePath =
+    user.role === "COMPANY" ? "companyProfile" : "mechanicProfile";
+  const fields = stripeConnectStatusFields(account);
   await User.updateOne(
-    { _id: userId },
+    { _id: user._id },
     {
       $set: {
-        "mechanicProfile.stripeConnectOnboardingComplete":
-          Boolean(account?.details_submitted) &&
-          Boolean(account?.charges_enabled || account?.payouts_enabled),
-        "mechanicProfile.stripeConnectDetailsSubmitted": Boolean(
-          account?.details_submitted
+        ...Object.fromEntries(
+          Object.entries(fields).map(([key, value]) => [
+            `${profilePath}.${key}`,
+            value,
+          ])
         ),
-        "mechanicProfile.stripeConnectChargesEnabled": Boolean(
-          account?.charges_enabled
-        ),
-        "mechanicProfile.stripeConnectPayoutsEnabled": Boolean(
-          account?.payouts_enabled
-        ),
-        "mechanicProfile.stripeConnectStatusUpdatedAt": new Date(),
       },
     }
   );
 };
 
-export const ensureStripeConnectAccountForMechanic = async (user) => {
-  if (user.role !== "MECHANIC") {
+export const syncStripeConnectAccountFromWebhook = async (account) => {
+  if (!account?.id) {
+    throw new AppError("Stripe Connect account id is required", 400);
+  }
+
+  const user = await User.findOne({
+    $or: [
+      { "mechanicProfile.stripeConnectAccountId": account.id },
+      { "companyProfile.stripeConnectAccountId": account.id },
+    ],
+  }).select("_id role");
+  if (!user) {
+    return { ok: true, ignored: true, reason: "connect_user_not_found" };
+  }
+  if (!["MECHANIC", "COMPANY"].includes(user.role)) {
+    return { ok: true, ignored: true, reason: "connect_user_role_invalid" };
+  }
+
+  await syncStripeConnectStatus(user, account);
+  const fields = stripeConnectStatusFields(account);
+  return {
+    ok: true,
+    userId: user._id.toString(),
+    role: user.role,
+    accountId: account.id,
+    onboardingComplete: fields.stripeConnectOnboardingComplete,
+    chargesEnabled: fields.stripeConnectChargesEnabled,
+    transfersEnabled: fields.stripeConnectTransfersEnabled,
+    payoutsEnabled: fields.stripeConnectPayoutsEnabled,
+  };
+};
+
+const ensureStripeConnectAccountForPayoutRecipient = async (user) => {
+  if (!["MECHANIC", "COMPANY"].includes(user.role)) {
     throw new AppError(
-      "Stripe payout onboarding is only available for mechanic users",
+      "Stripe payout onboarding is only available for mechanics and companies",
       400
     );
   }
@@ -288,7 +397,14 @@ export const ensureStripeConnectAccountForMechanic = async (user) => {
   if (existingAccountId) return existingAccountId;
 
   const businessType =
-    user.mechanicProfile?.businessType === "SOLE_TRADER" ? "individual" : "company";
+    user.role === "MECHANIC" &&
+    user.mechanicProfile?.businessType === "SOLE_TRADER"
+      ? "individual"
+      : "company";
+  const profile =
+    user.role === "COMPANY" ? user.companyProfile : user.mechanicProfile;
+  const profilePath =
+    user.role === "COMPANY" ? "companyProfile" : "mechanicProfile";
 
   const account = await stripeRequest("/accounts", {
     method: "POST",
@@ -303,8 +419,9 @@ export const ensureStripeConnectAccountForMechanic = async (user) => {
       },
       business_profile: {
         name:
-          user.mechanicProfile?.businessName ||
-          user.mechanicProfile?.displayName ||
+          profile?.companyName ||
+          profile?.businessName ||
+          profile?.displayName ||
           user.email,
         product_description: "TruckFix roadside mechanic services",
         support_email: user.email,
@@ -320,8 +437,8 @@ export const ensureStripeConnectAccountForMechanic = async (user) => {
     { _id: user._id },
     {
       $set: {
-        "mechanicProfile.stripeConnectAccountId": account.id,
-        "mechanicProfile.stripeConnectStatusUpdatedAt": new Date(),
+        [`${profilePath}.stripeConnectAccountId`]: account.id,
+        [`${profilePath}.stripeConnectStatusUpdatedAt`]: new Date(),
       },
     }
   );
@@ -329,13 +446,33 @@ export const ensureStripeConnectAccountForMechanic = async (user) => {
   return account.id;
 };
 
-export const retrieveStripeConnectAccount = async (accountId) =>
-  stripeRequest(`/accounts/${accountId}`);
-
-export const syncMechanicStripeConnectAccount = async (user) => {
+export const ensureStripeConnectAccountForMechanic = async (user) => {
   if (user.role !== "MECHANIC") {
     throw new AppError(
       "Stripe payout onboarding is only available for mechanic users",
+      400
+    );
+  }
+  return ensureStripeConnectAccountForPayoutRecipient(user);
+};
+
+export const ensureStripeConnectAccountForCompany = async (user) => {
+  if (user.role !== "COMPANY") {
+    throw new AppError(
+      "Stripe payout onboarding is only available for company users",
+      400
+    );
+  }
+  return ensureStripeConnectAccountForPayoutRecipient(user);
+};
+
+export const retrieveStripeConnectAccount = async (accountId) =>
+  stripeRequest(`/accounts/${accountId}`);
+
+const syncStripeConnectAccount = async (user) => {
+  if (!["MECHANIC", "COMPANY"].includes(user.role)) {
+    throw new AppError(
+      "Stripe payout onboarding is only available for mechanics and companies",
       400
     );
   }
@@ -346,8 +483,28 @@ export const syncMechanicStripeConnectAccount = async (user) => {
   }
 
   const account = await retrieveStripeConnectAccount(accountId);
-  await syncMechanicStripeConnectStatus(user._id, account);
+  await syncStripeConnectStatus(user, account);
   return account;
+};
+
+export const syncMechanicStripeConnectAccount = async (user) => {
+  if (user.role !== "MECHANIC") {
+    throw new AppError(
+      "Stripe payout onboarding is only available for mechanic users",
+      400
+    );
+  }
+  return syncStripeConnectAccount(user);
+};
+
+export const syncCompanyStripeConnectAccount = async (user) => {
+  if (user.role !== "COMPANY") {
+    throw new AppError(
+      "Stripe payout onboarding is only available for company users",
+      400
+    );
+  }
+  return syncStripeConnectAccount(user);
 };
 
 export const createStripeConnectAccountLink = async ({

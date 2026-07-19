@@ -4,6 +4,9 @@ import { authorize, protect } from "../../middlewares/auth.js";
 import { ROLES } from "../../constants/domain.js";
 import {
   attachStripePaymentMethodController,
+  companyStripeDashboardLinkController,
+  companyStripeOnboardingLinkController,
+  companyStripePayoutAccountController,
   createPaymentMethodController,
   mechanicStripeDashboardLinkController,
   mechanicStripeOnboardingLinkController,
@@ -48,6 +51,21 @@ router.post(
   "/stripe/mechanic-payout-account/dashboard-link",
   catchAsync(authorize(ROLES.MECHANIC)),
   catchAsync(mechanicStripeDashboardLinkController)
+);
+router.get(
+  "/stripe/company-payout-account",
+  catchAsync(authorize(ROLES.COMPANY)),
+  catchAsync(companyStripePayoutAccountController)
+);
+router.post(
+  "/stripe/company-payout-account/onboarding-link",
+  catchAsync(authorize(ROLES.COMPANY)),
+  catchAsync(companyStripeOnboardingLinkController)
+);
+router.post(
+  "/stripe/company-payout-account/dashboard-link",
+  catchAsync(authorize(ROLES.COMPANY)),
+  catchAsync(companyStripeDashboardLinkController)
 );
 router.post(
   "/stripe/payment-methods/attach",

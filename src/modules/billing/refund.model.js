@@ -6,7 +6,8 @@ const refundSchema = new Schema(
   {
     invoice: { type: Schema.Types.ObjectId, ref: "Invoice", required: true, index: true },
     job: { type: Schema.Types.ObjectId, ref: "Job", required: true, index: true },
-    mechanic: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
+    company: { type: Schema.Types.ObjectId, ref: "User", index: true },
+    mechanic: { type: Schema.Types.ObjectId, ref: "User", index: true },
     initiatedBy: { type: Schema.Types.ObjectId, ref: "User", index: true },
     provider: { type: String, enum: ["STRIPE"], default: "STRIPE" },
     stripeRefundId: { type: String, trim: true, required: true },
@@ -26,6 +27,12 @@ const refundSchema = new Schema(
   },
   { timestamps: true }
 );
+
+refundSchema.pre("validate", function validateRefundRecipient() {
+  if (Boolean(this.company) === Boolean(this.mechanic)) {
+    this.invalidate("company", "Refund must reference exactly one payout recipient");
+  }
+});
 
 refundSchema.index(
   { stripeRefundId: 1 },

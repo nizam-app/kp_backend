@@ -20,11 +20,23 @@ import { ADMIN_NOTIFICATION_EVENTS } from "../notification/adminNotificationEven
 import { Dispute } from "../dispute/dispute.model.js";
 import { DisputeEvent } from "../dispute/disputeEvent.model.js";
 import { DisputeFinancialAction } from "../dispute/disputeFinancialAction.model.js";
+import { User } from "../user/user.model.js";
+import {
+  retrieveStripeConnectAccount,
+  syncStripeConnectAccountFromWebhook,
+} from "./stripe.service.js";
 
 const roundAmount = (value) =>
   Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
 
 const minorToMajor = (minorAmount) => roundAmount((Number(minorAmount || 0) || 0) / 100);
+
+const earningRecipientForInvoice = (invoice) =>
+  invoice?.company
+    ? { company: invoice.company }
+    : invoice?.mechanic
+      ? { mechanic: invoice.mechanic }
+      : null;
 
 const createLifecycleJobEvent = async ({ job, type, note, payload }) => {
   if (!job?._id) return;
@@ -41,7 +53,8 @@ const createLifecycleJobEvent = async ({ job, type, note, payload }) => {
 };
 
 const syncEarningForInvoice = async (invoice, { shouldBePaid }) => {
-  if (!invoice?.mechanic || !invoice?.job) return null;
+  const recipient = earningRecipientForInvoice(invoice);
+  if (!recipient || !invoice?.job) return null;
 
   const grossAmount = roundAmount(invoice.subtotal);
   const feePercent =
@@ -55,7 +68,6 @@ const syncEarningForInvoice = async (invoice, { shouldBePaid }) => {
 
   if (!shouldBePaid) {
     await EarningTransaction.deleteOne({
-      mechanic: invoice.mechanic,
       job: invoice.job,
       type: "JOB_PAYMENT",
     });
@@ -63,9 +75,10 @@ const syncEarningForInvoice = async (invoice, { shouldBePaid }) => {
   }
 
   return EarningTransaction.findOneAndUpdate(
-    { mechanic: invoice.mechanic, job: invoice.job, type: "JOB_PAYMENT" },
+    { job: invoice.job, type: "JOB_PAYMENT" },
     {
       $set: {
+        ...recipient,
         grossAmount,
         platformFee,
         platformFeePercent,
@@ -74,6 +87,7 @@ const syncEarningForInvoice = async (invoice, { shouldBePaid }) => {
         paidAt: invoice.paidAt || new Date(),
         notes: "Stripe webhook confirmed payout",
       },
+      $unset: recipient.company ? { mechanic: 1 } : { company: 1 },
       $setOnInsert: {
         type: "JOB_PAYMENT",
       },
@@ -94,7 +108,14 @@ const findInvoiceForPaymentIntent = async (paymentIntent) => {
   }
 
   if (!invoice && jobId) {
-    invoice = await Invoice.findOne({ job: jobId });
+    invoice = await Invoice.findOne({
+      job: jobId,
+      $or: [
+        { "payment.stripePaymentIntentId": paymentIntentId },
+        { "payment.stripePaymentIntentId": { $exists: false } },
+        { "payment.stripePaymentIntentId": null },
+      ],
+    });
   }
 
   return invoice;
@@ -242,6 +263,17 @@ export const applyPaymentIntentToInvoice = async (
   };
 };
 
+export const refundReconciliationState = (capturedAmount, refundedAmount) => {
+  const captured = roundAmount(capturedAmount);
+  const refunded = roundAmount(refundedAmount);
+  const fullyRefunded = captured > 0 && refunded >= captured - 0.01;
+  return {
+    invoiceStatus: fullyRefunded ? "REFUNDED" : "PARTIALLY_REFUNDED",
+    paymentStatus: fullyRefunded ? "REFUNDED" : "PARTIALLY_REFUNDED",
+    fullyRefunded,
+  };
+};
+
 const reconcileRefundAccounting = async (invoice) => {
   const [summary] = await Refund.aggregate([
     { $match: { invoice: invoice._id, status: "SUCCEEDED" } },
@@ -251,13 +283,13 @@ const reconcileRefundAccounting = async (invoice) => {
   const capturedAmount = roundAmount(
     invoice.payment?.capturedAmount || invoice.totalAmount || 0
   );
-  const fullyRefunded = capturedAmount > 0 && refundedAmount >= capturedAmount - 0.01;
+  const state = refundReconciliationState(capturedAmount, refundedAmount);
 
-  invoice.status = fullyRefunded ? "REFUNDED" : "PARTIALLY_REFUNDED";
+  invoice.status = state.invoiceStatus;
   invoice.payment = {
     ...(invoice.payment || {}),
     provider: "STRIPE",
-    status: fullyRefunded ? "REFUNDED" : "PARTIALLY_REFUNDED",
+    status: state.paymentStatus,
     refundedAmount,
     lastRefundAt: new Date(),
     updatedAt: new Date(),
@@ -268,10 +300,12 @@ const reconcileRefundAccounting = async (invoice) => {
     nextReminderAt: undefined,
   };
   await invoice.save();
-  return { refundedAmount, capturedAmount, fullyRefunded };
+  return { refundedAmount, capturedAmount, fullyRefunded: state.fullyRefunded };
 };
 
 const createRefundEarningAdjustment = async (invoice, refund) => {
+  const recipient = earningRecipientForInvoice(invoice);
+  if (!recipient) return null;
   const [[refundSummary], [adjustmentSummary]] = await Promise.all([
     Refund.aggregate([
       { $match: { invoice: invoice._id, status: "SUCCEEDED" } },
@@ -315,7 +349,7 @@ const createRefundEarningAdjustment = async (invoice, refund) => {
     { refund: refund._id },
     {
       $setOnInsert: {
-        mechanic: invoice.mechanic,
+        ...recipient,
         job: invoice.job,
         invoice: invoice._id,
         refund: refund._id,
@@ -371,7 +405,7 @@ export const applyStripeRefundToInvoice = async (
       $setOnInsert: {
         invoice: invoice._id,
         job: invoice.job,
-        mechanic: invoice.mechanic,
+        ...(earningRecipientForInvoice(invoice) || {}),
         initiatedBy,
         provider: "STRIPE",
         stripeRefundId: stripeRefund.id,
@@ -447,6 +481,178 @@ const applyChargeRefundsToInvoice = async (charge) => {
   };
 };
 
+export const applyChargeSettlementToInvoice = async (charge) => {
+  if (!charge?.payment_intent) {
+    return { ok: true, ignored: true, reason: "payment_intent_missing" };
+  }
+  const invoice = await Invoice.findOne({
+    "payment.stripePaymentIntentId": charge.payment_intent,
+  });
+  if (!invoice) {
+    return { ok: true, ignored: true, reason: "invoice_not_found" };
+  }
+
+  invoice.payment = {
+    ...(invoice.payment || {}),
+    stripeChargeId: charge.id || invoice.payment?.stripeChargeId,
+    stripeTransferId: charge.transfer || invoice.payment?.stripeTransferId,
+    transferStatus: charge.transfer
+      ? invoice.payment?.transferStatus || "CREATED"
+      : invoice.payment?.transferStatus,
+    transferUpdatedAt: charge.transfer ? new Date() : invoice.payment?.transferUpdatedAt,
+    updatedAt: new Date(),
+  };
+  await invoice.save();
+  return {
+    ok: true,
+    invoiceId: invoice._id.toString(),
+    stripeChargeId: charge.id || null,
+    stripeTransferId: charge.transfer || null,
+  };
+};
+
+const findInvoiceForTransfer = async (transfer) => {
+  let invoice = transfer?.id
+    ? await Invoice.findOne({ "payment.stripeTransferId": transfer.id })
+    : null;
+  if (!invoice && transfer?.source_transaction) {
+    invoice = await Invoice.findOne({
+      "payment.stripeChargeId": transfer.source_transaction,
+    });
+  }
+  if (!invoice && transfer?.metadata?.jobId) {
+    invoice = await Invoice.findOne({ job: transfer.metadata.jobId });
+  }
+  return invoice;
+};
+
+export const applyTransferToInvoice = async (transfer, eventType = "transfer.updated") => {
+  const invoice = await findInvoiceForTransfer(transfer);
+  if (!invoice) {
+    return {
+      ok: true,
+      ignored: true,
+      reason: "invoice_not_found",
+      stripeTransferId: transfer?.id || null,
+    };
+  }
+
+  const failed = eventType === "transfer.failed";
+  const reversed =
+    eventType === "transfer.reversed" || Number(transfer?.amount_reversed || 0) > 0;
+  const transferStatus = failed ? "FAILED" : reversed ? "REVERSED" : "CREATED";
+  invoice.payment = {
+    ...(invoice.payment || {}),
+    stripeTransferId: transfer.id || invoice.payment?.stripeTransferId,
+    stripeChargeId:
+      transfer.source_transaction || invoice.payment?.stripeChargeId,
+    transferStatus,
+    transferFailureCode: failed
+      ? transfer.failure_code || "transfer_failed"
+      : undefined,
+    transferFailureMessage: failed
+      ? transfer.failure_message || "Stripe transfer failed"
+      : undefined,
+    transferUpdatedAt: new Date(),
+    updatedAt: new Date(),
+  };
+  // Settlement failures never downgrade the customer's successful charge.
+  await invoice.save();
+
+  const job = await Job.findById(invoice.job);
+  await createLifecycleJobEvent({
+    job,
+    type: "PAYMENT_UPDATED",
+    note: `Stripe transfer ${transferStatus.toLowerCase()}`,
+    payload: {
+      invoiceId: invoice._id,
+      stripeTransferId: transfer.id,
+      transferStatus,
+      failureCode: transfer.failure_code || null,
+      failureMessage: transfer.failure_message || null,
+    },
+  });
+
+  if (failed || reversed) {
+    await notifyAdminsSafely({
+      eventKey: ADMIN_NOTIFICATION_EVENTS.PAYMENT_FAILED,
+      dedupeKey: `stripe-transfer:${transfer.id}:${transferStatus}`,
+      title: `Stripe transfer ${transferStatus.toLowerCase()}`,
+      body:
+        transfer.failure_message ||
+        `Transfer ${transfer.id} for invoice ${invoice.invoiceNo || invoice._id} requires reconciliation.`,
+      data: {
+        invoiceId: invoice._id.toString(),
+        jobId: invoice.job?.toString?.() || null,
+        stripeTransferId: transfer.id,
+        transferStatus,
+        screen: "ADMIN_PAYMENT",
+      },
+    });
+  }
+
+  return {
+    ok: true,
+    invoiceId: invoice._id.toString(),
+    stripeTransferId: transfer.id,
+    transferStatus,
+    paymentStatus: invoice.payment?.status,
+  };
+};
+
+export const payoutReconciliationResult = (
+  payout,
+  eventType,
+  accountId,
+  recipient = null
+) => ({
+  ok: true,
+  payoutId: payout?.id || null,
+  payoutStatus: `${
+    payout?.status || eventType.split(".").at(-1) || "unknown"
+  }`.toUpperCase(),
+  accountId: accountId || null,
+  recipientId: recipient?._id?.toString?.() || null,
+  recipientRole: recipient?.role || null,
+  failureCode: payout?.failure_code || null,
+  failureMessage: payout?.failure_message || null,
+});
+
+const recordPayoutEvent = async (payout, eventType, accountId) => {
+  const failed = eventType === "payout.failed";
+  const recipient = accountId
+    ? await User.findOne({
+        $or: [
+          { "mechanicProfile.stripeConnectAccountId": accountId },
+          { "companyProfile.stripeConnectAccountId": accountId },
+        ],
+      })
+        .select("_id role")
+        .lean()
+    : null;
+
+  if (failed) {
+    await notifyAdminsSafely({
+      eventKey: ADMIN_NOTIFICATION_EVENTS.PAYMENT_FAILED,
+      dedupeKey: `stripe-payout:${payout?.id}:FAILED`,
+      title: "Stripe payout failed",
+      body:
+        payout?.failure_message ||
+        `Payout ${payout?.id || ""} failed for Connect account ${accountId || "unknown"}.`,
+      data: {
+        payoutId: payout?.id || null,
+        accountId: accountId || null,
+        recipientId: recipient?._id?.toString?.() || null,
+        recipientRole: recipient?.role || null,
+        failureCode: payout?.failure_code || null,
+        screen: "ADMIN_PAYMENT",
+      },
+    });
+  }
+
+  return payoutReconciliationResult(payout, eventType, accountId, recipient);
+};
+
 export const applyDisputeToInvoice = async (stripeDispute) => {
   const paymentIntentId = stripeDispute?.payment_intent;
   const chargeId = stripeDispute?.charge;
@@ -456,7 +662,7 @@ export const applyDisputeToInvoice = async (stripeDispute) => {
 
   const invoice = paymentIntentId
     ? await Invoice.findOne({ "payment.stripePaymentIntentId": paymentIntentId })
-    : null;
+    : await Invoice.findOne({ "payment.stripeChargeId": chargeId });
   if (!invoice) {
     return { ok: true, ignored: true, reason: "invoice_not_found" };
   }
@@ -548,17 +754,20 @@ export const applyDisputeToInvoice = async (stripeDispute) => {
 
   if (stripeDispute?.status === "lost") {
     const notes = `Stripe chargeback loss ${stripeDispute.id}`;
-    const original = await EarningTransaction.findOne({
-      job: invoice.job,
-      mechanic: invoice.mechanic,
-      type: "JOB_PAYMENT",
-    }).lean();
+    const recipient = earningRecipientForInvoice(invoice);
+    const original = recipient
+      ? await EarningTransaction.findOne({
+          job: invoice.job,
+          ...recipient,
+          type: "JOB_PAYMENT",
+        }).lean()
+      : null;
     if (original) {
       await EarningTransaction.findOneAndUpdate(
         { notes },
         {
           $setOnInsert: {
-            mechanic: invoice.mechanic,
+            ...(recipient || {}),
             job: invoice.job,
             invoice: invoice._id,
             type: "ADJUSTMENT",
@@ -642,6 +851,9 @@ const dispatchStripeEvent = async (event) => {
       });
     case "charge.refunded":
       return applyChargeRefundsToInvoice(event.data?.object || {});
+    case "charge.succeeded":
+    case "charge.updated":
+      return applyChargeSettlementToInvoice(event.data?.object || {});
     case "refund.created":
     case "refund.updated":
     case "refund.failed":
@@ -652,6 +864,32 @@ const dispatchStripeEvent = async (event) => {
     case "charge.dispute.updated":
     case "charge.dispute.closed":
       return applyDisputeToInvoice(event.data?.object || {});
+    case "account.updated":
+      return syncStripeConnectAccountFromWebhook(event.data?.object || {});
+    case "capability.updated": {
+      const accountId =
+        event.account || event.data?.object?.account || event.data?.object?.account_id;
+      if (!accountId) {
+        return { ok: true, ignored: true, reason: "connect_account_missing" };
+      }
+      const account = await retrieveStripeConnectAccount(accountId);
+      return syncStripeConnectAccountFromWebhook(account);
+    }
+    case "transfer.created":
+    case "transfer.updated":
+    case "transfer.reversed":
+      return applyTransferToInvoice(event.data?.object || {}, event.type);
+    case "payout.created":
+    case "payout.updated":
+    case "payout.paid":
+    case "payout.failed":
+    case "payout.canceled":
+    case "payout.reconciliation_completed":
+      return recordPayoutEvent(
+        event.data?.object || {},
+        event.type,
+        event.account || null
+      );
     default:
       return {
         ok: true,
@@ -669,7 +907,12 @@ export const processStripeWebhookEvent = async (event) => {
   // first; a duplicate delivery is acknowledged without reprocessing.
   if (event.id) {
     try {
-      await StripeWebhookEvent.create({ eventId: event.id, type: event.type });
+      await StripeWebhookEvent.create({
+        eventId: event.id,
+        type: event.type,
+        accountId: event.account || undefined,
+        objectId: event.data?.object?.id || undefined,
+      });
     } catch (err) {
       if (err?.code === 11000) {
         return { ok: true, ignored: true, reason: "duplicate_event", eventId: event.id };
@@ -678,12 +921,28 @@ export const processStripeWebhookEvent = async (event) => {
     }
   }
 
+  let dispatched = false;
   try {
-    return await dispatchStripeEvent(event);
-  } catch (err) {
-    // Do not poison the idempotency ledger: a failed handler must be
-    // retryable when Stripe redelivers the event.
+    const result = await dispatchStripeEvent(event);
+    dispatched = true;
     if (event.id) {
+      await StripeWebhookEvent.updateOne(
+        { eventId: event.id },
+        {
+          $set: {
+            status: "PROCESSED",
+            result,
+            processedAt: new Date(),
+          },
+        }
+      );
+    }
+    return result;
+  } catch (err) {
+    // A failed handler must be retryable. If only the final ledger update
+    // failed, keep the claim: business side effects already completed and
+    // replaying them would violate webhook idempotency.
+    if (event.id && !dispatched) {
       await StripeWebhookEvent.deleteOne({ eventId: event.id });
     }
     throw err;

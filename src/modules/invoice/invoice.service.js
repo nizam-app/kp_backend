@@ -258,6 +258,12 @@ const toInvoiceDetail = (invoice) => {
     status: invoice.payment?.status || "PENDING",
     stripePaymentIntentId: invoice.payment?.stripePaymentIntentId || null,
     stripePaymentMethodId: invoice.payment?.stripePaymentMethodId || null,
+    stripeChargeId: invoice.payment?.stripeChargeId || null,
+    stripeTransferId: invoice.payment?.stripeTransferId || null,
+    transferStatus: invoice.payment?.transferStatus || null,
+    transferFailureCode: invoice.payment?.transferFailureCode || null,
+    transferFailureMessage: invoice.payment?.transferFailureMessage || null,
+    transferUpdatedAt: invoice.payment?.transferUpdatedAt || null,
     lastError: invoice.payment?.lastError || null,
     authorizedAmount: invoice.payment?.authorizedAmount ?? null,
     capturedAmount: invoice.payment?.capturedAmount ?? null,
@@ -286,9 +292,16 @@ const ensureInvoiceAccess = (invoice, user) => {
   const relatedMechanicId = toObjectIdString(
     invoice.mechanic?._id || invoice.mechanic
   );
+  const relatedCompanyId = toObjectIdString(
+    invoice.company?._id || invoice.company
+  );
   const userId = toObjectIdString(user._id);
 
-  if (userId === relatedFleetId || userId === relatedMechanicId) return;
+  if (
+    userId === relatedFleetId ||
+    userId === relatedMechanicId ||
+    userId === relatedCompanyId
+  ) return;
 
   if (user.role === ROLES.COMPANY) {
     const assignedCompanyId = toObjectIdString(invoice.job?.assignedCompany);
@@ -308,7 +321,7 @@ export const listInvoices = async (user, query = {}) => {
   if (user.role === "MECHANIC") filter.mechanic = user._id;
   if (user.role === ROLES.COMPANY) {
     const assignedJobIds = await Job.distinct("_id", { assignedCompany: user._id });
-    filter.job = { $in: assignedJobIds };
+    filter.$or = [{ company: user._id }, { job: { $in: assignedJobIds } }];
   }
   if (query.status) filter.status = `${query.status}`.trim().toUpperCase();
   if (query.job) {
@@ -319,6 +332,7 @@ export const listInvoices = async (user, query = {}) => {
           _id: jobId,
           assignedCompany: user._id,
         });
+        delete filter.$or;
         filter.job = hasAccess ? jobId : { $in: [] };
       } else {
         filter.job = jobId;

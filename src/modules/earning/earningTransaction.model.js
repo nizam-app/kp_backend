@@ -4,7 +4,9 @@ const { Schema, model } = mongoose;
 
 const earningTransactionSchema = new Schema(
   {
-    mechanic: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
+    /** Payout owner: exactly one of company/mechanic. */
+    company: { type: Schema.Types.ObjectId, ref: "User", index: true },
+    mechanic: { type: Schema.Types.ObjectId, ref: "User", index: true },
     job: { type: Schema.Types.ObjectId, ref: "Job", required: true, index: true },
     quote: { type: Schema.Types.ObjectId, ref: "Quote" },
     invoice: { type: Schema.Types.ObjectId, ref: "Invoice", index: true },
@@ -28,6 +30,12 @@ const earningTransactionSchema = new Schema(
 );
 
 earningTransactionSchema.pre("validate", function validateSignedAmounts() {
+  if (Boolean(this.company) === Boolean(this.mechanic)) {
+    this.invalidate(
+      "company",
+      "Earning transaction must credit exactly one company or independent mechanic"
+    );
+  }
   if (
     this.type !== "ADJUSTMENT" &&
     [this.grossAmount, this.platformFee, this.netAmount].some(
@@ -42,12 +50,24 @@ earningTransactionSchema.pre("validate", function validateSignedAmounts() {
 });
 
 earningTransactionSchema.index({ mechanic: 1, paidAt: -1 });
+earningTransactionSchema.index({ company: 1, paidAt: -1 });
 earningTransactionSchema.index(
   { job: 1, mechanic: 1 },
   {
     unique: true,
     partialFilterExpression: { type: "JOB_PAYMENT" },
     name: "uniq_job_payment_per_mechanic",
+  }
+);
+earningTransactionSchema.index(
+  { job: 1, company: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      type: "JOB_PAYMENT",
+      company: { $type: "objectId" },
+    },
+    name: "uniq_job_payment_per_company",
   }
 );
 earningTransactionSchema.index(
