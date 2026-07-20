@@ -21,6 +21,10 @@ import {
   quoteSummaryLineForDisplay,
   resolveQuoteDisplayLifecycle,
 } from "../../utils/quoteDisplayLifecycle.js";
+import {
+  getProviderRateProfile,
+  resolveBillingRates,
+} from "../../utils/providerRates.js";
 
 const now = () => new Date();
 const sessionOptions = (session) => (session ? { session } : {});
@@ -77,17 +81,12 @@ const buildQuotePricingSnapshot = (payload, job, provider) => {
   const raw = payload?.pricing;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
 
-  const profile =
-    provider.role === ROLES.COMPANY
-      ? provider.companyProfile || {}
-      : provider.mechanicProfile || {};
-  const standardRate = Number(profile.hourlyRate);
-  const emergencyRate = Number(profile.emergencyRate);
+  const profile = getProviderRateProfile(provider);
   const isEmergency = job.mode === "EMERGENCY";
-  const hourlyRate =
-    isEmergency && Number.isFinite(emergencyRate) && emergencyRate > 0
-      ? emergencyRate
-      : standardRate;
+  const { hourlyRate, callOutFee, rateType } = resolveBillingRates({
+    profile,
+    jobMode: job.mode,
+  });
   if (!Number.isFinite(hourlyRate) || hourlyRate <= 0) {
     throw new AppError(
       `Set a valid ${isEmergency ? "emergency or hourly" : "hourly"} rate in your profile before quoting`,
@@ -103,7 +102,6 @@ const buildQuotePricingSnapshot = (payload, job, provider) => {
   ) {
     throw new AppError("Estimated labour hours must be between 0 and 999", 400);
   }
-  const callOutFee = money2(profile.callOutFee);
   if (!Number.isFinite(callOutFee) || callOutFee < 0) {
     throw new AppError("Set a valid call-out fee in your profile before quoting", 400);
   }
@@ -140,11 +138,11 @@ const buildQuotePricingSnapshot = (payload, job, provider) => {
   }
 
   return {
-    rateType: isEmergency ? "EMERGENCY" : "STANDARD",
+    rateType,
     hourlyRate: money2(hourlyRate),
     estimatedLabourHours,
     labourTotal,
-    callOutFee,
+    callOutFee: money2(callOutFee),
     parts,
     partsTotal,
     subtotal,

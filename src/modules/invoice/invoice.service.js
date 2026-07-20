@@ -255,6 +255,7 @@ const toInvoiceDetail = (invoice) => {
   },
   payment: {
     provider: invoice.payment?.provider || "MANUAL",
+    mode: invoice.payment?.mode || null,
     status: invoice.payment?.status || "PENDING",
     stripePaymentIntentId: invoice.payment?.stripePaymentIntentId || null,
     stripePaymentMethodId: invoice.payment?.stripePaymentMethodId || null,

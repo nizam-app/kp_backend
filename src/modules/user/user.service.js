@@ -12,6 +12,10 @@ import { Review } from "../review/review.model.js";
 import { Vehicle } from "../vehicle/vehicle.model.js";
 import { Notification } from "../notification/notification.model.js";
 import { DeviceToken } from "../notification/deviceToken.model.js";
+import {
+  applyCompanyRatesToMechanicProfile,
+  payloadContainsCompanyControlledRates,
+} from "../../utils/providerRates.js";
 
 const SELF_DELETE_ROLES = [
   ROLES.FLEET,
@@ -380,19 +384,29 @@ const buildCompanyCompletion = (user, defaultPaymentMethod) => {
   };
 };
 
-const buildMechanicCompletion = (user, defaultPaymentMethod) => {
+const buildMechanicCompletion = (user, defaultPaymentMethod, companyRateProfile = null) => {
   const mechanicProfile = user.mechanicProfile || {};
+  const isEmployee = user.role === ROLES.MECHANIC_EMPLOYEE;
+  const rateProfile =
+    isEmployee && companyRateProfile
+      ? companyRateProfile
+      : mechanicProfile;
   const identityComplete = Boolean(
     mechanicProfile.displayName && mechanicProfile.phone && user.email
   );
-  // `emergencyRate` is not always collected at signup; hourly + coverage + call-out are enough
-  // for ops. Clients may derive a display emergency rate from hourly when absent.
-  const ratesCoverageComplete = Boolean(
-    Number.isFinite(mechanicProfile.hourlyRate) &&
-      Number.isFinite(mechanicProfile.callOutFee) &&
-      Number.isFinite(mechanicProfile.serviceRadiusMiles) &&
-      mechanicProfile.baseLocationText
-  );
+  // Employees cannot set rates — company profile is the source of truth.
+  // Coverage (radius + base location) remains their responsibility.
+  const ratesCoverageComplete = isEmployee
+    ? Boolean(
+        Number.isFinite(mechanicProfile.serviceRadiusMiles) &&
+          mechanicProfile.baseLocationText
+      )
+    : Boolean(
+        Number.isFinite(mechanicProfile.hourlyRate) &&
+          Number.isFinite(mechanicProfile.callOutFee) &&
+          Number.isFinite(mechanicProfile.serviceRadiusMiles) &&
+          mechanicProfile.baseLocationText
+      );
   const profileBankComplete = Boolean(
     mechanicProfile.bankDisplayName &&
       mechanicProfile.bankAccountMasked &&
@@ -416,23 +430,23 @@ const buildMechanicCompletion = (user, defaultPaymentMethod) => {
     },
     {
       key: "ratesCoverage",
-      label: "Rates & Coverage",
+      label: isEmployee ? "Coverage" : "Rates & Coverage",
       complete: ratesCoverageComplete,
       entries: [
         completionEntry(
           "hourlyRate",
           "Hourly rate",
-          finiteNumOrNull(mechanicProfile.hourlyRate)
+          finiteNumOrNull(rateProfile.hourlyRate)
         ),
         completionEntry(
           "emergencyRate",
           "Emergency rate",
-          finiteNumOrNull(mechanicProfile.emergencyRate)
+          finiteNumOrNull(rateProfile.emergencyRate)
         ),
         completionEntry(
           "callOutFee",
           "Call-out fee",
-          finiteNumOrNull(mechanicProfile.callOutFee)
+          finiteNumOrNull(rateProfile.callOutFee)
         ),
         completionEntry(
           "serviceRadiusMiles",
@@ -445,7 +459,11 @@ const buildMechanicCompletion = (user, defaultPaymentMethod) => {
           mechanicProfile.baseLocationText
         ),
         completionEntry("basePostcode", "Base postcode", mechanicProfile.basePostcode),
-        completionEntry("rateCurrency", "Rate currency", mechanicProfile.rateCurrency),
+        completionEntry(
+          "rateCurrency",
+          "Rate currency",
+          rateProfile.rateCurrency || mechanicProfile.rateCurrency
+        ),
       ],
     },
     {
@@ -493,9 +511,26 @@ export const getProfileCompletionSummary = async (user) => {
   }
 
   if (user.role === "MECHANIC" || user.role === "MECHANIC_EMPLOYEE") {
+    let companyRateProfile = null;
+    if (
+      user.role === ROLES.MECHANIC_EMPLOYEE &&
+      user.companyMembership?.company
+    ) {
+      const company = await User.findById(user.companyMembership.company)
+        .select(
+          "companyProfile.hourlyRate companyProfile.emergencyRate companyProfile.callOutFee companyProfile.rateCurrency"
+        )
+        .lean();
+      companyRateProfile = company?.companyProfile || null;
+    }
     return {
       defaultPaymentMethod,
-      profileCompletion: buildMechanicCompletion(user, defaultPaymentMethod),
+      profileCompletion: buildMechanicCompletion(
+        user,
+        defaultPaymentMethod,
+        companyRateProfile
+      ),
+      companyRateProfile,
     };
   }
 
@@ -644,7 +679,9 @@ const buildMechanicEmploymentSummary = async (user) => {
   }
 
   const company = await User.findById(companyId)
-    .select("companyProfile.companyName companyProfile.contactName companyProfile.phone")
+    .select(
+      "companyProfile.companyName companyProfile.contactName companyProfile.phone companyProfile.hourlyRate companyProfile.emergencyRate companyProfile.callOutFee companyProfile.rateCurrency"
+    )
     .lean();
 
   return {
@@ -658,11 +695,18 @@ const buildMechanicEmploymentSummary = async (user) => {
     employeeDisplayRef: membership.employeeDisplayRef || null,
     joinedAt: membership.joinedAt || null,
     status: membership.status || null,
+    rates: {
+      hourlyRate: company?.companyProfile?.hourlyRate ?? null,
+      emergencyRate: company?.companyProfile?.emergencyRate ?? null,
+      callOutFee: company?.companyProfile?.callOutFee ?? null,
+      rateCurrency: company?.companyProfile?.rateCurrency || "GBP",
+      controlledByCompany: true,
+    },
   };
 };
 
 const buildProfileResponse = async (user) => {
-  const { defaultPaymentMethod, profileCompletion } =
+  const { defaultPaymentMethod, profileCompletion, companyRateProfile } =
     await getProfileCompletionSummary(user);
 
   const base = user.toObject();
@@ -777,6 +821,12 @@ const buildProfileResponse = async (user) => {
     const vatNum = `${mp.vatNumber || ""}`.trim();
     mp.vatNumber = vatNum || null;
     mp.vatRegistered = mp.vatRegistered === true;
+    if (base.role === ROLES.MECHANIC_EMPLOYEE && companyRateProfile) {
+      Object.assign(
+        mp,
+        applyCompanyRatesToMechanicProfile(mp, companyRateProfile)
+      );
+    }
     response.mechanicProfile = mp;
     const { start: weekStart, end: weekEndExclusive } = getMechanicCalendarWeekBounds();
     const [jobsThisWeek, jobsDoneLive] = await Promise.all([
@@ -992,17 +1042,18 @@ export const updateOwnProfile = async (user, payload) => {
   }
 
   if (user.role === "MECHANIC_EMPLOYEE") {
+    if (payloadContainsCompanyControlledRates(payload)) {
+      throw new AppError(
+        "Company employees cannot update hourly, emergency, or call-out rates. These are controlled by your company.",
+        403
+      );
+    }
+
     let patch = filterObject(payload, [
       "displayName",
       "phone",
       "baseLocationText",
       "basePostcode",
-      "hourlyRate",
-      "emergencyRate",
-      "emergencySurcharge",
-      "callOutFee",
-      "callOutCharge",
-      "rateCurrency",
       "serviceRadiusMiles",
       "coverageRadius",
       "skills",
@@ -1026,7 +1077,6 @@ export const updateOwnProfile = async (user, payload) => {
 
     const normalizedPatch = {
       ...patch,
-      callOutFee: patch.callOutCharge ?? patch.callOutFee,
       serviceRadiusMiles: patch.coverageRadius ?? patch.serviceRadiusMiles,
     };
 
@@ -1034,7 +1084,6 @@ export const updateOwnProfile = async (user, payload) => {
       normalizedPatch.lastKnownLocation = normalizePoint(payload.lastKnownLocation);
     }
 
-    delete normalizedPatch.callOutCharge;
     delete normalizedPatch.coverageRadius;
 
     user.mechanicProfile = {

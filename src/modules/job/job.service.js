@@ -65,6 +65,7 @@ import {
 } from "../../utils/platformFee.js";
 import { assertValidOptionalPhone } from "../../utils/phone.js";
 import { resolveQuoteDisplayLifecycle } from "../../utils/quoteDisplayLifecycle.js";
+import { resolveInvoiceCommercialRates } from "../../utils/providerRates.js";
 import {
   notifyJobCancelled,
   notifyJobCompleted,
@@ -515,6 +516,67 @@ const serializeJobCard = (job, viewer, extra = {}) => {
 const round2 = (n) => Math.round((Number(n || 0) + Number.EPSILON) * 100) / 100;
 
 /**
+ * Lock invoice call-out / labour £/hr to accepted quote snapshot, else live
+ * company/independent provider profile rates. Hours and parts stay client-driven.
+ */
+const lockInvoiceRatesFromCommercialSource = async (job, inv) => {
+  if (!inv || typeof inv !== "object" || Array.isArray(inv)) return inv;
+
+  let acceptedQuotePricing = null;
+  if (job.acceptedQuote) {
+    const acceptedQuote = await Quote.findById(job.acceptedQuote)
+      .select("pricing")
+      .lean();
+    acceptedQuotePricing = acceptedQuote?.pricing || null;
+  }
+
+  const provider =
+    job.assignedCompany ||
+    (job.assignedMechanic
+      ? job.assignedMechanic
+      : null);
+
+  // Prefer populated company document; fall back to loading company profile when only an id is set.
+  let resolvedProvider = provider;
+  if (
+    job.assignedCompany &&
+    (!job.assignedCompany.companyProfile || !job.assignedCompany.role)
+  ) {
+    resolvedProvider =
+      (await User.findById(job.assignedCompany)
+        .select("role companyProfile")
+        .lean()) || provider;
+  } else if (
+    !job.assignedCompany &&
+    job.assignedMechanic &&
+    (!job.assignedMechanic.mechanicProfile || !job.assignedMechanic.role)
+  ) {
+    resolvedProvider =
+      (await User.findById(job.assignedMechanic)
+        .select("role mechanicProfile")
+        .lean()) || provider;
+  }
+
+  const rates = resolveInvoiceCommercialRates({
+    acceptedQuotePricing,
+    provider: resolvedProvider,
+    jobMode: job.mode,
+  });
+
+  if (!Number.isFinite(rates.hourlyRate) || !Number.isFinite(rates.callOutFee)) {
+    return inv;
+  }
+
+  return {
+    ...inv,
+    callOutCharge: rates.callOutFee,
+    callOutFee: rates.callOutFee,
+    labourRatePerHour: rates.hourlyRate,
+    hourlyRate: rates.hourlyRate,
+  };
+};
+
+/**
  * Company "Review invoice" breakdown → invoice line items + subtotal (ex VAT).
  * Supports nested `payload.invoice`. Server totals lines; optional `totalAmount` is verified.
  */
@@ -615,6 +677,35 @@ const maskCardLabel = (method) => {
   return `${brand} •••• ${last4}`;
 };
 
+/** Fleet approval payment modes accepted on PATCH …/complete/approve. */
+const APPROVAL_PAYMENT_MODES = Object.freeze({
+  CARD: "CARD",
+  HAND_CASH: "HAND_CASH",
+});
+
+const normalizeApprovalPaymentMode = (raw) => {
+  const value = `${raw || ""}`.trim().toUpperCase();
+  if (!value) {
+    return APPROVAL_PAYMENT_MODES.CARD;
+  }
+  if (
+    value !== APPROVAL_PAYMENT_MODES.CARD &&
+    value !== APPROVAL_PAYMENT_MODES.HAND_CASH
+  ) {
+    throw new AppError(
+      `paymentMode must be one of ${Object.values(APPROVAL_PAYMENT_MODES).join(", ")}`,
+      400
+    );
+  }
+  return value;
+};
+
+const resolveFleetPaymentMethodLabel = ({ defaultPaymentMethod, invoice = null }) => {
+  const mode = `${invoice?.payment?.mode || ""}`.toUpperCase();
+  if (mode === APPROVAL_PAYMENT_MODES.HAND_CASH) return "Hand Cash";
+  return defaultPaymentMethod ? maskCardLabel(defaultPaymentMethod) : null;
+};
+
 const computeFleetPaymentBox = ({ job, defaultPaymentMethod, invoice = null }) => {
   const originalQuoteAmount = Number(job.acceptedAmount ?? 0) || 0;
   const isSettled =
@@ -687,7 +778,8 @@ const computeFleetPaymentBox = ({ job, defaultPaymentMethod, invoice = null }) =
     vatApplied,
     vatRate,
     vatAmount: billExVat > 0 ? vatAmount : null,
-    cardLabel: defaultPaymentMethod ? maskCardLabel(defaultPaymentMethod) : null,
+    cardLabel: resolveFleetPaymentMethodLabel({ defaultPaymentMethod, invoice }),
+    paymentMode: `${invoice?.payment?.mode || ""}`.toUpperCase() || null,
     cardExpMonth: defaultPaymentMethod?.card?.expMonth ?? null,
     cardExpYear: defaultPaymentMethod?.card?.expYear ?? null,
     finalAmount: Number(job.finalAmount ?? billExVat ?? 0) || null,
@@ -1024,6 +1116,7 @@ const buildJobApprovalPaymentContext = async ({
 
   return {
     provider: "STRIPE",
+    paymentMode: APPROVAL_PAYMENT_MODES.CARD,
     invoiceStatus: mapped.invoiceStatus,
     paymentStatus: mapped.paymentStatus,
     stripeCustomerId,
@@ -1035,6 +1128,66 @@ const buildJobApprovalPaymentContext = async ({
       : paymentIntent.last_payment_error?.message || null,
     paidAt: mapped.paid ? new Date() : undefined,
     ...moneyMeta,
+  };
+};
+
+/**
+ * Offline Hand Cash approval — no Stripe PaymentIntent, Connect charge, or application fee.
+ * Reuses the same money totals as card approval for invoice/earnings consistency.
+ */
+const buildHandCashApprovalPaymentContext = ({
+  job,
+  billExVat: billExVatInput = null,
+  lineItems = null,
+  approvalRequestId: approvalRequestIdInput,
+}) => {
+  const approvalRequestId = normalizeApprovalRequestId(approvalRequestIdInput);
+  if (!approvalRequestId) {
+    throw new AppError(
+      "approvalAttemptId must be 8-128 letters, numbers, underscores, or hyphens",
+      400
+    );
+  }
+
+  const subtotal =
+    billExVatInput != null && Number.isFinite(Number(billExVatInput)) && Number(billExVatInput) > 0
+      ? round2(Number(billExVatInput))
+      : resolveApprovalBillExVat(job, lineItems);
+  if (!(subtotal > 0)) {
+    throw new AppError(
+      "Cannot approve: completion amount is missing. Mechanic must submit finalAmount / invoice lines first.",
+      400
+    );
+  }
+
+  const vat = calculateJobVat(job, subtotal);
+  const feePercent = getPlatformFeePercent();
+  const platformFee = computePlatformFee(subtotal, feePercent);
+  const earningNetAmount = Math.max(round2(subtotal - platformFee), 0);
+  const chargeTotal = vat.totalAmount;
+
+  return {
+    provider: "MANUAL",
+    paymentMode: APPROVAL_PAYMENT_MODES.HAND_CASH,
+    invoiceStatus: "PAID",
+    paymentStatus: "SUCCEEDED",
+    paidAt: new Date(),
+    approvalRequestId,
+    billExVat: subtotal,
+    chargeTotal,
+    vatAmount: vat.vatAmount,
+    vatRate: vat.vatRate,
+    vatApplied: vat.vatRegistered,
+    platformFee,
+    platformFeePercent: feePercent,
+    recipientNetAmount: earningNetAmount,
+    mechanicNetAmount: earningNetAmount,
+    // Explicitly omit Stripe identifiers for cash settlements.
+    stripeCustomerId: undefined,
+    stripePaymentMethodId: undefined,
+    stripePaymentIntentId: undefined,
+    stripeClientSecret: null,
+    lastError: null,
   };
 };
 
@@ -1615,28 +1768,23 @@ const serializeJobDetail = async (job, viewer) => {
     ? await buildSubmittedWorkForDetail(job, invoiceDoc, statusTimes)
     : null;
   const completionPhotoSet = new Set(job.completionPhotos || []);
-  const providerProfile =
-    job.assignedCompany?.companyProfile ||
-    job.assignedMechanic?.mechanicProfile ||
-    {};
-  const isEmergency = job.mode === "EMERGENCY";
-  const fallbackHourlyRate =
-    isEmergency && Number(providerProfile.emergencyRate) > 0
-      ? Number(providerProfile.emergencyRate)
-      : Number(providerProfile.hourlyRate);
+  const provider =
+    job.assignedCompany || job.assignedMechanic || null;
+  const commercialRates = resolveInvoiceCommercialRates({
+    acceptedQuotePricing: acceptedQuote?.pricing,
+    provider,
+    jobMode: job.mode,
+  });
   const commercialTerms =
     canViewSubmittedWork &&
-    (acceptedQuote?.pricing || Number.isFinite(fallbackHourlyRate))
+    (acceptedQuote?.pricing ||
+      Number.isFinite(commercialRates.hourlyRate) ||
+      Number.isFinite(commercialRates.callOutFee))
       ? {
-          source: acceptedQuote?.pricing ? "QUOTE_SNAPSHOT" : "PROFILE_FALLBACK",
-          rateType:
-            acceptedQuote?.pricing?.rateType ||
-            (isEmergency ? "EMERGENCY" : "STANDARD"),
-          hourlyRate:
-            acceptedQuote?.pricing?.hourlyRate || fallbackHourlyRate || null,
-          callOutFee:
-            acceptedQuote?.pricing?.callOutFee ??
-            Number(providerProfile.callOutFee || 0),
+          source: commercialRates.source,
+          rateType: commercialRates.rateType,
+          hourlyRate: commercialRates.hourlyRate,
+          callOutFee: commercialRates.callOutFee ?? 0,
           estimatedLabourHours:
             acceptedQuote?.pricing?.estimatedLabourHours ?? null,
           labourTotal: acceptedQuote?.pricing?.labourTotal ?? null,
@@ -1734,6 +1882,7 @@ const serializeJobDetail = async (job, viewer) => {
           payment: invoiceDoc.payment
             ? {
                 provider: invoiceDoc.payment.provider,
+                mode: invoiceDoc.payment.mode || null,
                 status: invoiceDoc.payment.status,
                 stripePaymentIntentId: invoiceDoc.payment.stripePaymentIntentId,
                 disputeStatus: invoiceDoc.payment.disputeStatus,
@@ -2141,10 +2290,24 @@ const upsertFinancialRecordsForCompletedJob = async (job, paymentContext = {}) =
       },
       payment: {
         provider: paymentContext.provider || "MANUAL",
+        mode:
+          paymentContext.paymentMode ||
+          (paymentContext.provider === "STRIPE"
+            ? APPROVAL_PAYMENT_MODES.CARD
+            : undefined),
         status: paymentStatus,
-        stripeCustomerId: paymentContext.stripeCustomerId,
-        stripePaymentMethodId: paymentContext.stripePaymentMethodId,
-        stripePaymentIntentId: paymentContext.stripePaymentIntentId,
+        stripeCustomerId:
+          paymentContext.paymentMode === APPROVAL_PAYMENT_MODES.HAND_CASH
+            ? undefined
+            : paymentContext.stripeCustomerId,
+        stripePaymentMethodId:
+          paymentContext.paymentMode === APPROVAL_PAYMENT_MODES.HAND_CASH
+            ? undefined
+            : paymentContext.stripePaymentMethodId,
+        stripePaymentIntentId:
+          paymentContext.paymentMode === APPROVAL_PAYMENT_MODES.HAND_CASH
+            ? undefined
+            : paymentContext.stripePaymentIntentId,
         lastError: paymentContext.lastError,
         authorizedAmount: totalAmount,
         capturedAmount: invoiceStatus === "PAID" ? totalAmount : undefined,
@@ -2205,17 +2368,33 @@ const upsertFinancialRecordsForCompletedJob = async (job, paymentContext = {}) =
             job.paymentNextReminderAt ||
             new Date(Date.now() + 60 * 60 * 1000),
     };
+    const isHandCash =
+      paymentContext.paymentMode === APPROVAL_PAYMENT_MODES.HAND_CASH;
     invoice.payment = {
       ...(invoice.payment || {}),
       provider: paymentContext.provider || invoice.payment?.provider || "MANUAL",
+      mode:
+        paymentContext.paymentMode ||
+        invoice.payment?.mode ||
+        (paymentContext.provider === "STRIPE" ||
+        (paymentContext.provider || invoice.payment?.provider) === "STRIPE"
+          ? APPROVAL_PAYMENT_MODES.CARD
+          : invoice.payment?.mode),
       status: paymentStatus,
-      stripeCustomerId:
-        paymentContext.stripeCustomerId || invoice.payment?.stripeCustomerId,
-      stripePaymentMethodId:
-        paymentContext.stripePaymentMethodId || invoice.payment?.stripePaymentMethodId,
-      stripePaymentIntentId:
-        paymentContext.stripePaymentIntentId || invoice.payment?.stripePaymentIntentId,
-      lastError: paymentContext.lastError || invoice.payment?.lastError,
+      stripeCustomerId: isHandCash
+        ? null
+        : paymentContext.stripeCustomerId || invoice.payment?.stripeCustomerId,
+      stripePaymentMethodId: isHandCash
+        ? null
+        : paymentContext.stripePaymentMethodId ||
+          invoice.payment?.stripePaymentMethodId,
+      stripePaymentIntentId: isHandCash
+        ? null
+        : paymentContext.stripePaymentIntentId ||
+          invoice.payment?.stripePaymentIntentId,
+      lastError: isHandCash
+        ? null
+        : paymentContext.lastError || invoice.payment?.lastError,
       authorizedAmount: totalAmount,
       capturedAmount: invoiceStatus === "PAID" ? totalAmount : undefined,
       updatedAt: new Date(),
@@ -2306,6 +2485,7 @@ const finalizeApprovedJobCompletion = async ({
     payload: {
       invoiceId: financials.invoice?._id,
       paymentProvider: paymentContext.provider,
+      paymentMode: paymentContext.paymentMode || null,
       paymentStatus: paymentContext.paymentStatus,
       stripePaymentIntentId: paymentContext.stripePaymentIntentId,
       ...eventExtras,
@@ -3287,17 +3467,8 @@ export const completeJobWork = async (jobId, mechanicUser, payload = {}) => {
   }
 
   let inv = payload.invoice;
-  if (inv && typeof inv === "object" && !Array.isArray(inv) && job.acceptedQuote) {
-    const acceptedQuote = await Quote.findById(job.acceptedQuote)
-      .select("pricing")
-      .lean();
-    if (acceptedQuote?.pricing) {
-      inv = {
-        ...inv,
-        callOutCharge: acceptedQuote.pricing.callOutFee,
-        labourRatePerHour: acceptedQuote.pricing.hourlyRate,
-      };
-    }
+  if (inv && typeof inv === "object" && !Array.isArray(inv)) {
+    inv = await lockInvoiceRatesFromCommercialSource(job, inv);
   }
   let invoiceBreakdown = null;
   let resolvedFinal;
@@ -3467,6 +3638,32 @@ export const approveJobCompletion = async (jobId, fleetUser, payload = {}) => {
 
   const lockToken = await acquireApprovalPaymentLock(job._id);
   try {
+    const paymentMode = normalizeApprovalPaymentMode(payload.paymentMode);
+
+    if (paymentMode === APPROVAL_PAYMENT_MODES.HAND_CASH) {
+      const paymentContext = {
+        ...buildHandCashApprovalPaymentContext({
+          job,
+          billExVat,
+          lineItems: completionLines,
+          approvalRequestId: payload.approvalAttemptId,
+        }),
+        billExVat,
+        ...(completionLines?.length ? { lineItems: completionLines } : {}),
+      };
+
+      return await settleApprovalPayment({
+        job,
+        fromStatus,
+        actorUser: fleetUser,
+        paymentContext,
+        eventExtras: {
+          paymentMode: APPROVAL_PAYMENT_MODES.HAND_CASH,
+          paymentProvider: "MANUAL",
+        },
+      });
+    }
+
     const paymentContext = {
       ...(await buildJobApprovalPaymentContext({
         job,
@@ -3485,7 +3682,10 @@ export const approveJobCompletion = async (jobId, fleetUser, payload = {}) => {
       fromStatus,
       actorUser: fleetUser,
       paymentContext,
-      eventExtras: { paymentMethodId: payload.paymentMethodId },
+      eventExtras: {
+        paymentMethodId: payload.paymentMethodId,
+        paymentMode: APPROVAL_PAYMENT_MODES.CARD,
+      },
     });
   } catch (err) {
     await releaseApprovalPaymentLock(job._id, lockToken);
@@ -3531,7 +3731,15 @@ export const approveJobCompletionAsCompany = async (jobId, companyUser, payload 
 
   const fromStatus = job.status;
   const acceptedAmountSnapshot = job.acceptedAmount;
-  const breakdown = buildLineItemsFromCompanyInvoicePayload(payload, job);
+  let approvalPayload = payload;
+  if (payload?.invoice && typeof payload.invoice === "object" && !Array.isArray(payload.invoice)) {
+    const lockedInvoice = await lockInvoiceRatesFromCommercialSource(
+      job,
+      payload.invoice
+    );
+    approvalPayload = { ...payload, invoice: lockedInvoice };
+  }
+  const breakdown = buildLineItemsFromCompanyInvoicePayload(approvalPayload, job);
   const completionLines =
     breakdown?.lineItems || (await resolveCompletionInvoiceLineItems(job));
 

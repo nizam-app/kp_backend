@@ -210,6 +210,14 @@ export const registerUser = async (payload = {}) => {
     }
   );
 
+  // Company employees cannot set billing rates — employer companyProfile owns them.
+  if (role === ROLES.MECHANIC_EMPLOYEE && profileFields.mechanicProfile) {
+    delete profileFields.mechanicProfile.hourlyRate;
+    delete profileFields.mechanicProfile.emergencyRate;
+    delete profileFields.mechanicProfile.emergencySurcharge;
+    delete profileFields.mechanicProfile.callOutFee;
+  }
+
   const user = await User.create({
     email,
     password,

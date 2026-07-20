@@ -60,6 +60,12 @@ const invoiceSchema = new Schema(
     },
     payment: {
       provider: { type: String, trim: true, default: "MANUAL" },
+      /** How the fleet settled approval: CARD (Stripe) or HAND_CASH (offline). */
+      mode: {
+        type: String,
+        enum: ["CARD", "HAND_CASH"],
+        trim: true,
+      },
       status: {
         type: String,
         enum: [
