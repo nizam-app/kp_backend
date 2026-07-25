@@ -25,9 +25,34 @@ import {
   getProviderRateProfile,
   resolveBillingRates,
 } from "../../utils/providerRates.js";
+import {
+  assertProviderCanQuote,
+  getProviderQuoteReadiness,
+} from "../user/providerReadiness.service.js";
 
 const now = () => new Date();
 const sessionOptions = (session) => (session ? { session } : {});
+
+/** Prefer company payee when present; otherwise the quoting mechanic. */
+const resolveQuoteProviderUser = (quote) => {
+  const company = quote?.company;
+  const mechanic = quote?.mechanic;
+  if (company && typeof company === "object" && company._id) {
+    return {
+      ...company,
+      role: company.role || ROLES.COMPANY,
+    };
+  }
+  if (mechanic && typeof mechanic === "object" && mechanic._id) {
+    return mechanic;
+  }
+  return null;
+};
+
+const toFleetProviderReadiness = (readiness) => ({
+  ready: Boolean(readiness?.ready),
+  blockers: Array.isArray(readiness?.blockers) ? readiness.blockers : [],
+});
 
 const diffMinutesFromNow = (value) => {
   if (!value) return null;
@@ -399,10 +424,11 @@ const baseQuotePopulate = (query) =>
       // Whole subdocuments — avoid dot-notation select, which often drops sibling keys in populated lean docs.
       select: "email role mechanicProfile companyProfile",
     })
-    .populate(
-      "company",
-      "email role companyProfile.companyName companyProfile.contactName companyProfile.phone companyProfile.contactRole companyProfile.profilePhotoUrl companyProfile.vatRegistered"
-    )
+    .populate({
+      path: "company",
+      // Whole companyProfile so Fleet quote-list can compute local payout readiness.
+      select: "email role companyProfile",
+    })
     .populate({
       path: "submittedBy",
       select: "email role mechanicProfile companyProfile",
@@ -539,6 +565,8 @@ export const submitQuote = async (jobId, payload, mechanicUser) => {
     throw new AppError("Only mechanics or companies can submit quotes", 403);
   }
 
+  await assertProviderCanQuote(mechanicUser);
+
   jobId = await resolveJobRef(jobId);
   const job = await Job.findById(jobId);
   if (!job) throw new AppError("Job not found", 404);
@@ -615,7 +643,26 @@ export const listJobQuotes = async (jobId, fleetUser) => {
     Quote.find({ job: jobId }).sort({ amount: 1, createdAt: -1 })
   ).lean();
   await mergeQuoteActorsProfileExtrasFromDb(quotes);
-  return quotes.map(serializeQuote);
+
+  const readinessByProviderId = new Map();
+  const serialized = [];
+  for (const quote of quotes) {
+    const row = serializeQuote(quote);
+    const provider = resolveQuoteProviderUser(quote);
+    let providerReadiness = { ready: true, blockers: [] };
+    if (provider?._id) {
+      const key = provider._id.toString();
+      if (!readinessByProviderId.has(key)) {
+        const readiness = await getProviderQuoteReadiness(provider, {
+          syncIfStale: false,
+        });
+        readinessByProviderId.set(key, toFleetProviderReadiness(readiness));
+      }
+      providerReadiness = readinessByProviderId.get(key);
+    }
+    serialized.push({ ...row, providerReadiness });
+  }
+  return serialized;
 };
 
 export const getQuoteByIdForUser = async (quoteId, user) => {
@@ -707,6 +754,18 @@ export const acceptQuote = async (quoteId, fleetUser) => {
     if (quote.status !== QUOTE_STATUS.WAITING) {
       throw new AppError("Only waiting quotes can be accepted", 400);
     }
+
+    const providerId = quote.company || quote.mechanic;
+    const provider = await User.findById(providerId, null, sessionOptions(session));
+    if (!provider) {
+      throw new AppError("Quote provider not found", 404);
+    }
+    // Flag-gated; when enforcement is off this returns immediately.
+    // Must run before any quote/job mutation so a failure leaves the quote WAITING.
+    await assertProviderCanQuote(provider, {
+      audience: "fleet",
+      syncIfStale: true,
+    });
 
     const acceptedQuote = await Quote.findOneAndUpdate(
       { _id: quote._id, status: QUOTE_STATUS.WAITING },
@@ -851,6 +910,9 @@ export const amendQuote = async (quoteId, payload, mechanicUser) => {
   if (!ownsQuote) {
     throw new AppError("Forbidden", 403);
   }
+
+  await assertProviderCanQuote(mechanicUser);
+
   if (quote.status !== QUOTE_STATUS.WAITING) {
     throw new AppError("Only waiting quotes can be amended", 400);
   }

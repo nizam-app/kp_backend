@@ -816,6 +816,15 @@ const buildProfileResponse = async (user) => {
 
   if (profileCompletion) response.profileCompletion = profileCompletion;
 
+  // Additive payout readiness for independent mechanics and companies only.
+  // Local flags only — no Stripe sync on /users/me (avoids latency + circular sync cost).
+  if (base.role === ROLES.MECHANIC || base.role === ROLES.COMPANY) {
+    const { buildLocalPayoutReadinessSummary } = await import(
+      "./providerReadiness.service.js"
+    );
+    response.payoutReadiness = buildLocalPayoutReadinessSummary(user);
+  }
+
   if (base.role === "MECHANIC" || base.role === "MECHANIC_EMPLOYEE") {
     const mp = { ...(response.mechanicProfile || {}) };
     const vatNum = `${mp.vatNumber || ""}`.trim();

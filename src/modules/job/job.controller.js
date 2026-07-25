@@ -2,6 +2,7 @@ import path from "path";
 import { sendResponse } from "../../utils/sendResponse.js";
 import AppError from "../../utils/AppError.js";
 import { ROLES } from "../../constants/domain.js";
+import { normalizePreAuthAmountInput } from "../../utils/preAuthAmount.js";
 import { uploadJobPhotoBuffer } from "../media/media.service.js";
 import {
   addJobPhotos,
@@ -49,6 +50,10 @@ const normalizeCreateJobBody = (body = {}) => {
   if (typeof out.photos === "string") out.photos = parseJsonIfString(out.photos, "photos");
   if (typeof out.tyreDetails === "string") {
     out.tyreDetails = parseJsonIfString(out.tyreDetails, "tyreDetails");
+  }
+  // Multipart may send preAuthAmount as a string; coerce numeric strings only.
+  if (Object.prototype.hasOwnProperty.call(out, "preAuthAmount")) {
+    out.preAuthAmount = normalizePreAuthAmountInput(out.preAuthAmount);
   }
   return out;
 };

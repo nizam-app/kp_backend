@@ -60,7 +60,8 @@ export const resolvePayoutRecipient = async (job, { requireStripeReady = true } 
       `${
         expectedRole === ROLES.COMPANY ? "Company" : "Mechanic"
       } Stripe Connect onboarding must be completed before payment`,
-      409
+      409,
+      { code: "PAYOUT_SETUP_INCOMPLETE" }
     );
   }
 

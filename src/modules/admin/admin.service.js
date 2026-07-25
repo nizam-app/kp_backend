@@ -362,6 +362,7 @@ const serializeServiceRequest = (job) => {
       : null,
     amount: job.finalAmount ?? job.acceptedAmount ?? job.estimatedPayout ?? null,
     currency: job.currency || "GBP",
+    preAuthAmount: job.preAuthAmount ?? null,
     quoteCount: job.quoteCount || 0,
     postedAt: job.postedAt || job.createdAt,
     completedAt: job.completedAt || null,
@@ -4158,6 +4159,8 @@ export const getAdminSettings = async (adminUser) => {
       platformFeePercent: platform.platformFeePercent,
       standardVatRate: platform.standardVatRate,
       standardVatPercent: platform.standardVatPercent,
+      enforceProviderQuoteReadiness:
+        platform.enforceProviderQuoteReadiness === true,
       /** Payment-policy knobs — not yet enforced by workers. */
       autoReleaseHours: null,
       requireFleetApproval: true,
@@ -4284,10 +4287,18 @@ export const updateAdminSettings = async (adminUser, payload = {}) => {
       }
     }
 
+    const enforceIn = payload.platform.enforceProviderQuoteReadiness;
+    if (enforceIn !== undefined && typeof enforceIn !== "boolean") {
+      throw new AppError("enforceProviderQuoteReadiness must be a boolean", 400);
+    }
+
     await updatePlatformCommercialSettings(
       {
         ...(feeIn !== undefined ? { platformFeePercent: feeIn } : {}),
         ...(vatIn !== undefined ? { standardVatRate: vatIn } : {}),
+        ...(enforceIn !== undefined
+          ? { enforceProviderQuoteReadiness: enforceIn }
+          : {}),
       },
       adminUser
     );

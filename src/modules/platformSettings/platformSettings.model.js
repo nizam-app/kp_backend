@@ -31,6 +31,14 @@ const platformSettingsSchema = new Schema(
       max: 1,
       default: 0.2,
     },
+    /**
+     * When true, MECHANIC/COMPANY must complete profile + Stripe Connect
+     * before submitting or amending quotes. Defaults false (legacy behaviour).
+     */
+    enforceProviderQuoteReadiness: {
+      type: Boolean,
+      default: false,
+    },
     updatedBy: { type: Schema.Types.ObjectId, ref: "User" },
   },
   { timestamps: true }

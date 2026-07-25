@@ -181,6 +181,7 @@ export const emitJobPosted = (job) => {
     issueType: job.issueType || null,
     location: job.location || null,
     estimatedPayout: job.estimatedPayout ?? null,
+    preAuthAmount: job.preAuthAmount ?? null,
     createdAt: job.createdAt || new Date(),
   };
 

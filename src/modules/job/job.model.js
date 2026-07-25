@@ -174,6 +174,11 @@ const jobSchema = new Schema(
     acceptedAmount: { type: Number, min: 0 },
     estimatedPayout: { type: Number, min: 0 },
     finalAmount: { type: Number, min: 0 },
+    /**
+     * Optional Fleet Pre-Auth Budget (informational target in major currency units).
+     * Not a Stripe hold, quote cap, or payout estimate. Service enforces > 0 when set.
+     */
+    preAuthAmount: { type: Number, min: 0 },
     currency: { type: String, trim: true, default: "GBP" },
     completionSummary: { type: String, trim: true },
     /** Photos submitted by the mechanic as proof when completing the work. */

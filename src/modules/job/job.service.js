@@ -64,6 +64,10 @@ import {
   getPlatformFeePercent,
 } from "../../utils/platformFee.js";
 import { assertValidOptionalPhone } from "../../utils/phone.js";
+import {
+  assertValidOptionalPreAuthAmount,
+  serializePreAuthAmount,
+} from "../../utils/preAuthAmount.js";
 import { resolveQuoteDisplayLifecycle } from "../../utils/quoteDisplayLifecycle.js";
 import { resolveInvoiceCommercialRates } from "../../utils/providerRates.js";
 import {
@@ -429,6 +433,8 @@ const serializeJobCard = (job, viewer, extra = {}) => {
     estimatedPayout: job.estimatedPayout ?? job.acceptedAmount ?? job.finalAmount ?? null,
     acceptedAmount: job.acceptedAmount ?? null,
     finalAmount: job.finalAmount ?? null,
+    /** Fleet Pre-Auth Budget (informational). Never falls back to payout/quote amounts. */
+    preAuthAmount: serializePreAuthAmount(job),
     quoteCount: job.quoteCount || 0,
     scheduledFor: job.scheduledFor || null,
     availabilityWindow: job.availabilityWindow || null,
@@ -2526,6 +2532,7 @@ export const createJob = async (payload, fleetUser) => {
 
   const scheduling = normalizeAvailabilityWindow(payload);
   const { issueType, issueSubtype } = await resolveIssueClassification(payload);
+  const preAuthAmount = assertValidOptionalPreAuthAmount(payload.preAuthAmount);
 
   const job = await Job.create({
     jobCode: await generateJobCode(),
@@ -2559,6 +2566,7 @@ export const createJob = async (payload, fleetUser) => {
     status: JOB_STATUS.POSTED,
     postedAt: new Date(),
     estimatedPayout: payload.estimatedPayout,
+    ...(preAuthAmount !== undefined ? { preAuthAmount } : {}),
     mode: payload.mode || undefined,
     scheduledFor: scheduling.scheduledFor,
     availabilityWindow: scheduling.availabilityWindow,
@@ -2710,6 +2718,25 @@ export const updateJob = async (jobId, fleetUser, payload = {}) => {
   if (next.availabilityWindow || next.availabilityFrom || next.availabilityTo || next.scheduledFor) {
     job.scheduledFor = scheduling.scheduledFor;
     job.availabilityWindow = scheduling.availabilityWindow;
+  }
+
+  // Pre-Auth Budget: only when the key is explicitly present on the request payload.
+  // assertPostedFleetJob already ran → non-POSTED returns 400 JOB_NOT_EDITABLE first.
+  if (Object.prototype.hasOwnProperty.call(payload || {}, "preAuthAmount")) {
+    const quoteExists = await Quote.exists({ job: job._id });
+    if (quoteExists) {
+      throw new AppError(
+        "Pre-Auth Budget is locked because a quote has been submitted",
+        409,
+        { code: "PRE_AUTH_LOCKED" }
+      );
+    }
+
+    if (next.preAuthAmount === null) {
+      job.set("preAuthAmount", undefined);
+    } else {
+      job.preAuthAmount = assertValidOptionalPreAuthAmount(next.preAuthAmount);
+    }
   }
 
   await job.save();
